@@ -12,7 +12,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Callable, Iterable, Optional, Union
 
 from db import Database, DBRow, connect_database, normalize_database_url
 
@@ -291,10 +291,18 @@ def file_allowed(path: str, cfg: AppConfig) -> bool:
     return True
 
 
-def scan_and_queue(conn: Database, cfg: AppConfig) -> tuple[int, int, int]:
+def scan_and_queue(
+    conn: Database,
+    cfg: AppConfig,
+    lease_heartbeat: Optional[Callable[[], None]] = None,
+) -> tuple[int, int, int]:
     now = int(time.time())
     inserted = updated = unchanged = 0
+    last_heartbeat = time.monotonic()
     for path in iter_source_files(cfg.source_dir):
+        if lease_heartbeat and time.monotonic() - last_heartbeat >= max(5, LEASE_TTL_SECONDS // 4):
+            lease_heartbeat()
+            last_heartbeat = time.monotonic()
         if not file_allowed(path, cfg):
             continue
         try:
@@ -412,7 +420,11 @@ async def upload_one(client: TelegramClient, target, path: str, caption: str, se
     )
 
 
-def split_for_telegram(path: str, max_bytes: int = TELEGRAM_FREE_FILE_LIMIT) -> tuple[str, list[str]]:
+def split_for_telegram(
+    path: str,
+    max_bytes: int = TELEGRAM_FREE_FILE_LIMIT,
+    heartbeat: Optional[Callable[[], None]] = None,
+) -> tuple[str, list[str]]:
     """Create raw, lossless parts for a file that exceeds Telegram's free limit."""
     source = Path(path)
     total_size = source.stat().st_size
@@ -425,6 +437,7 @@ def split_for_telegram(path: str, max_bytes: int = TELEGRAM_FREE_FILE_LIMIT) -> 
 
     try:
         with source.open("rb") as source_file:
+            last_heartbeat = time.monotonic()
             for part_number in range(1, part_count + 1):
                 part_path = Path(temp_dir) / f"{source.stem}.part{part_number:0{width}d}{source.suffix}"
                 remaining = min(max_bytes, total_size - (part_number - 1) * max_bytes)
@@ -435,6 +448,9 @@ def split_for_telegram(path: str, max_bytes: int = TELEGRAM_FREE_FILE_LIMIT) -> 
                             raise OSError(f"Unexpected end of file while splitting {path}")
                         part_file.write(block)
                         remaining -= len(block)
+                        if heartbeat and time.monotonic() - last_heartbeat >= max(5, LEASE_TTL_SECONDS // 4):
+                            heartbeat()
+                            last_heartbeat = time.monotonic()
                 part_paths.append(str(part_path))
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -529,7 +545,10 @@ async def _process_row(cfg: AppConfig, conn: Database, row: DBRow, account_order
     upload_paths = [path]
     try:
         if int(row["size"]) >= TELEGRAM_FREE_FILE_LIMIT:
-            split_dir, upload_paths = split_for_telegram(path)
+            split_dir, upload_paths = split_for_telegram(
+                path,
+                heartbeat=lambda: _renew_lease_now(conn),
+            )
         last_error = "No available Telegram account"
         for runtime in account_order:
             mark_account_state(conn, runtime.config.name, "uploading")
@@ -671,6 +690,11 @@ def validate_config(cfg: AppConfig) -> None:
         _validate_allowed_roots(account.session_path, "TELEDRIVE_ALLOWED_SESSION_ROOTS")
 
 
+def _renew_lease_now(conn: Database) -> None:
+    if not conn.renew_lease(LEASE_NAME, RUN_HOLDER, int(time.time()), LEASE_TTL_SECONDS):
+        raise RuntimeError("Distributed uploader lease was lost")
+
+
 async def _lease_renewer(conn: Database, lost: asyncio.Event) -> None:
     interval = max(5, LEASE_TTL_SECONDS // 3)
     while True:
@@ -707,7 +731,11 @@ async def _run_with_distributed_lease(
     renew_task = asyncio.create_task(_lease_renewer(conn, lost))
     try:
         if not no_scan:
-            inserted, updated, unchanged = scan_and_queue(conn, cfg)
+            inserted, updated, unchanged = scan_and_queue(
+                conn,
+                cfg,
+                lease_heartbeat=lambda: _renew_lease_now(conn),
+            )
             logging.info("Scan complete. inserted=%s updated=%s unchanged=%s", inserted, updated, unchanged)
 
         if scan_only and not run_once:

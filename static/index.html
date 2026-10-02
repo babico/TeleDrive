@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TeleDrive</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2d;--panel2:#182238;--line:#25324d;--text:#e8eef8;--muted:#91a0b8;--accent:#65b4ff;--ok:#61d39c;--warn:#f6c85f;--bad:#ff7b8b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,Segoe UI,sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#0b1020e8;backdrop-filter:blur(12px);z-index:3}
+h1{font-size:20px;margin:0}.muted{color:var(--muted)}main{max-width:1400px;margin:auto;padding:24px}
+nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}.tab,.btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:9px 13px;border-radius:10px;cursor:pointer}.tab.active,.btn.primary{background:#173c63;border-color:#2a77b7}.btn.danger{background:#51202a}.btn:disabled{opacity:.5;cursor:not-allowed}
+.page{display:none}.page.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}.metric b{display:block;font-size:28px;margin-top:5px}.section{margin-top:16px}.accounts{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#24314a;font-size:12px}.pill.ready,.pill.idle{background:#173a31;color:#8ae2bb}.pill.cooldown{background:#49391e;color:#ffda8a}.pill.error,.pill.unavailable{background:#4b2029;color:#ff9caa}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;font-size:12px}th{color:#b5c1d3;background:#141d31}.scroll{overflow:auto;border-radius:12px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,select,textarea{width:100%;background:#0f1728;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.account-edit{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row .compact{flex:0 0 auto}.prompt{display:none;background:#332a15;border:1px solid #6d5928;padding:12px;border-radius:12px;margin-bottom:16px}.prompt.show{display:block}.logs{white-space:pre-wrap;background:#080c16;border:1px solid var(--line);padding:14px;border-radius:12px;min-height:300px;max-height:600px;overflow:auto;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.toast{position:fixed;right:18px;bottom:18px;padding:12px 16px;border-radius:10px;background:#173a31;border:1px solid #285b4a;display:none}.toast.bad{background:#4b2029;border-color:#7d3342}.tiny{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header><div><h1>TeleDrive Web UI</h1><div class="muted" id="subtitle">Loading…</div></div><div class="row"><button class="btn primary" id="runBtn">Run batch</button><button class="btn" id="scanBtn">Scan only</button><button class="btn danger" id="stopBtn">Stop</button></div></header>
+<main>
+<div id="authPrompt" class="prompt"><b id="authTitle"></b><div class="row" style="margin-top:8px"><input id="authValue" class="input" autocomplete="one-time-code"><button class="btn primary compact" id="authSubmit">Submit</button></div></div>
+<nav>
+<button class="tab active" data-page="dashboard">Dashboard</button>
+<button class="tab" data-page="queue">Queue</button>
+<button class="tab" data-page="history">History</button>
+<button class="tab" data-page="settings">Settings</button>
+<button class="tab" data-page="logs">Logs</button>
+</nav>
+
+<section id="dashboard" class="page active">
+<div class="grid">
+<div class="card metric"><span class="muted">Pending</span><b id="mPending">0</b></div>
+<div class="card metric"><span class="muted">Failed</span><b id="mFailed">0</b></div>
+<div class="card metric"><span class="muted">Uploaded</span><b id="mUploaded">0</b></div>
+<div class="card metric"><span class="muted">Today</span><b id="mToday">0</b></div>
+</div>
+<div class="section card"><div class="row"><div><b>Strategy</b><div class="muted" id="strategyView">-</div></div><div><b>Database</b><div class="muted" id="dbView">-</div></div><div><b>Uploader</b><div class="muted" id="processView">-</div></div></div></div>
+<div class="section"><h3>Accounts</h3><div class="accounts" id="accounts"></div></div>
+</section>
+
+<section id="queue" class="page"><div class="scroll"><table><thead><tr><th>Path</th><th>Status</th><th>Attempts</th><th>Account</th><th>Error</th></tr></thead><tbody id="queueRows"></tbody></table></div></section>
+<section id="history" class="page"><div class="scroll"><table><thead><tr><th>Path</th><th>Account</th><th>Message ID</th><th>Uploaded</th></tr></thead><tbody id="historyRows"></tbody></table></div></section>
+
+<section id="settings" class="page">
+<div class="card">
+<h3>Telegram</h3>
+<div class="form-grid">
+<div><label>Strategy</label><select id="strategy"><option>single</option><option>round_robin</option><option>failover</option><option>parallel</option></select></div>
+<div><label>Default API ID</label><input class="input" id="apiId" type="number"></div>
+<div><label>Default API hash</label><input class="input" id="apiHash"></div>
+<div><label>Default target</label><input class="input" id="tgTarget"></div>
+</div>
+<div class="section"><div class="row"><h3 style="margin:0">Accounts</h3><button class="btn compact" id="addAccount">Add account</button></div><div id="accountEditors"></div></div>
+</div>
+
+<div class="card section"><h3>Upload</h3><div class="form-grid">
+<div><label>Source directory</label><input class="input" id="sourceDir"></div>
+<div><label>Send mode</label><select id="sendMode"><option>document</option><option>media</option><option>auto</option></select></div>
+<div><label>Max files / run</label><input class="input" id="perRun" type="number"></div>
+<div><label>Max files / day</label><input class="input" id="perDay" type="number"></div>
+<div><label>Sleep min (sec)</label><input class="input" id="sleepMin" type="number"></div>
+<div><label>Sleep max (sec)</label><input class="input" id="sleepMax" type="number"></div>
+<div><label>Retry attempts</label><input class="input" id="retryAttempts" type="number"></div>
+<div><label>Backoff base (sec)</label><input class="input" id="backoff" type="number"></div>
+<div><label>FloodWait buffer (sec)</label><input class="input" id="floodBuffer" type="number"></div>
+<div><label>Max file size MB (0=unlimited)</label><input class="input" id="maxFileSize" type="number"></div>
+<div><label>Caption template</label><input class="input" id="captionTemplate"></div>
+<div><label>Allowed extensions (comma separated)</label><input class="input" id="extensions"></div>
+</div></div>
+
+<div class="card section"><h3>Database</h3>
+<label>SQLAlchemy database URL</label><input class="input" id="databaseUrl" placeholder="sqlite:////data/state.db or any synchronous SQLAlchemy URL">
+<div class="tiny" style="margin-top:7px">No vendor whitelist. Any synchronous SQLAlchemy dialect works when its dialect/DBAPI driver is installed in the image.</div>
+</div>
+
+<div class="card section"><h3>Automation</h3><div class="form-grid">
+<div><label><input type="checkbox" id="autoRun"> Run upload batches automatically</label></div>
+<div><label>Interval (minutes)</label><input class="input" id="runInterval" type="number"></div>
+</div></div>
+<div class="section"><button class="btn primary" id="saveSettings">Save settings</button></div>
+</section>
+
+<section id="logs" class="page"><div id="logBox" class="logs"></div></section>
+</main>
+<div id="toast" class="toast"></div>
+
+<script>
+const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
+let config=null, authPrompt=null;
+async function api(url,opt={}){const r=await fetch(url,{headers:{'Content-Type':'application/json',...(opt.headers||{})},...opt});if(!r.ok)throw new Error(await r.text()||r.statusText);return r.json()}
+function toast(msg,bad=false){const e=$('#toast');e.textContent=msg;e.className='toast'+(bad?' bad':'');e.style.display='block';setTimeout(()=>e.style.display='none',3500)}
+function fmtTs(v){return v?new Date(v*1000).toLocaleString():'-'}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+$$('.tab').forEach(b=>b.onclick=()=>{$$('.tab').forEach(x=>x.classList.remove('active'));$$('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.page).classList.add('active');if(b.dataset.page==='queue')loadFiles('queue');if(b.dataset.page==='history')loadFiles('history');if(b.dataset.page==='settings')loadSettings();if(b.dataset.page==='logs')loadLogs()});
+
+async function refreshDashboard(){
+try{
+const d=await api('/api/dashboard');const q=d.queue||{};
+$('#mPending').textContent=q.pending||0;$('#mFailed').textContent=q.failed||0;$('#mUploaded').textContent=q.uploaded||0;$('#mToday').textContent=q.uploaded_today||0;
+$('#strategyView').textContent=d.strategy||'-';$('#dbView').textContent=d.database_url||'-';
+const p=d.process||{};$('#processView').textContent=p.running?('running · '+(p.mode||'')):'idle';$('#subtitle').textContent=(d.strategy||'single')+' · '+(p.running?'running':'idle');
+authPrompt=p.auth_prompt||null;const ap=$('#authPrompt');if(authPrompt){ap.classList.add('show');$('#authTitle').textContent=authPrompt.account+' is waiting for Telegram '+authPrompt.kind;$('#authValue').type=authPrompt.kind==='password'?'password':'text'}else{ap.classList.remove('show');$('#authValue').value=''}
+$('#accounts').innerHTML=(d.accounts||[]).map(a=>'<div class="card"><div class="row"><b>'+esc(a.name)+'</b><span class="pill '+esc(a.state)+'">'+esc(a.state)+'</span></div><div class="tiny" style="margin-top:9px">enabled: '+a.enabled+' · uploaded: '+(a.uploaded_count||0)+'</div><div class="tiny">target: '+esc(a.target)+' · last success: '+fmtTs(a.last_success_ts)+'</div>'+(a.last_error?'<div style="color:var(--bad);margin-top:7px">'+esc(a.last_error)+'</div>':'')+'</div>').join('');
+}catch(e){toast(e.message,true)}
+}
+async function loadFiles(kind){try{const rows=await api('/api/files?kind='+kind+'&limit=200');if(kind==='queue')$('#queueRows').innerHTML=rows.map(r=>'<tr><td>'+esc(r.path)+'</td><td>'+esc(r.status)+'</td><td>'+r.attempts+'</td><td>'+esc(r.tg_account||'-')+'</td><td>'+esc(r.last_error||'')+'</td></tr>').join('');else $('#historyRows').innerHTML=rows.map(r=>'<tr><td>'+esc(r.path)+'</td><td>'+esc(r.tg_account||'-')+'</td><td>'+esc(r.tg_message_id||'-')+'</td><td>'+fmtTs(r.uploaded_ts)+'</td></tr>').join('')}catch(e){toast(e.message,true)}}
+async function loadLogs(){try{const x=await api('/api/logs?limit=500');$('#logBox').textContent=(x.lines||[]).join('\n');$('#logBox').scrollTop=$('#logBox').scrollHeight}catch(e){toast(e.message,true)}}
+
+function accountEditor(a={}){return '<div class="account-edit"><div class="row"><label class="compact"><input class="ae-enabled" type="checkbox" '+(a.enabled!==false?'checked':'')+'> enabled</label><button class="btn danger compact ae-remove">Remove</button></div><div class="form-grid"><div><label>Name</label><input class="input ae-name" value="'+esc(a.name||'account')+'"></div><div><label>Phone</label><input class="input ae-phone" value="'+esc(a.phone||'')+'"></div><div><label>Session path</label><input class="input ae-session" value="'+esc(a.session_path||'/data/sessions/account')+'"></div><div><label>Target override</label><input class="input ae-target" value="'+esc(a.target??'')+'"></div><div><label>API ID override</label><input class="input ae-api-id" type="number" value="'+esc(a.api_id??'')+'"></div><div><label>API hash override</label><input class="input ae-api-hash" value="'+esc(a.api_hash??'')+'"></div></div></div>'}
+function wireEditors(){$$('.ae-remove').forEach(b=>b.onclick=()=>b.closest('.account-edit').remove())}
+$('#addAccount').onclick=()=>{$('#accountEditors').insertAdjacentHTML('beforeend',accountEditor({name:'account'+($$('.account-edit').length+1)}));wireEditors()}
+
+async function loadSettings(){try{
+config=await api('/api/config');const tg=config.telegram||{},up=config.upload||{},st=config.state||{},app=config.app||{};
+$('#strategy').value=tg.strategy||'single';$('#apiId').value=tg.api_id||'';$('#apiHash').value=tg.api_hash||'';$('#tgTarget').value=tg.target??'me';
+$('#sourceDir').value=up.source_dir||'/uploads';$('#sendMode').value=up.send_mode||'document';$('#perRun').value=up.max_files_per_run??12;$('#perDay').value=up.max_files_per_day??100;$('#sleepMin').value=up.sleep_min_seconds??60;$('#sleepMax').value=up.sleep_max_seconds??90;$('#retryAttempts').value=up.retry_attempts??5;$('#backoff').value=up.backoff_base_seconds??10;$('#floodBuffer').value=up.floodwait_buffer_seconds??5;$('#maxFileSize').value=up.max_file_size_mb??0;$('#captionTemplate').value=up.caption_template||'{name}';$('#extensions').value=(up.allowed_extensions||[]).join(',');
+$('#databaseUrl').value=st.database_url||st.db_path||'sqlite:////data/state.db';$('#autoRun').checked=!!app.auto_run;$('#runInterval').value=app.run_interval_minutes??60;
+$('#accountEditors').innerHTML=(tg.accounts||[]).map(accountEditor).join('');wireEditors()
+}catch(e){toast(e.message,true)}}
+
+$('#saveSettings').onclick=async()=>{try{
+if(!config)await loadSettings();const tg=config.telegram=config.telegram||{},up=config.upload=config.upload||{},st=config.state=config.state||{},app=config.app=config.app||{};
+tg.strategy=$('#strategy').value;tg.api_id=Number($('#apiId').value||0);tg.api_hash=$('#apiHash').value.trim();tg.target=$('#tgTarget').value.trim()||'me';
+tg.accounts=$$('.account-edit').map(e=>{const o={name:e.querySelector('.ae-name').value.trim(),enabled:e.querySelector('.ae-enabled').checked,phone:e.querySelector('.ae-phone').value.trim(),session_path:e.querySelector('.ae-session').value.trim()};const target=e.querySelector('.ae-target').value.trim(),id=e.querySelector('.ae-api-id').value.trim(),hash=e.querySelector('.ae-api-hash').value.trim();if(target)o.target=target;if(id)o.api_id=Number(id);if(hash)o.api_hash=hash;return o});
+up.source_dir=$('#sourceDir').value.trim();up.send_mode=$('#sendMode').value;up.max_files_per_run=Number($('#perRun').value);up.max_files_per_day=Number($('#perDay').value);up.sleep_min_seconds=Number($('#sleepMin').value);up.sleep_max_seconds=Number($('#sleepMax').value);up.retry_attempts=Number($('#retryAttempts').value);up.backoff_base_seconds=Number($('#backoff').value);up.floodwait_buffer_seconds=Number($('#floodBuffer').value);up.max_file_size_mb=Number($('#maxFileSize').value);up.caption_template=$('#captionTemplate').value;up.allowed_extensions=$('#extensions').value.split(',').map(x=>x.trim()).filter(Boolean);
+st.database_url=$('#databaseUrl').value.trim()||'sqlite:////data/state.db';delete st.db_path;app.auto_run=$('#autoRun').checked;app.run_interval_minutes=Number($('#runInterval').value);
+await api('/api/config',{method:'PUT',body:JSON.stringify(config)});toast('Settings saved');await refreshDashboard()
+}catch(e){toast(e.message,true)}};
+
+$('#runBtn').onclick=()=>api('/api/process/start',{method:'POST',body:JSON.stringify({mode:'run-once'})}).then(refreshDashboard).catch(e=>toast(e.message,true));
+$('#scanBtn').onclick=()=>api('/api/process/start',{method:'POST',body:JSON.stringify({mode:'scan-only'})}).then(refreshDashboard).catch(e=>toast(e.message,true));
+$('#stopBtn').onclick=()=>api('/api/process/stop',{method:'POST'}).then(refreshDashboard).catch(e=>toast(e.message,true));
+$('#authSubmit').onclick=async()=>{if(!authPrompt)return;try{await api('/api/auth',{method:'POST',body:JSON.stringify({account:authPrompt.account,kind:authPrompt.kind,value:$('#authValue').value})});$('#authValue').value='';toast('Auth value submitted')}catch(e){toast(e.message,true)}};
+
+refreshDashboard();setInterval(refreshDashboard,3000);
+</script>
+</body></html>

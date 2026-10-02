@@ -44,3 +44,12 @@ jobs:
         run: pip-audit -r requirements-web.txt
       - name: Docker build
         run: docker build --pull -t teledrive-security-ci .
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: teledrive-security-ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH

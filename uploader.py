@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-from db import Database, DBRow, connect_database, normalize_database_url, sqlite_database_path
+from db import Database, DBRow, connect_database, normalize_database_url, redact_database_url, sqlite_database_path
 
 import yaml
 from telethon import TelegramClient
@@ -33,6 +33,7 @@ RUN_HOLDER = f"{os.getpid()}-{secrets.token_hex(12)}"
 LEASE_NAME = "uploader-global"
 LEASE_TTL_SECONDS = int(os.environ.get("TELEDRIVE_LEASE_TTL_SECONDS", "120"))
 CLAIM_STALE_SECONDS = int(os.environ.get("TELEDRIVE_CLAIM_STALE_SECONDS", "86400"))
+SPLIT_MIN_FREE_BYTES = int(os.environ.get("TELEDRIVE_SPLIT_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
 
 
 @dataclass(frozen=True)
@@ -246,7 +247,7 @@ def uploader_lock(db_path: str):
     """Prevent overlapping uploader processes using an exclusive lock file."""
     if "://" in db_path:
         import hashlib
-        token = hashlib.sha256(db_path.encode("utf-8")).hexdigest()[:20]
+        token = hashlib.sha256(redact_database_url(db_path).encode("utf-8")).hexdigest()[:20]
         lock_root = Path(os.environ.get("TELEDRIVE_LOCK_DIR", tempfile.gettempdir())).expanduser()
         lock_root.mkdir(parents=True, exist_ok=True)
         try:
@@ -512,6 +513,12 @@ def split_for_telegram(
     part_count = (total_size + max_bytes - 1) // max_bytes
     split_root = Path(os.environ.get("TELEDRIVE_SPLIT_DIR", tempfile.gettempdir())).expanduser()
     split_root.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(split_root).free
+    required_bytes = total_size + SPLIT_MIN_FREE_BYTES
+    if free_bytes < required_bytes:
+        raise OSError(
+            f"Insufficient split space: need {required_bytes} bytes including reserve, have {free_bytes}"
+        )
     temp_dir = tempfile.mkdtemp(prefix="teledrive-parts-", dir=str(split_root))
     width = max(2, len(str(part_count)))
     part_paths: list[str] = []

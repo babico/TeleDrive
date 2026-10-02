@@ -759,7 +759,12 @@ def validate_config(cfg: AppConfig) -> None:
     if cfg.send_mode not in {"document", "media", "auto"}: raise ValueError("send_mode must be document, media, or auto")
     try: build_caption("example.txt", cfg.caption_template)
     except (KeyError, ValueError, IndexError) as exc: raise ValueError("caption_template may only use {name}, {stem}, and {ext}") from exc
-    if not os.path.isdir(cfg.source_dir): raise ValueError(f"source_dir not found: {cfg.source_dir}")
+    validate_storage_paths(cfg)
+
+
+def validate_storage_paths(cfg: AppConfig) -> None:
+    if not os.path.isdir(cfg.source_dir):
+        raise ValueError(f"source_dir not found: {cfg.source_dir}")
     _validate_allowed_roots(cfg.source_dir, "TELEDRIVE_ALLOWED_SOURCE_ROOTS")
     _validate_allowed_roots(cfg.log_path, "TELEDRIVE_ALLOWED_LOG_ROOTS")
     sqlite_path = sqlite_database_path(cfg.db_path)
@@ -857,8 +862,8 @@ async def async_main() -> int:
     os.umask(0o077)
     args = parse_args()
     cfg = load_config(args.config)
-    setup_logging(cfg)
     validate_config(cfg)
+    setup_logging(cfg)
     conn = connect_db(cfg.db_path)
 
     try:

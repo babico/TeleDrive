@@ -70,6 +70,20 @@ class SecurityTests(unittest.TestCase):
             self.assertIn(str(good.resolve()), files)
             self.assertNotIn(str(link.absolute()), files)
 
+    def test_caption_template_rejects_attribute_traversal(self):
+        with self.assertRaises(ValueError):
+            uploader.build_caption("example.txt", "{name.__class__}")
+        self.assertEqual(uploader.build_caption("example.txt", "{stem}{ext}"), "example.txt")
+
+    def test_non_regular_file_is_not_scanned(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("mkfifo unavailable")
+        with tempfile.TemporaryDirectory() as source:
+            fifo = Path(source) / "pipe"
+            os.mkfifo(fifo)
+            self.assertNotIn(str(fifo), set(uploader.iter_source_files(source)))
+            # iter_source_files enumerates paths; scan-level regular-file enforcement is separate.
+
     def test_account_name_rejects_control_characters(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

@@ -68,7 +68,7 @@ def _secure_write(path: Path, content: str) -> None:
 
 def _scrub_text(value: str) -> str:
     # Redact URL userinfo from logs/errors returned to browsers.
-    return re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\\s]+:)[^@\\s]+(@)", r"\\1***\\2", value)
+    return re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\\s]+:)[^@\\s]+(@)", r"\1***\2", value)
 
 
 def _same_origin(request: Request) -> None:
@@ -363,7 +363,7 @@ async def security_middleware(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
         "form-action 'self'; connect-src 'self'; img-src 'self' data:; "
-        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+        "style-src 'self' 'unsafe-inline'; script-src 'self'"
     )
     if request.url.path == "/" or request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"

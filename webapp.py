@@ -80,7 +80,7 @@ def _secure_write(path: Path, content: str) -> None:
 
 def _scrub_text(value: str) -> str:
     # Redact URL userinfo from logs/errors returned to browsers.
-    return re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\\s]+:)[^@\\s]+(@)", r"\1***\2", value)
+    return re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\s]+:)[^@\s]+(@)", r"\1***\2", value)
 
 
 def _same_origin(request: Request) -> None:

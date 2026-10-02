@@ -47,6 +47,9 @@ current_mode: str | None = None
 current_started_at: int | None = None
 current_prompt: dict[str, str] | None = None
 scheduler_task: asyncio.Task | None = None
+AUTH_FAILURES: dict[str, deque[float]] = {}
+AUTH_FAILURE_WINDOW_SECONDS = int(os.environ.get("TELEDRIVE_AUTH_FAILURE_WINDOW_SECONDS", "60"))
+AUTH_FAILURE_LIMIT = int(os.environ.get("TELEDRIVE_AUTH_FAILURE_LIMIT", "5"))
 
 
 def _secure_mkdir(path: Path) -> None:
@@ -91,16 +94,30 @@ def _same_origin(request: Request) -> None:
         raise HTTPException(403, "Cross-origin state change rejected")
 
 
-def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
+def require_auth(request: Request, credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
     if not WEB_PASSWORD:
         return
-    if credentials is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Basic"})
-    if not (
+
+    client = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    failures = AUTH_FAILURES.setdefault(client, deque())
+    while failures and now - failures[0] > AUTH_FAILURE_WINDOW_SECONDS:
+        failures.popleft()
+    if len(failures) >= AUTH_FAILURE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many authentication failures")
+
+    valid = credentials is not None and (
         hmac.compare_digest(credentials.username, WEB_USER)
         and hmac.compare_digest(credentials.password, WEB_PASSWORD)
-    ):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Basic"})
+    )
+    if not valid:
+        failures.append(now)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": 'Basic realm="TeleDrive"'},
+        )
+
+    AUTH_FAILURES.pop(client, None)
 
 
 def default_config() -> dict[str, Any]:

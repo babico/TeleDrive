@@ -19,3 +19,6 @@ website/node_modules/
 website/dist/
 website/.astro/
 
+.env
+config/
+uploads/

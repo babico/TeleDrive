@@ -10,9 +10,61 @@ import yaml
 
 import db
 import uploader
+import webapp
+from fastapi import HTTPException
+from starlette.requests import Request
 
 
 class SecurityTests(unittest.TestCase):
+    def test_web_config_redacts_and_restores_secrets(self):
+        raw = {
+            "telegram": {
+                "api_hash": "topsecret",
+                "accounts": [{"name": "primary", "api_hash": "accountsecret"}],
+            },
+            "state": {
+                "database_url": "postgresql+psycopg://alice:dbsecret@db/teledrive?token=querysecret"
+            },
+        }
+        redacted = webapp._redacted_config(raw)
+        rendered = str(redacted)
+        self.assertNotIn("topsecret", rendered)
+        self.assertNotIn("accountsecret", rendered)
+        self.assertNotIn("dbsecret", rendered)
+        self.assertNotIn("querysecret", rendered)
+
+        restored = webapp._restore_secrets(redacted, raw)
+        self.assertEqual(restored["telegram"]["api_hash"], "topsecret")
+        self.assertEqual(restored["telegram"]["accounts"][0]["api_hash"], "accountsecret")
+        self.assertEqual(restored["state"]["database_url"], raw["state"]["database_url"])
+
+    def test_state_changes_require_csrf_header_and_same_origin(self):
+        def request(headers):
+            return Request({
+                "type": "http",
+                "method": "POST",
+                "path": "/api/process/start",
+                "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 8080),
+                "scheme": "http",
+                "query_string": b"",
+            })
+
+        with self.assertRaises(HTTPException):
+            webapp._same_origin(request({"host": "localhost:8080", "origin": "http://localhost:8080"}))
+        with self.assertRaises(HTTPException):
+            webapp._same_origin(request({
+                "host": "localhost:8080",
+                "origin": "http://evil.example",
+                "x-teledrive-csrf": "1",
+            }))
+        webapp._same_origin(request({
+            "host": "localhost:8080",
+            "origin": "http://localhost:8080",
+            "x-teledrive-csrf": "1",
+        }))
+
     def test_uploader_log_redaction(self):
         secret = "postgresql+psycopg://alice:supersecret@db.example/teledrive"
         scrubbed = uploader._scrub_log_text(secret)

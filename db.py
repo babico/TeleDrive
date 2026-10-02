@@ -10,7 +10,8 @@ from sqlalchemy import (
     create_engine, delete, func, insert, inspect, select, update,
 )
 from sqlalchemy.engine import Connection, Engine, Row
-from sqlalchemy.exc import NoSuchModuleError
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 
 metadata = MetaData()
 
@@ -38,6 +39,14 @@ account_status = Table(
     Column("last_error", Text),
     Column("cooldown_until", BigInteger),
     Column("last_success_ts", BigInteger),
+    Column("last_update_ts", BigInteger, nullable=False),
+)
+
+leases = Table(
+    "leases", metadata,
+    Column("name", String(128), primary_key=True),
+    Column("holder", String(255), nullable=False),
+    Column("lease_until", BigInteger, nullable=False),
     Column("last_update_ts", BigInteger, nullable=False),
 )
 
@@ -81,15 +90,11 @@ def normalize_database_url(value: str, *, config_dir: Path | None = None) -> str
 
 
 def redact_database_url(url: str) -> str:
-    normalized = normalize_database_url(url)
-    if normalized.startswith("sqlite:"):
-        return normalized
-    parts = urlsplit(normalized)
-    if "@" not in parts.netloc:
-        return normalized
-    auth, host = parts.netloc.rsplit("@", 1)
-    user = auth.split(":", 1)[0]
-    return urlunsplit((parts.scheme, f"{user}:***@{host}", parts.path, parts.query, parts.fragment))
+    """Render a URL without credentials, including URL-encoded passwords."""
+    try:
+        return make_url(normalize_database_url(url)).render_as_string(hide_password=True)
+    except Exception:
+        return "<invalid database URL>"
 
 
 @dataclass
@@ -167,10 +172,56 @@ class Database:
             state=state, last_error=last_error, cooldown_until=cooldown_until,
             last_success_ts=last_success_ts, last_update_ts=now,
         )
-        if self.account_state(name):
-            self.connection.execute(update(account_status).where(account_status.c.name == name).values(**values))
-        else:
+        result = self.connection.execute(
+            update(account_status).where(account_status.c.name == name).values(**values)
+        )
+        if result.rowcount:
+            return
+        try:
             self.connection.execute(insert(account_status).values(name=name, **values))
+        except IntegrityError:
+            self.connection.rollback()
+            self.connection.execute(
+                update(account_status).where(account_status.c.name == name).values(**values)
+            )
+
+    def acquire_lease(self, name: str, holder: str, now: int, ttl_seconds: int) -> bool:
+        lease_until = now + ttl_seconds
+        result = self.connection.execute(
+            update(leases)
+            .where(
+                leases.c.name == name,
+                (leases.c.holder == holder) | (leases.c.lease_until < now),
+            )
+            .values(holder=holder, lease_until=lease_until, last_update_ts=now)
+        )
+        if result.rowcount:
+            self.connection.commit()
+            return True
+        try:
+            self.connection.execute(insert(leases).values(
+                name=name, holder=holder, lease_until=lease_until, last_update_ts=now,
+            ))
+            self.connection.commit()
+            return True
+        except IntegrityError:
+            self.connection.rollback()
+            return False
+
+    def renew_lease(self, name: str, holder: str, now: int, ttl_seconds: int) -> bool:
+        result = self.connection.execute(
+            update(leases)
+            .where(leases.c.name == name, leases.c.holder == holder, leases.c.lease_until >= now)
+            .values(lease_until=now + ttl_seconds, last_update_ts=now)
+        )
+        self.connection.commit()
+        return bool(result.rowcount)
+
+    def release_lease(self, name: str, holder: str) -> None:
+        self.connection.execute(
+            delete(leases).where(leases.c.name == name, leases.c.holder == holder)
+        )
+        self.connection.commit()
 
     def dashboard_counts(self) -> dict[str, int]:
         rows = self.connection.execute(

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-from db import Database, DBRow, connect_database, normalize_database_url
+from db import Database, DBRow, connect_database, normalize_database_url, sqlite_database_path
 
 import yaml
 from telethon import TelegramClient
@@ -178,14 +178,29 @@ def ensure_parent(path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
+_LOG_SECRET_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\\s]+:)[^@\\s]+(@)")
+
+
+def _scrub_log_text(value: str) -> str:
+    return _LOG_SECRET_URL_RE.sub(r"\\1***\\2", value)
+
+
+class _RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return _scrub_log_text(super().format(record))
+
+
 def setup_logging(cfg: AppConfig) -> None:
     ensure_parent(cfg.log_path)
     level = getattr(logging, cfg.log_level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(cfg.log_path, encoding="utf-8"), logging.StreamHandler()],
-    )
+    handlers = [
+        logging.FileHandler(cfg.log_path, encoding="utf-8"),
+        logging.StreamHandler(),
+    ]
+    logging.basicConfig(level=level, handlers=handlers)
+    formatter = _RedactingFormatter("%(asctime)s [%(levelname)s] %(message)s")
+    for handler in handlers:
+        handler.setFormatter(formatter)
 
 
 def connect_db(db_path: str) -> Database:
@@ -268,10 +283,10 @@ def iter_source_files(source_dir: str) -> Iterable[str]:
         for name in files:
             path = os.path.abspath(os.path.join(root, name))
             if os.path.islink(path):
-                logging.warning("Skipping symlink: %s", path)
+                logging.warning("Skipping symlink: %r", path)
                 continue
             if not _path_within(path, source_real):
-                logging.warning("Skipping path outside source root: %s", path)
+                logging.warning("Skipping path outside source root: %r", path)
                 continue
             yield path
 
@@ -418,6 +433,7 @@ async def upload_one(client: TelegramClient, target, path: str, caption: str, se
         caption=caption,
         force_document=force_document,
         supports_streaming=supports_streaming,
+        parse_mode=None,
     )
 
 
@@ -457,7 +473,7 @@ def split_for_telegram(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
-    logging.info("Split oversized file into %s parts: %s", len(part_paths), path)
+    logging.info("Split oversized file into %s parts: %r", len(part_paths), path)
     return temp_dir, part_paths
 
 
@@ -695,6 +711,10 @@ def validate_config(cfg: AppConfig) -> None:
     except (KeyError, ValueError, IndexError) as exc: raise ValueError("caption_template may only use {name}, {stem}, and {ext}") from exc
     if not os.path.isdir(cfg.source_dir): raise ValueError(f"source_dir not found: {cfg.source_dir}")
     _validate_allowed_roots(cfg.source_dir, "TELEDRIVE_ALLOWED_SOURCE_ROOTS")
+    _validate_allowed_roots(cfg.log_path, "TELEDRIVE_ALLOWED_LOG_ROOTS")
+    sqlite_path = sqlite_database_path(cfg.db_path)
+    if sqlite_path is not None:
+        _validate_allowed_roots(sqlite_path, "TELEDRIVE_ALLOWED_SQLITE_ROOTS")
     for account in cfg.accounts:
         _validate_allowed_roots(account.session_path, "TELEDRIVE_ALLOWED_SESSION_ROOTS")
 

@@ -13,6 +13,12 @@ import uploader
 
 
 class SecurityTests(unittest.TestCase):
+    def test_uploader_log_redaction(self):
+        secret = "postgresql+psycopg://alice:supersecret@db.example/teledrive"
+        scrubbed = uploader._scrub_log_text(secret)
+        self.assertNotIn("supersecret", scrubbed)
+        self.assertIn("alice:***@db.example", scrubbed)
+
     def test_database_url_is_vendor_neutral_and_redacted(self):
         url = "oracle+oracledb://alice:supersecret@db.example:1521/?service_name=FREEPDB1"
         self.assertEqual(db.normalize_database_url(url), url)

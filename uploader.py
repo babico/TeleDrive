@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import secrets
 import shutil
 import tempfile
 import time
@@ -25,6 +26,9 @@ from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError
 TELEGRAM_FREE_FILE_LIMIT = 1_900_000_000
 SPLIT_BUFFER_SIZE = 1024 * 1024
 ACCOUNT_STRATEGIES = {"single", "round_robin", "failover", "parallel"}
+RUN_HOLDER = f"{os.getpid()}-{secrets.token_hex(12)}"
+LEASE_NAME = "uploader-global"
+LEASE_TTL_SECONDS = int(os.environ.get("TELEDRIVE_LEASE_TTL_SECONDS", "120"))
 
 
 @dataclass(frozen=True)
@@ -240,10 +244,35 @@ def uploader_lock(db_path: str):
             lock_path.unlink(missing_ok=True)
 
 
+def _path_within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.realpath(path), os.path.realpath(root)]) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+def _validate_allowed_roots(path: str, env_name: str) -> None:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return
+    roots = [item.strip() for item in raw.split(os.pathsep) if item.strip()]
+    if not roots or not any(_path_within(path, root) for root in roots):
+        raise ValueError(f"{path} is outside allowed roots configured by {env_name}")
+
+
 def iter_source_files(source_dir: str) -> Iterable[str]:
-    for root, _, files in os.walk(source_dir):
+    source_real = os.path.realpath(source_dir)
+    for root, dirs, files in os.walk(source_real, followlinks=False):
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
         for name in files:
-            yield os.path.abspath(os.path.join(root, name))
+            path = os.path.abspath(os.path.join(root, name))
+            if os.path.islink(path):
+                logging.warning("Skipping symlink: %s", path)
+                continue
+            if not _path_within(path, source_real):
+                logging.warning("Skipping path outside source root: %s", path)
+                continue
+            yield path
 
 
 def file_allowed(path: str, cfg: AppConfig) -> bool:
@@ -387,7 +416,9 @@ def split_for_telegram(path: str, max_bytes: int = TELEGRAM_FREE_FILE_LIMIT) -> 
     source = Path(path)
     total_size = source.stat().st_size
     part_count = (total_size + max_bytes - 1) // max_bytes
-    temp_dir = tempfile.mkdtemp(prefix=".teledrive-parts-", dir=str(source.parent))
+    split_root = Path(os.environ.get("TELEDRIVE_SPLIT_DIR", tempfile.gettempdir())).expanduser()
+    split_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix="teledrive-parts-", dir=str(split_root))
     width = max(2, len(str(part_count)))
     part_paths: list[str] = []
 
@@ -560,7 +591,14 @@ async def _disconnect_accounts(conn: Database, runtimes: list[AccountRuntime]) -
             mark_account_state(conn, runtime.config.name, "error", last_error=f"Disconnect: {exc}")
 
 
-async def process_uploads(cfg: AppConfig, conn: Database, login_code: Optional[str] = None, login_password: Optional[str] = None, auth_dir: Optional[str] = None) -> None:
+async def process_uploads(
+    cfg: AppConfig,
+    conn: Database,
+    login_code: Optional[str] = None,
+    login_password: Optional[str] = None,
+    auth_dir: Optional[str] = None,
+    lease_lost: Optional[asyncio.Event] = None,
+) -> None:
     runtimes = await _connect_accounts(cfg, conn, login_code, login_password, auth_dir)
     try:
         remaining_today = cfg.max_files_per_day - uploaded_today(conn)
@@ -576,12 +614,16 @@ async def process_uploads(cfg: AppConfig, conn: Database, login_code: Optional[s
             async def worker(start_index: int, bucket: list[DBRow]) -> int:
                 count, order = 0, _rotated_accounts(runtimes, start_index)
                 for row in bucket:
+                    if lease_lost is not None and lease_lost.is_set():
+                        raise RuntimeError("Distributed uploader lease lost")
                     if await _process_row(cfg, conn, row, order): count += 1
                 return count
             done = sum(await asyncio.gather(*(worker(i,b) for i,b in enumerate(buckets) if b)))
         else:
             done, rr_cursor = 0, 0
             for row in rows:
+                if lease_lost is not None and lease_lost.is_set():
+                    raise RuntimeError("Distributed uploader lease lost")
                 if cfg.strategy == "round_robin":
                     order = _rotated_accounts(runtimes, rr_cursor); rr_cursor = (rr_cursor + 1) % len(runtimes)
                 elif cfg.strategy == "failover": order = list(runtimes)
@@ -619,6 +661,74 @@ def validate_config(cfg: AppConfig) -> None:
     try: build_caption("example.txt", cfg.caption_template)
     except (KeyError, ValueError, IndexError) as exc: raise ValueError("caption_template may only use {name}, {stem}, and {ext}") from exc
     if not os.path.isdir(cfg.source_dir): raise ValueError(f"source_dir not found: {cfg.source_dir}")
+    _validate_allowed_roots(cfg.source_dir, "TELEDRIVE_ALLOWED_SOURCE_ROOTS")
+    for account in cfg.accounts:
+        _validate_allowed_roots(account.session_path, "TELEDRIVE_ALLOWED_SESSION_ROOTS")
+
+
+async def _lease_renewer(conn: Database, lost: asyncio.Event) -> None:
+    interval = max(5, LEASE_TTL_SECONDS // 3)
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            ok = conn.renew_lease(LEASE_NAME, RUN_HOLDER, int(time.time()), LEASE_TTL_SECONDS)
+            if not ok:
+                lost.set()
+                logging.critical("Lost distributed uploader lease; stopping before the next file.")
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            lost.set()
+            logging.exception("Distributed lease renewal failed: %s", exc)
+            return
+
+
+async def _run_with_distributed_lease(
+    cfg: AppConfig,
+    conn: Database,
+    *,
+    no_scan: bool,
+    scan_only: bool,
+    run_once: bool,
+    login_code: Optional[str],
+    login_password: Optional[str],
+    auth_dir: Optional[str],
+) -> int:
+    if not conn.acquire_lease(LEASE_NAME, RUN_HOLDER, int(time.time()), LEASE_TTL_SECONDS):
+        raise RuntimeError("Another TeleDrive uploader instance currently holds the distributed lease")
+
+    lost = asyncio.Event()
+    renew_task = asyncio.create_task(_lease_renewer(conn, lost))
+    try:
+        if not no_scan:
+            inserted, updated, unchanged = scan_and_queue(conn, cfg)
+            logging.info("Scan complete. inserted=%s updated=%s unchanged=%s", inserted, updated, unchanged)
+
+        if scan_only and not run_once:
+            return 0
+
+        if lost.is_set():
+            raise RuntimeError("Distributed uploader lease was lost before upload start")
+
+        await process_uploads(
+            cfg, conn,
+            login_code=login_code,
+            login_password=login_password,
+            auth_dir=auth_dir,
+            lease_lost=lost,
+        )
+        return 0
+    finally:
+        renew_task.cancel()
+        try:
+            await renew_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            conn.release_lease(LEASE_NAME, RUN_HOLDER)
+        except Exception:
+            logging.exception("Failed to release distributed uploader lease")
 
 
 def parse_args() -> argparse.Namespace:
@@ -634,6 +744,7 @@ def parse_args() -> argparse.Namespace:
 
 
 async def async_main() -> int:
+    os.umask(0o077)
     args = parse_args()
     cfg = load_config(args.config)
     setup_logging(cfg)
@@ -642,13 +753,16 @@ async def async_main() -> int:
 
     try:
         with uploader_lock(cfg.db_path):
-            if not args.no_scan:
-                inserted, updated, unchanged = scan_and_queue(conn, cfg)
-                logging.info("Scan complete. inserted=%s updated=%s unchanged=%s", inserted, updated, unchanged)
-            if args.scan_only and not args.run_once:
-                return 0
-            await process_uploads(cfg, conn, login_code=args.login_code, login_password=args.login_password, auth_dir=args.auth_dir)
-        return 0
+            return await _run_with_distributed_lease(
+                cfg,
+                conn,
+                no_scan=args.no_scan,
+                scan_only=args.scan_only,
+                run_once=args.run_once,
+                login_code=args.login_code,
+                login_password=args.login_password,
+                auth_dir=args.auth_dir,
+            )
     finally:
         conn.close()
 

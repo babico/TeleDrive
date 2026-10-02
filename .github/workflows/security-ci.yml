@@ -15,9 +15,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
           cache: pip
@@ -29,12 +31,12 @@ jobs:
       - name: Compile
         run: python -m compileall -q uploader.py db.py webapp.py tests
       - name: Unit tests
-        run: pytest -q
+        run: python -m pytest -q
       - name: Dependency consistency
         run: python -m pip check
       - name: Bandit
         run: bandit -q -r uploader.py db.py webapp.py -ll
       - name: Dependency audit
-        run: pip-audit
+        run: pip-audit -r requirements-web.txt
       - name: Docker build
         run: docker build --pull -t teledrive-security-ci .

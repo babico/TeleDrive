@@ -53,6 +53,8 @@ AUTH_FAILURE_LIMIT = int(os.environ.get("TELEDRIVE_AUTH_FAILURE_LIMIT", "5"))
 
 
 def _secure_mkdir(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing to use symlinked security-sensitive directory: {path}")
     path.mkdir(parents=True, exist_ok=True)
     try:
         path.chmod(0o700)

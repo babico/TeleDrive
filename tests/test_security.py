@@ -25,6 +25,10 @@ class SecurityTests(unittest.TestCase):
         rendered = db.redact_database_url(url)
         self.assertNotIn("supersecret", rendered)
         self.assertIn("***", rendered)
+        query_url = "oracle+oracledb://alice:pw@db.example/x?token=querysecret&mode=safe"
+        query_rendered = db.redact_database_url(query_url)
+        self.assertNotIn("querysecret", query_rendered)
+        self.assertIn("mode=safe", query_rendered)
 
     def test_atomic_file_claim_prevents_second_worker(self):
         conn = db.connect_database("sqlite:///:memory:")

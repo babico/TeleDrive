@@ -104,6 +104,8 @@ def _scrub_text(value: str) -> str:
 
 
 def _same_origin(request: Request) -> None:
+    if request.headers.get("x-teledrive-csrf") != "1":
+        raise HTTPException(403, "Missing CSRF protection header")
     origin = request.headers.get("origin")
     if not origin:
         return

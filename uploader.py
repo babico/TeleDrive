@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import logging
 import os
 import random
+import re
 import shutil
 import tempfile
 import time

@@ -39,6 +39,9 @@ ALLOWED_HOSTS = [
 ]
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
 PROMPT_RE = re.compile(r"Please enter the (code|password) for account '([^']+)':", re.I)
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:password|passwd|pwd|token|access_token|secret|api_key|apikey)=)[^&#\s]+"
+)
 
 security = HTTPBasic(auto_error=False)
 process_lock = asyncio.Lock()
@@ -79,8 +82,8 @@ def _secure_write(path: Path, content: str) -> None:
 
 
 def _scrub_text(value: str) -> str:
-    # Redact URL userinfo from logs/errors returned to browsers.
-    return re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\s]+:)[^@\s]+(@)", r"\1***\2", value)
+    value = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\s]+:)[^@\s]+(@)", r"\1***\2", value)
+    return _QUERY_SECRET_RE.sub(r"\1***", value)
 
 
 def _same_origin(request: Request) -> None:

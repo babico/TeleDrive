@@ -9,6 +9,8 @@ import random
 import re
 import secrets
 import shutil
+import stat
+import string
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -355,10 +357,13 @@ def scan_and_queue(
         if not file_allowed(path, cfg):
             continue
         try:
-            stat = os.stat(path)
+            file_stat = os.lstat(path)
         except OSError:
             continue
-        size, mtime = int(stat.st_size), float(stat.st_mtime)
+        if not stat.S_ISREG(file_stat.st_mode):
+            logging.warning("Skipping non-regular file: %r", path)
+            continue
+        size, mtime = int(file_stat.st_size), float(file_stat.st_mtime)
         row = conn.file_signature(path)
         if row is None:
             conn.insert_pending(path, size, mtime, now)
@@ -397,6 +402,13 @@ def mark_uploaded(conn: Database, path: str, msg_id: Optional[int], account_name
 def build_caption(path: str, template: str) -> str:
     name = os.path.basename(path)
     stem, ext = os.path.splitext(name)
+    allowed = {"name", "stem", "ext"}
+    formatter = string.Formatter()
+    for _, field_name, format_spec, conversion in formatter.parse(template):
+        if field_name is None:
+            continue
+        if field_name not in allowed or format_spec or conversion:
+            raise ValueError("caption_template may only use plain {name}, {stem}, and {ext} placeholders")
     return template.format(name=name, stem=stem, ext=ext)[:1024]
 
 
@@ -588,10 +600,13 @@ def _validate_pending_file(row: DBRow, conn: Database, cfg: AppConfig) -> Option
         return "Unsafe path"
     if not os.path.exists(path):
         mark_failed(conn, path, "File missing on disk"); return "File missing on disk"
-    try: st = os.stat(path)
+    try: file_stat = os.lstat(path)
     except OSError as exc:
-        mark_failed(conn, path, f"os.stat failed: {exc}"); return f"os.stat failed: {exc}"
-    if int(st.st_size) != int(row["size"]) or abs(float(st.st_mtime) - float(row["mtime"])) > 1e-6:
+        mark_failed(conn, path, f"os.lstat failed: {exc}"); return f"os.lstat failed: {exc}"
+    if not stat.S_ISREG(file_stat.st_mode):
+        mark_failed(conn, path, "Unsafe path: not a regular file")
+        return "Unsafe path"
+    if int(file_stat.st_size) != int(row["size"]) or abs(float(file_stat.st_mtime) - float(row["mtime"])) > 1e-6:
         mark_failed(conn, path, "File changed since scan; will requeue on next scan"); return "File changed since scan"
     return None
 

@@ -107,9 +107,16 @@ def sqlite_database_path(url: str) -> str | None:
 
 
 def redact_database_url(url: str) -> str:
-    """Render a URL without credentials, including URL-encoded passwords."""
+    """Render a URL without userinfo passwords or sensitive query values."""
     try:
-        return make_url(normalize_database_url(url)).render_as_string(hide_password=True)
+        rendered = make_url(normalize_database_url(url)).render_as_string(hide_password=True)
+        parts = urlsplit(rendered)
+        sensitive = {"password", "passwd", "pwd", "token", "access_token", "secret", "api_key", "apikey"}
+        query = [
+            (key, "***" if key.lower() in sensitive else value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        ]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
     except Exception:
         return "<invalid database URL>"
 

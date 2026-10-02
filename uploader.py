@@ -178,11 +178,11 @@ def ensure_parent(path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-_LOG_SECRET_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\\s]+:)[^@\\s]+(@)")
+_LOG_SECRET_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\s]+:)[^@\s]+(@)")
 
 
 def _scrub_log_text(value: str) -> str:
-    return _LOG_SECRET_URL_RE.sub(r"\\1***\\2", value)
+    return _LOG_SECRET_URL_RE.sub(r"\1***\2", value)
 
 
 class _RedactingFormatter(logging.Formatter):

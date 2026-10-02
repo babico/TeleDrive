@@ -92,6 +92,20 @@ def normalize_database_url(value: str, *, config_dir: Path | None = None) -> str
     return raw
 
 
+def sqlite_database_path(url: str) -> str | None:
+    """Return the filesystem path for a SQLite URL, otherwise None."""
+    try:
+        parsed = make_url(normalize_database_url(url))
+    except Exception:
+        return None
+    if parsed.get_backend_name() != "sqlite":
+        return None
+    database = parsed.database
+    if not database or database == ":memory:":
+        return None
+    return str(Path(database).expanduser().resolve())
+
+
 def redact_database_url(url: str) -> str:
     """Render a URL without credentials, including URL-encoded passwords."""
     try:

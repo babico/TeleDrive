@@ -11,7 +11,19 @@ cp config.docker.example.yaml config/config.yaml
 docker compose up -d --build
 ```
 
-Open `http://HOST:8080`.
+By default the Web UI binds only to loopback:
+
+```text
+http://127.0.0.1:8080
+```
+
+Before starting, set a strong password in `.env` (minimum 16 characters). A convenient generator is:
+
+```bash
+openssl rand -base64 32
+```
+
+Set `PUID=$(id -u)` and `PGID=$(id -g)` when your host user is not UID/GID 1000.
 
 ## Multi-account strategies
 
@@ -92,3 +104,45 @@ TELEDRIVE_WEB_PASSWORD=change-this-password
 ```
 
 Telegram login codes and 2FA prompts are submitted through the Web UI and written to account-specific auth handoff files inside `/data/auth`.
+
+
+## Security defaults
+
+The Docker deployment is intentionally fail-closed:
+
+- Web authentication is required by default. An empty `TELEDRIVE_WEB_PASSWORD` prevents startup.
+- `TELEDRIVE_ALLOW_INSECURE=1` is an explicit opt-out intended only for trusted local testing.
+- The Web UI binds to `127.0.0.1` by default.
+- `TELEDRIVE_ALLOWED_HOSTS` protects against Host-header and DNS-rebinding attacks. Add only the exact hostnames/IPs you use.
+- For remote access, put TeleDrive behind an HTTPS reverse proxy/VPN. Do not expose Basic Auth directly over plain HTTP.
+- The container runs non-root, drops all Linux capabilities, enables `no-new-privileges`, uses a read-only root filesystem, and mounts `/uploads` read-only.
+- Telegram sessions, auth handoff files and `config.yaml` are created with restrictive permissions.
+- API hashes and database passwords are redacted when configuration is returned to the browser.
+- Queue rows use both a distributed lease and atomic per-file claims to avoid duplicate uploads across multiple app instances.
+- Symlinks are not scanned, and Docker restricts source/session roots to `/uploads` and `/data/sessions`.
+- FastAPI interactive docs/OpenAPI are disabled in the Web build.
+- Security CI runs compile checks, regression tests, Bandit, pip-audit and a Docker build.
+- Dependabot monitors Python, Docker and GitHub Actions dependencies.
+
+If you expose TeleDrive through a reverse proxy, for example `teledrive.example.com`, set:
+
+```env
+TELEDRIVE_BIND_ADDRESS=127.0.0.1
+TELEDRIVE_ALLOWED_HOSTS=teledrive.example.com
+```
+
+Terminate TLS at the reverse proxy. Restrict proxy/network access further if possible.
+
+### Database drivers
+
+`TELEDRIVE_DB_EXTRA_PACKAGES` is a **build-time trusted-admin input**, not a Web UI feature. Installing a SQLAlchemy dialect executes package installation code during image build. Prefer reputable packages and pin explicit versions where practical, for example:
+
+```env
+TELEDRIVE_DB_EXTRA_PACKAGES=oracledb==<reviewed-version>
+```
+
+The database account used by TeleDrive should have only the schema permissions needed for its own TeleDrive tables, not broad administrative rights.
+
+### Secret files
+
+Keep `.env`, `config/`, `data/` and `uploads/` out of source control. They are ignored by this branch. On a multi-user Linux host, also restrict the project directory itself.

@@ -33,14 +33,16 @@ def _load_web_password() -> str:
     secret_file = os.environ.get("TELEDRIVE_WEB_PASSWORD_FILE", "").strip()
     if secret_file:
         path = Path(secret_file)
-        if path.is_symlink():
-            raise RuntimeError("Refusing symlinked TELEDRIVE_WEB_PASSWORD_FILE")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            if path.stat().st_size > 4096:
-                raise RuntimeError("TELEDRIVE_WEB_PASSWORD_FILE is unexpectedly large")
-            return path.read_text(encoding="utf-8").rstrip("\r\n")
+            fd = os.open(str(path), flags)
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                value = handle.read(4097)
         except OSError as exc:
-            raise RuntimeError("Unable to read TELEDRIVE_WEB_PASSWORD_FILE") from exc
+            raise RuntimeError("Unable to safely read TELEDRIVE_WEB_PASSWORD_FILE") from exc
+        if len(value) > 4096:
+            raise RuntimeError("TELEDRIVE_WEB_PASSWORD_FILE is unexpectedly large")
+        return value.rstrip("\r\n")
     return os.environ.get("TELEDRIVE_WEB_PASSWORD", "")
 
 
@@ -76,9 +78,15 @@ def _secure_mkdir(path: Path) -> None:
     if path.is_symlink():
         raise RuntimeError(f"Refusing to use symlinked security-sensitive directory: {path}")
     path.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        path.chmod(0o700)
+        fd = os.open(str(path), flags)
+        try:
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
     except OSError:
+        # Permission hardening may be unavailable on some non-POSIX hosts.
         pass
 
 
@@ -86,16 +94,11 @@ def _secure_write(path: Path, content: str) -> None:
     _secure_mkdir(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(path), flags, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _scrub_text(value: str) -> str:
@@ -189,10 +192,15 @@ def ensure_config() -> None:
     if not CONFIG_PATH.exists():
         _secure_write(CONFIG_PATH, yaml.safe_dump(default_config(), sort_keys=False))
     else:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            CONFIG_PATH.chmod(0o600)
-        except OSError:
-            pass
+            fd = os.open(str(CONFIG_PATH), flags)
+            try:
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise RuntimeError("Unable to safely open TeleDrive config file") from exc
 
 
 def read_raw_config() -> dict[str, Any]:
@@ -265,10 +273,6 @@ def validate_and_write_config(raw: dict[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
         raise RuntimeError("Database connection/initialization failed") from exc
     os.replace(tmp, CONFIG_PATH)
-    try:
-        CONFIG_PATH.chmod(0o600)
-    except OSError:
-        pass
 
 
 def db_connect():

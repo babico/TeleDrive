@@ -7,11 +7,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import (
     BigInteger, Column, Float, Index, Integer, MetaData, String, Table, Text,
-    create_engine, delete, func, insert, inspect, select, update,
+    and_, create_engine, delete, func, insert, inspect, or_, select, update,
 )
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
+from sqlalchemy.schema import CreateColumn
 
 metadata = MetaData()
 
@@ -28,6 +29,8 @@ files = Table(
     Column("first_seen_ts", BigInteger, nullable=False),
     Column("last_update_ts", BigInteger, nullable=False),
     Column("uploaded_ts", BigInteger),
+    Column("claim_token", String(255)),
+    Column("claim_ts", BigInteger),
 )
 Index("idx_files_status", files.c.status)
 Index("idx_files_tg_account", files.c.tg_account)
@@ -127,7 +130,8 @@ class Database:
     def requeue_changed(self, path: str, size: int, mtime: float, now: int) -> None:
         self.connection.execute(update(files).where(files.c.path == path).values(
             size=size, mtime=mtime, status="pending", tg_message_id=None,
-            tg_account=None, uploaded_ts=None, last_error=None, last_update_ts=now,
+            tg_account=None, uploaded_ts=None, last_error=None,
+            claim_token=None, claim_ts=None, last_update_ts=now,
         ))
 
     def uploaded_between(self, start_ts: int, end_ts: int) -> int:
@@ -139,25 +143,61 @@ class Database:
             )
         ).scalar_one() or 0)
 
-    def pending(self, limit: int) -> list[DBRow]:
+    def pending(self, limit: int, now: int, stale_after_seconds: int) -> list[DBRow]:
+        stale_before = now - stale_after_seconds
         rows = self.connection.execute(
             select(files.c.path, files.c.size, files.c.mtime, files.c.attempts)
-            .where(files.c.status.in_(["pending", "failed"]))
+            .where(
+                or_(
+                    files.c.status.in_(["pending", "failed"]),
+                    and_(
+                        files.c.status == "uploading",
+                        or_(files.c.claim_ts.is_(None), files.c.claim_ts < stale_before),
+                    ),
+                )
+            )
             .order_by(files.c.first_seen_ts.asc()).limit(limit)
         ).all()
         return [DBRow(row) for row in rows]
 
+    def claim_file(self, path: str, claim_token: str, now: int, stale_after_seconds: int) -> bool:
+        stale_before = now - stale_after_seconds
+        self.connection.execute(
+            update(files)
+            .where(
+                files.c.path == path,
+                or_(
+                    files.c.status.in_(["pending", "failed"]),
+                    and_(
+                        files.c.status == "uploading",
+                        or_(files.c.claim_ts.is_(None), files.c.claim_ts < stale_before),
+                    ),
+                ),
+            )
+            .values(
+                status="uploading",
+                claim_token=claim_token,
+                claim_ts=now,
+                last_update_ts=now,
+            )
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            select(files.c.status, files.c.claim_token).where(files.c.path == path)
+        ).first()
+        return bool(row and row[0] == "uploading" and row[1] == claim_token)
+
     def mark_failed(self, path: str, error: str, attempts_inc: int, now: int) -> None:
         self.connection.execute(update(files).where(files.c.path == path).values(
             status="failed", attempts=files.c.attempts + attempts_inc,
-            last_error=error[:1000], last_update_ts=now,
+            last_error=error[:1000], claim_token=None, claim_ts=None, last_update_ts=now,
         ))
 
     def mark_uploaded(self, path: str, message_id: int | None, account_name: str, now: int) -> None:
         self.connection.execute(update(files).where(files.c.path == path).values(
             status="uploaded", tg_message_id=message_id, tg_account=account_name,
             attempts=files.c.attempts + 1, last_error=None,
-            uploaded_ts=now, last_update_ts=now,
+            claim_token=None, claim_ts=None, uploaded_ts=now, last_update_ts=now,
         ))
 
     def account_state(self, name: str) -> DBRow | None:
@@ -197,7 +237,10 @@ class Database:
         )
         if result.rowcount:
             self.connection.commit()
-            return True
+            row = self.connection.execute(
+                select(leases.c.holder, leases.c.lease_until).where(leases.c.name == name)
+            ).first()
+            return bool(row and row[0] == holder and int(row[1]) >= now)
         try:
             self.connection.execute(insert(leases).values(
                 name=name, holder=holder, lease_until=lease_until, last_update_ts=now,
@@ -215,7 +258,13 @@ class Database:
             .values(lease_until=now + ttl_seconds, last_update_ts=now)
         )
         self.connection.commit()
-        return bool(result.rowcount)
+        if not result.rowcount:
+            self.connection.rollback()
+            return False
+        row = self.connection.execute(
+            select(leases.c.holder, leases.c.lease_until).where(leases.c.name == name)
+        ).first()
+        return bool(row and row[0] == holder and int(row[1]) >= now)
 
     def release_lease(self, name: str, holder: str) -> None:
         self.connection.execute(
@@ -241,7 +290,7 @@ class Database:
         return {str(row[0]): int(row[1]) for row in rows}
 
     def list_files(self, kind: str, limit: int) -> list[dict[str, Any]]:
-        condition = files.c.status.in_(["pending", "failed"]) if kind == "queue" else files.c.status == "uploaded"
+        condition = files.c.status.in_(["pending", "failed", "uploading"]) if kind == "queue" else files.c.status == "uploaded"
         rows = self.connection.execute(
             select(
                 files.c.path, files.c.size, files.c.status, files.c.attempts,
@@ -275,11 +324,21 @@ def connect_database(url_or_path: str, *, config_dir: Path | None = None) -> Dat
 
     metadata.create_all(engine)
 
-    # Migration from pre-multi-account TeleDrive databases.
+    # Dialect-aware migrations for older TeleDrive databases.
     columns = {c["name"] for c in inspect(engine).get_columns("files")}
-    if "tg_account" not in columns:
+    migrations = [
+        Column("tg_account", String(255)),
+        Column("claim_token", String(255)),
+        Column("claim_ts", BigInteger),
+    ]
+    missing = [column for column in migrations if column.name not in columns]
+    if missing:
+        preparer = engine.dialect.identifier_preparer
+        table_name = preparer.quote("files")
         with engine.begin() as conn:
-            conn.exec_driver_sql("ALTER TABLE files ADD COLUMN tg_account VARCHAR(255)")
+            for column in missing:
+                rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
+                conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
 
     connection = engine.connect()
     if engine.url.get_backend_name() == "sqlite":

@@ -235,21 +235,45 @@ def uploader_lock(db_path: str):
     if "://" in db_path:
         import hashlib
         token = hashlib.sha256(db_path.encode("utf-8")).hexdigest()[:20]
-        lock_path = Path(tempfile.gettempdir()) / f"teledrive-{token}.lock"
+        lock_root = Path(os.environ.get("TELEDRIVE_LOCK_DIR", tempfile.gettempdir())).expanduser()
+        lock_root.mkdir(parents=True, exist_ok=True)
+        try:
+            lock_root.chmod(0o700)
+        except OSError:
+            pass
+        lock_path = lock_root / f"teledrive-{token}.lock"
     else:
         lock_path = Path(db_path).with_suffix(Path(db_path).suffix + ".lock")
     ensure_parent(str(lock_path))
     handle = None
     try:
         try:
-            handle = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            handle = os.open(
+                str(lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
         except FileExistsError:
             try:
+                if lock_path.is_symlink():
+                    lock_path.unlink(missing_ok=True)
+                    handle = os.open(
+                        str(lock_path),
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                    )
+                    os.write(handle, str(os.getpid()).encode("ascii"))
+                    yield
+                    return
                 pid = int(lock_path.read_text(encoding="utf-8").strip())
                 os.kill(pid, 0)
             except (OSError, ValueError):
                 lock_path.unlink(missing_ok=True)
-                handle = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                handle = os.open(
+                    str(lock_path),
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
             else:
                 raise RuntimeError(f"Another uploader run is already active (pid {pid})")
         os.write(handle, str(os.getpid()).encode("ascii"))

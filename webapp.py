@@ -254,6 +254,7 @@ def validate_and_write_config(raw: dict[str, Any]) -> None:
 
 def db_connect():
     cfg = effective_config()
+    uploader.validate_storage_paths(cfg)
     return uploader.connect_db(cfg.db_path)
 
 

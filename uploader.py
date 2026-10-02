@@ -29,6 +29,7 @@ ACCOUNT_STRATEGIES = {"single", "round_robin", "failover", "parallel"}
 RUN_HOLDER = f"{os.getpid()}-{secrets.token_hex(12)}"
 LEASE_NAME = "uploader-global"
 LEASE_TTL_SECONDS = int(os.environ.get("TELEDRIVE_LEASE_TTL_SECONDS", "120"))
+CLAIM_STALE_SECONDS = int(os.environ.get("TELEDRIVE_CLAIM_STALE_SECONDS", "86400"))
 
 
 @dataclass(frozen=True)
@@ -323,7 +324,7 @@ def uploaded_today(conn: Database) -> int:
 
 
 def fetch_pending(conn: Database, limit: int) -> list[DBRow]:
-    return conn.pending(limit)
+    return conn.pending(limit, int(time.time()), CLAIM_STALE_SECONDS)
 
 
 def mark_failed(conn: Database, path: str, err: str, attempts_inc: int = 1) -> None:
@@ -516,6 +517,10 @@ def _validate_pending_file(row: DBRow, conn: Database) -> Optional[str]:
 
 async def _process_row(cfg: AppConfig, conn: Database, row: DBRow, account_order: list[AccountRuntime]) -> bool:
     path = row["path"]
+    claim_token = f"{RUN_HOLDER}:{secrets.token_hex(8)}"
+    if not conn.claim_file(path, claim_token, int(time.time()), CLAIM_STALE_SECONDS):
+        logging.info("Skipping already-claimed file: %s", path)
+        return False
     error = _validate_pending_file(row, conn)
     if error:
         logging.warning("Skipped %s: %s", path, error); return False

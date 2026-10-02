@@ -7,14 +7,27 @@ services:
     container_name: teledrive
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${TELEDRIVE_BIND_ADDRESS:-127.0.0.1}:${TELEDRIVE_WEB_PORT:-8080}:8080"
     environment:
       TELEDRIVE_CONFIG: /config/config.yaml
       TELEDRIVE_AUTH_DIR: /data/auth
       TELEDRIVE_WEB_USER: ${TELEDRIVE_WEB_USER:-admin}
       TELEDRIVE_WEB_PASSWORD: ${TELEDRIVE_WEB_PASSWORD:-}
+      TELEDRIVE_ALLOW_INSECURE: ${TELEDRIVE_ALLOW_INSECURE:-0}
+      TELEDRIVE_ALLOWED_SOURCE_ROOTS: /uploads
+      TELEDRIVE_ALLOWED_SESSION_ROOTS: /data/sessions
+      TELEDRIVE_SPLIT_DIR: /data/tmp
       TZ: ${TZ:-Europe/Istanbul}
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     volumes:
       - ./config:/config
       - ./data:/data
-      - ./uploads:/uploads
+      - ./uploads:/uploads:ro

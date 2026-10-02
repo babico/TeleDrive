@@ -27,8 +27,25 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("TELEDRIVE_CONFIG", "/config/config.yaml"))
 AUTH_DIR = Path(os.environ.get("TELEDRIVE_AUTH_DIR", "/data/auth"))
 STATIC_DIR = BASE_DIR / "static"
+
+
+def _load_web_password() -> str:
+    secret_file = os.environ.get("TELEDRIVE_WEB_PASSWORD_FILE", "").strip()
+    if secret_file:
+        path = Path(secret_file)
+        if path.is_symlink():
+            raise RuntimeError("Refusing symlinked TELEDRIVE_WEB_PASSWORD_FILE")
+        try:
+            if path.stat().st_size > 4096:
+                raise RuntimeError("TELEDRIVE_WEB_PASSWORD_FILE is unexpectedly large")
+            return path.read_text(encoding="utf-8").rstrip("\r\n")
+        except OSError as exc:
+            raise RuntimeError("Unable to read TELEDRIVE_WEB_PASSWORD_FILE") from exc
+    return os.environ.get("TELEDRIVE_WEB_PASSWORD", "")
+
+
 WEB_USER = os.environ.get("TELEDRIVE_WEB_USER", "admin")
-WEB_PASSWORD = os.environ.get("TELEDRIVE_WEB_PASSWORD", "")
+WEB_PASSWORD = _load_web_password()
 ALLOW_INSECURE = os.environ.get("TELEDRIVE_ALLOW_INSECURE", "").strip().lower() in {"1", "true", "yes"}
 REDACTED = "__REDACTED__"
 MAX_REQUEST_BYTES = int(os.environ.get("TELEDRIVE_MAX_REQUEST_BYTES", "1048576"))
@@ -326,8 +343,13 @@ async def start_uploader(mode: str) -> dict[str, Any]:
         current_mode = mode
         current_started_at = int(time.time())
         LOG_BUFFER.append("[web] $ " + " ".join(args))
+        child_env = os.environ.copy()
+        for secret_name in ("TELEDRIVE_WEB_PASSWORD", "TELEDRIVE_WEB_PASSWORD_FILE"):
+            child_env.pop(secret_name, None)
         current_process = await asyncio.create_subprocess_exec(
-            *args, cwd=str(BASE_DIR),
+            *args,
+            cwd=str(BASE_DIR),
+            env=child_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

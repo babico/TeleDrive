@@ -6,12 +6,13 @@ import logging
 import os
 import random
 import shutil
-import sqlite3
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Union
+
+from db import Database, DBRow, connect_database, normalize_database_url
 
 import yaml
 from telethon import TelegramClient
@@ -22,6 +23,18 @@ from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError
 # so keep split files below the resulting ~2 GiB boundary with some headroom.
 TELEGRAM_FREE_FILE_LIMIT = 1_900_000_000
 SPLIT_BUFFER_SIZE = 1024 * 1024
+ACCOUNT_STRATEGIES = {"single", "round_robin", "failover", "parallel"}
+
+
+@dataclass(frozen=True)
+class TelegramAccountConfig:
+    name: str
+    api_id: int
+    api_hash: str
+    phone: Optional[str]
+    target: Union[str, int]
+    session_path: str
+    enabled: bool = True
 
 
 @dataclass
@@ -31,6 +44,8 @@ class AppConfig:
     phone: Optional[str]
     target: Union[str, int]
     session_path: str
+    strategy: str
+    accounts: list[TelegramAccountConfig]
     source_dir: str
     allowed_extensions: list[str]
     max_file_size_mb: int
@@ -48,6 +63,30 @@ class AppConfig:
     log_level: str
 
 
+@dataclass
+class AccountRuntime:
+    config: TelegramAccountConfig
+    client: TelegramClient
+    target: object
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    floodwait_until: float = 0.0
+    next_upload_at: float = 0.0
+
+
+@dataclass
+class AccountAttemptResult:
+    success: bool
+    message_id: Optional[int] = None
+    retry_on_other_account: bool = False
+    error: str = ""
+    floodwait_seconds: int = 0
+
+
+def _safe_account_token(name: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", name.strip()).strip("._-")
+    return token or "account"
+
+
 def load_config(path: str) -> AppConfig:
     config_dir = Path(path).expanduser().resolve().parent
 
@@ -56,19 +95,58 @@ def load_config(path: str) -> AppConfig:
         return str(candidate if candidate.is_absolute() else config_dir / candidate)
 
     with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.safe_load(f) or {}
 
     tg = raw["telegram"]
     up = raw["upload"]
     st = raw["state"]
     lg = raw["logging"]
 
+    strategy = str(tg.get("strategy", "single")).strip().lower()
+    default_api_id = int(tg.get("api_id", 0) or 0)
+    default_api_hash = str(tg.get("api_hash", ""))
+    default_target: Union[str, int] = tg.get("target", "me")
+
+    accounts: list[TelegramAccountConfig] = []
+    raw_accounts = tg.get("accounts") or []
+    if raw_accounts:
+        if not isinstance(raw_accounts, list):
+            raise ValueError("telegram.accounts must be a list")
+        for index, item in enumerate(raw_accounts, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"telegram.accounts[{index - 1}] must be a mapping")
+            name = str(item.get("name", f"account-{index}")).strip() or f"account-{index}"
+            session_default = f"data/telethon_{_safe_account_token(name)}"
+            accounts.append(TelegramAccountConfig(
+                name=name,
+                api_id=int(item.get("api_id", default_api_id) or 0),
+                api_hash=str(item.get("api_hash", default_api_hash)),
+                phone=item.get("phone"),
+                target=item.get("target", default_target),
+                session_path=config_path(item.get("session_path", session_default)),
+                enabled=bool(item.get("enabled", True)),
+            ))
+    else:
+        accounts.append(TelegramAccountConfig(
+            name=str(tg.get("name", "default")).strip() or "default",
+            api_id=default_api_id,
+            api_hash=default_api_hash,
+            phone=tg.get("phone"),
+            target=default_target,
+            session_path=config_path(tg.get("session_path", "data/telethon_user")),
+            enabled=True,
+        ))
+
+    enabled_accounts = [a for a in accounts if a.enabled]
+    first = enabled_accounts[0] if enabled_accounts else accounts[0]
     return AppConfig(
-        api_id=int(tg["api_id"]),
-        api_hash=str(tg["api_hash"]),
-        phone=tg.get("phone"),
-        target=tg["target"],
-        session_path=config_path(tg["session_path"]),
+        api_id=first.api_id,
+        api_hash=first.api_hash,
+        phone=first.phone,
+        target=first.target,
+        session_path=first.session_path,
+        strategy=strategy,
+        accounts=accounts,
         source_dir=config_path(up["source_dir"]),
         allowed_extensions=[str(x).lower() for x in up.get("allowed_extensions", [])],
         max_file_size_mb=int(up.get("max_file_size_mb", 0)),
@@ -81,7 +159,10 @@ def load_config(path: str) -> AppConfig:
         floodwait_buffer_seconds=int(up.get("floodwait_buffer_seconds", 5)),
         caption_template=str(up.get("caption_template", "{name}")),
         send_mode=str(up.get("send_mode", "document")).lower(),
-        db_path=config_path(st["db_path"]),
+        db_path=normalize_database_url(
+            st.get("database_url") or st.get("db_path", "data/state.db"),
+            config_dir=config_dir,
+        ),
         log_path=config_path(lg["log_path"]),
         log_level=str(lg.get("level", "INFO")),
     )
@@ -101,36 +182,41 @@ def setup_logging(cfg: AppConfig) -> None:
     )
 
 
-def connect_db(db_path: str) -> sqlite3.Connection:
-    ensure_parent(db_path)
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS files (
-            path TEXT PRIMARY KEY,
-            size INTEGER NOT NULL,
-            mtime REAL NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            tg_message_id INTEGER,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            last_error TEXT,
-            first_seen_ts INTEGER NOT NULL,
-            last_update_ts INTEGER NOT NULL,
-            uploaded_ts INTEGER
-        );
-        """
+def connect_db(db_path: str) -> Database:
+    return connect_database(db_path)
+
+
+def mark_account_state(
+    conn: Database,
+    name: str,
+    state: str,
+    *,
+    last_error: Optional[str] = None,
+    cooldown_until: Optional[int] = None,
+    last_success: bool = False,
+) -> None:
+    now = int(time.time())
+    existing = conn.account_state(name)
+    success_ts = now if last_success else (existing["last_success_ts"] if existing else None)
+    conn.set_account_state(
+        name, state,
+        last_error=last_error[:1000] if last_error else None,
+        cooldown_until=cooldown_until,
+        last_success_ts=success_ts,
+        now=now,
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);")
     conn.commit()
-    return conn
 
 
 @contextmanager
 def uploader_lock(db_path: str):
     """Prevent overlapping uploader processes using an exclusive lock file."""
-    lock_path = Path(db_path).with_suffix(Path(db_path).suffix + ".lock")
+    if "://" in db_path:
+        import hashlib
+        token = hashlib.sha256(db_path.encode("utf-8")).hexdigest()[:20]
+        lock_path = Path(tempfile.gettempdir()) / f"teledrive-{token}.lock"
+    else:
+        lock_path = Path(db_path).with_suffix(Path(db_path).suffix + ".lock")
     ensure_parent(str(lock_path))
     handle = None
     try:
@@ -174,12 +260,9 @@ def file_allowed(path: str, cfg: AppConfig) -> bool:
     return True
 
 
-def scan_and_queue(conn: sqlite3.Connection, cfg: AppConfig) -> tuple[int, int, int]:
+def scan_and_queue(conn: Database, cfg: AppConfig) -> tuple[int, int, int]:
     now = int(time.time())
-    inserted = 0
-    updated = 0
-    unchanged = 0
-
+    inserted = updated = unchanged = 0
     for path in iter_source_files(cfg.source_dir):
         if not file_allowed(path, cfg):
             continue
@@ -187,100 +270,39 @@ def scan_and_queue(conn: sqlite3.Connection, cfg: AppConfig) -> tuple[int, int, 
             stat = os.stat(path)
         except OSError:
             continue
-        size = int(stat.st_size)
-        mtime = float(stat.st_mtime)
-
-        row = conn.execute("SELECT size, mtime, status FROM files WHERE path = ?", (path,)).fetchone()
+        size, mtime = int(stat.st_size), float(stat.st_mtime)
+        row = conn.file_signature(path)
         if row is None:
-            conn.execute(
-                """
-                INSERT INTO files(path, size, mtime, status, first_seen_ts, last_update_ts)
-                VALUES(?, ?, ?, 'pending', ?, ?)
-                """,
-                (path, size, mtime, now, now),
-            )
+            conn.insert_pending(path, size, mtime, now)
             inserted += 1
             continue
-
-        old_size, old_mtime, old_status = int(row[0]), float(row[1]), row[2]
-        if old_size == size and abs(old_mtime - mtime) < 1e-6:
+        if int(row[0]) == size and abs(float(row[1]) - mtime) < 1e-6:
             unchanged += 1
             continue
-
-        # File changed on disk; always re-queue safely.
-        new_status = "pending"
-        conn.execute(
-            """
-            UPDATE files
-            SET size = ?, mtime = ?, status = ?, tg_message_id = NULL,
-                uploaded_ts = NULL, last_error = NULL, last_update_ts = ?
-            WHERE path = ?
-            """,
-            (size, mtime, new_status, now, path),
-        )
+        conn.requeue_changed(path, size, mtime, now)
         updated += 1
-
     conn.commit()
     return inserted, updated, unchanged
 
 
-def uploaded_today(conn: sqlite3.Connection) -> int:
-    row = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM files
-        WHERE status = 'uploaded'
-          AND date(uploaded_ts, 'unixepoch', 'localtime') = date('now', 'localtime')
-        """
-    ).fetchone()
-    return int(row[0] if row else 0)
+def uploaded_today(conn: Database) -> int:
+    now = time.time()
+    local = time.localtime(now)
+    start = int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst)))
+    return conn.uploaded_between(start, start + 86400)
 
 
-def fetch_pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
-        SELECT path, size, mtime, attempts
-        FROM files
-        WHERE status IN ('pending', 'failed')
-        ORDER BY first_seen_ts ASC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    return rows
+def fetch_pending(conn: Database, limit: int) -> list[DBRow]:
+    return conn.pending(limit)
 
 
-def mark_failed(conn: sqlite3.Connection, path: str, err: str, attempts_inc: int = 1) -> None:
-    conn.execute(
-        """
-        UPDATE files
-        SET status = 'failed',
-            attempts = attempts + ?,
-            last_error = ?,
-            last_update_ts = ?
-        WHERE path = ?
-        """,
-        (attempts_inc, err[:1000], int(time.time()), path),
-    )
+def mark_failed(conn: Database, path: str, err: str, attempts_inc: int = 1) -> None:
+    conn.mark_failed(path, err, attempts_inc, int(time.time()))
     conn.commit()
 
 
-def mark_uploaded(conn: sqlite3.Connection, path: str, msg_id: Optional[int]) -> None:
-    now = int(time.time())
-    conn.execute(
-        """
-        UPDATE files
-        SET status = 'uploaded',
-            tg_message_id = ?,
-            attempts = attempts + 1,
-            last_error = NULL,
-            uploaded_ts = ?,
-            last_update_ts = ?
-        WHERE path = ?
-        """,
-        (msg_id, now, now, path),
-    )
+def mark_uploaded(conn: Database, path: str, msg_id: Optional[int], account_name: str) -> None:
+    conn.mark_uploaded(path, msg_id, account_name, int(time.time()))
     conn.commit()
 
 
@@ -290,41 +312,45 @@ def build_caption(path: str, template: str) -> str:
     return template.format(name=name, stem=stem, ext=ext)[:1024]
 
 
-def wait_for_auth_value(auth_dir: Optional[str], name: str, timeout: int = 600) -> str:
+def wait_for_auth_value(auth_dir: Optional[str], name: str, timeout: int = 600, account_name: Optional[str] = None) -> str:
+    suffix = f" for account '{account_name}'" if account_name else ""
     if not auth_dir:
-        return input(f"Please enter the {name}: ")
-    print(f"Please enter the {name}:", flush=True)
-    path = Path(auth_dir) / f"{name.replace(' ', '_')}.txt"
+        return input(f"Please enter the {name}{suffix}: ")
+    print(f"Please enter the {name}{suffix}:", flush=True)
+    root = Path(auth_dir)
+    generic = root / f"{name.replace(' ', '_')}.txt"
+    candidates = [generic]
+    if account_name:
+        candidates.insert(0, root / f"{_safe_account_token(account_name)}_{name.replace(' ', '_')}.txt")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            value = path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            value = ""
-        if value:
-            path.unlink(missing_ok=True)
-            return value
+        for path in candidates:
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                value = ""
+            if value:
+                path.unlink(missing_ok=True)
+                return value
         time.sleep(0.25)
-    raise TimeoutError(f"Timed out waiting for Telegram {name}")
+    raise TimeoutError(f"Timed out waiting for Telegram {name}{suffix}")
 
 
-async def ensure_client(cfg: AppConfig, login_code: Optional[str] = None, login_password: Optional[str] = None, auth_dir: Optional[str] = None) -> TelegramClient:
-    ensure_parent(cfg.session_path)
-    client = TelegramClient(cfg.session_path, cfg.api_id, cfg.api_hash)
-    if cfg.phone:
+async def ensure_client(account: TelegramAccountConfig, login_code: Optional[str] = None, login_password: Optional[str] = None, auth_dir: Optional[str] = None) -> TelegramClient:
+    ensure_parent(account.session_path)
+    client = TelegramClient(account.session_path, account.api_id, account.api_hash)
+    if account.phone:
         await client.connect()
         if not await client.is_user_authorized():
-            logging.info("Requesting a new Telegram login code for %s", cfg.phone)
-            sent = await client.send_code_request(cfg.phone)
-            logging.info("Telegram login code requested. Check your Telegram app for the code.")
-            code = login_code or wait_for_auth_value(auth_dir, "code")
+            logging.info("[%s] Requesting Telegram login code for %s", account.name, account.phone)
+            sent = await client.send_code_request(account.phone)
+            code = login_code or wait_for_auth_value(auth_dir, "code", account_name=account.name)
             try:
-                await client.sign_in(cfg.phone, code=code, phone_code_hash=sent.phone_code_hash)
+                await client.sign_in(account.phone, code=code, phone_code_hash=sent.phone_code_hash)
             except SessionPasswordNeededError:
-                logging.info("Telegram 2-step verification is required.")
-                password = login_password or wait_for_auth_value(auth_dir, "password")
+                password = login_password or wait_for_auth_value(auth_dir, "password", account_name=account.name)
                 await client.sign_in(password=password)
-        logging.info("Telegram authentication complete.")
+        logging.info("[%s] Telegram authentication complete.", account.name)
     else:
         await client.start()
     return client
@@ -390,156 +416,208 @@ def is_file_parts_invalid(error: BaseException) -> bool:
     return "file_parts_invalid" in message or "number of file parts is invalid" in message
 
 
-async def process_uploads(cfg: AppConfig, conn: sqlite3.Connection, login_code: Optional[str] = None, login_password: Optional[str] = None, auth_dir: Optional[str] = None) -> None:
-    client = await ensure_client(cfg, login_code=login_code, login_password=login_password, auth_dir=auth_dir)
-    async with client:
-        target = await client.get_entity(resolve_target(cfg.target))
-        today_count = uploaded_today(conn)
-        if today_count >= cfg.max_files_per_day:
-            logging.info(
-                "Daily limit reached (%s/%s). Exiting.",
-                today_count,
-                cfg.max_files_per_day,
-            )
-            return
+async def _wait_for_account_pacing(cfg: AppConfig, runtime: AccountRuntime) -> None:
+    delay = runtime.next_upload_at - time.monotonic()
+    if delay > 0:
+        await asyncio.sleep(delay)
 
-        pending = fetch_pending(conn, limit=cfg.max_files_per_run * 3)
-        if not pending:
-            logging.info("No pending files.")
-            return
 
-        done_this_run = 0
-        for row in pending:
-            if done_this_run >= cfg.max_files_per_run:
-                break
-            if today_count >= cfg.max_files_per_day:
-                logging.info("Reached daily cap during run.")
-                break
-
-            path = row["path"]
-            expected_size = int(row["size"])
-            expected_mtime = float(row["mtime"])
-
-            if not os.path.exists(path):
-                mark_failed(conn, path, "File missing on disk")
-                logging.warning("Missing file: %s", path)
-                continue
-
+async def _attempt_upload_on_account(cfg: AppConfig, runtime: AccountRuntime, source_path: str, caption: str, upload_paths: list[str]) -> AccountAttemptResult:
+    async with runtime.lock:
+        now = time.monotonic()
+        if runtime.floodwait_until > now:
+            remaining = max(1, int(runtime.floodwait_until - now))
+            return AccountAttemptResult(False, retry_on_other_account=True, error=f"Account cooldown for {remaining}s", floodwait_seconds=remaining)
+        for attempt in range(1, cfg.retry_attempts + 1):
+            sent_ids: list[int] = []
             try:
-                st = os.stat(path)
-            except OSError as e:
-                mark_failed(conn, path, f"os.stat failed: {e}")
-                logging.warning("Stat failed for %s: %s", path, e)
-                continue
+                await _wait_for_account_pacing(cfg, runtime)
+                msg_id: Optional[int] = None
+                for part_number, upload_path in enumerate(upload_paths, start=1):
+                    part_caption, send_mode = caption, cfg.send_mode
+                    if len(upload_paths) > 1:
+                        part_caption = f"{caption} [part {part_number}/{len(upload_paths)}]"
+                        send_mode = "document"
+                    msg = await upload_one(runtime.client, runtime.target, upload_path, part_caption, send_mode)
+                    msg_id = getattr(msg, "id", None)
+                    if msg_id is not None:
+                        sent_ids.append(int(msg_id))
+                if msg_id is None:
+                    raise RuntimeError(f"Telegram returned no message ID for {source_path}")
+                runtime.next_upload_at = time.monotonic() + random.randint(cfg.sleep_min_seconds, cfg.sleep_max_seconds)
+                return AccountAttemptResult(True, message_id=msg_id)
+            except FloodWaitError as exc:
+                wait_s = int(getattr(exc, "seconds", 0)) + cfg.floodwait_buffer_seconds
+                runtime.floodwait_until = max(runtime.floodwait_until, time.monotonic() + wait_s)
+                if sent_ids:
+                    try: await runtime.client.delete_messages(runtime.target, sent_ids)
+                    except Exception: pass
+                return AccountAttemptResult(False, retry_on_other_account=True, error=f"FloodWait: {wait_s}s", floodwait_seconds=wait_s)
+            except (RPCError, OSError, TimeoutError) as exc:
+                if sent_ids:
+                    try: await runtime.client.delete_messages(runtime.target, sent_ids)
+                    except Exception: pass
+                if is_file_parts_invalid(exc):
+                    return AccountAttemptResult(False, error=f"Too large for Telegram free-account limit: {exc}")
+                if attempt >= cfg.retry_attempts:
+                    return AccountAttemptResult(False, retry_on_other_account=True, error=f"{type(exc).__name__}: {exc}")
+                await asyncio.sleep(cfg.backoff_base_seconds * (2 ** (attempt - 1)))
+            except Exception as exc:
+                if sent_ids:
+                    try: await runtime.client.delete_messages(runtime.target, sent_ids)
+                    except Exception: pass
+                return AccountAttemptResult(False, error=f"Unexpected: {type(exc).__name__}: {exc}")
+    return AccountAttemptResult(False, error="Unknown upload failure")
 
-            # Avoid uploading files that changed after scanning.
-            if int(st.st_size) != expected_size or abs(float(st.st_mtime) - expected_mtime) > 1e-6:
-                mark_failed(conn, path, "File changed since scan; will requeue on next scan")
-                logging.warning("Changed file skipped (will requeue): %s", path)
-                continue
 
-            caption = build_caption(path, cfg.caption_template)
-            ok = False
-            split_dir: Optional[str] = None
-            for attempt in range(1, cfg.retry_attempts + 1):
-                try:
-                    upload_paths = [path]
-                    if expected_size >= TELEGRAM_FREE_FILE_LIMIT:
-                        if split_dir is None:
-                            split_dir, upload_paths = split_for_telegram(path)
-                        else:
-                            upload_paths = sorted(str(p) for p in Path(split_dir).iterdir())
+def _validate_pending_file(row: DBRow, conn: Database) -> Optional[str]:
+    path = row["path"]
+    if not os.path.exists(path):
+        mark_failed(conn, path, "File missing on disk"); return "File missing on disk"
+    try: st = os.stat(path)
+    except OSError as exc:
+        mark_failed(conn, path, f"os.stat failed: {exc}"); return f"os.stat failed: {exc}"
+    if int(st.st_size) != int(row["size"]) or abs(float(st.st_mtime) - float(row["mtime"])) > 1e-6:
+        mark_failed(conn, path, "File changed since scan; will requeue on next scan"); return "File changed since scan"
+    return None
 
-                    msg_id = None
-                    for part_number, upload_path in enumerate(upload_paths, start=1):
-                        part_caption = caption
-                        send_mode = cfg.send_mode
-                        if len(upload_paths) > 1:
-                            part_caption = f"{caption} [part {part_number}/{len(upload_paths)}]"
-                            # Raw byte parts are not independently playable media.
-                            send_mode = "document"
-                        msg = await upload_one(client, target, upload_path, part_caption, send_mode)
-                        msg_id = getattr(msg, "id", None)
 
-                    assert msg_id is not None
-                    mark_uploaded(conn, path, msg_id)
-                    done_this_run += 1
-                    today_count += 1
-                    ok = True
-                    logging.info(
-                        "Uploaded (%s/%s today, %s this run): %s",
-                        today_count,
-                        cfg.max_files_per_day,
-                        done_this_run,
-                        path,
-                    )
-                    break
-                except FloodWaitError as e:
-                    wait_s = int(getattr(e, "seconds", 0)) + cfg.floodwait_buffer_seconds
-                    mark_failed(conn, path, f"FloodWait: {wait_s}s", attempts_inc=0)
-                    logging.warning("FloodWait for %ss while uploading %s", wait_s, path)
-                    await asyncio.sleep(wait_s)
-                    break
-                except (RPCError, OSError, TimeoutError) as e:
-                    if is_file_parts_invalid(e):
-                        mark_failed(conn, path, f"Too large for Telegram free-account limit: {e}")
-                        logging.error("Skipped oversized file %s: %s", path, e)
-                        break
-                    if attempt >= cfg.retry_attempts:
-                        mark_failed(conn, path, f"{type(e).__name__}: {e}")
-                        logging.error("Permanent failure %s: %s", path, e)
-                    else:
-                        backoff = cfg.backoff_base_seconds * (2 ** (attempt - 1))
-                        logging.warning(
-                            "Retry %s/%s for %s after %ss due to: %s",
-                            attempt,
-                            cfg.retry_attempts,
-                            path,
-                            backoff,
-                            e,
-                        )
-                        await asyncio.sleep(backoff)
-                except Exception as e:
-                    mark_failed(conn, path, f"Unexpected: {type(e).__name__}: {e}")
-                    logging.exception("Unexpected error for %s: %s", path, e)
-                    break
+async def _process_row(cfg: AppConfig, conn: Database, row: DBRow, account_order: list[AccountRuntime]) -> bool:
+    path = row["path"]
+    error = _validate_pending_file(row, conn)
+    if error:
+        logging.warning("Skipped %s: %s", path, error); return False
+    caption = build_caption(path, cfg.caption_template)
+    split_dir: Optional[str] = None
+    upload_paths = [path]
+    try:
+        if int(row["size"]) >= TELEGRAM_FREE_FILE_LIMIT:
+            split_dir, upload_paths = split_for_telegram(path)
+        last_error = "No available Telegram account"
+        for runtime in account_order:
+            mark_account_state(conn, runtime.config.name, "uploading")
+            result = await _attempt_upload_on_account(cfg, runtime, path, caption, upload_paths)
+            if result.success:
+                mark_uploaded(conn, path, result.message_id, runtime.config.name)
+                mark_account_state(conn, runtime.config.name, "ready", last_success=True)
+                logging.info("[%s] Uploaded: %s", runtime.config.name, path)
+                return True
+            last_error = result.error or last_error
+            if result.floodwait_seconds:
+                mark_account_state(conn, runtime.config.name, "cooldown", last_error=last_error, cooldown_until=int(time.time()) + result.floodwait_seconds)
+            else:
+                mark_account_state(conn, runtime.config.name, "error", last_error=last_error)
+            if not result.retry_on_other_account:
+                break
+        mark_failed(conn, path, last_error)
+        logging.error("Upload failed for %s: %s", path, last_error)
+        return False
+    finally:
+        if split_dir: shutil.rmtree(split_dir, ignore_errors=True)
 
-            if split_dir is not None:
-                shutil.rmtree(split_dir, ignore_errors=True)
 
-            if ok:
-                sleep_s = random.randint(cfg.sleep_min_seconds, cfg.sleep_max_seconds)
-                logging.info("Sleeping %ss", sleep_s)
-                await asyncio.sleep(sleep_s)
+def _rotated_accounts(accounts: list[AccountRuntime], start: int) -> list[AccountRuntime]:
+    if not accounts: return []
+    index = start % len(accounts)
+    return accounts[index:] + accounts[:index]
+
+
+async def _connect_accounts(cfg: AppConfig, conn: Database, login_code: Optional[str], login_password: Optional[str], auth_dir: Optional[str]) -> list[AccountRuntime]:
+    enabled = [a for a in cfg.accounts if a.enabled]
+    requested = enabled[:1] if cfg.strategy == "single" else enabled
+    runtimes: list[AccountRuntime] = []
+    one_shot_code, one_shot_password = login_code, login_password
+    for account in requested:
+        client: Optional[TelegramClient] = None
+        try:
+            mark_account_state(conn, account.name, "connecting")
+            client = await ensure_client(account, one_shot_code, one_shot_password, auth_dir)
+            one_shot_code = one_shot_password = None
+            target = await client.get_entity(resolve_target(account.target))
+            runtimes.append(AccountRuntime(account, client, target))
+            mark_account_state(conn, account.name, "ready")
+        except Exception as exc:
+            mark_account_state(conn, account.name, "unavailable", last_error=f"{type(exc).__name__}: {exc}")
+            if client is not None:
+                try: await client.disconnect()
+                except Exception: pass
+            if cfg.strategy == "single": raise
+    if not runtimes: raise RuntimeError("No enabled Telegram account could be connected")
+    return runtimes
+
+
+async def _disconnect_accounts(conn: Database, runtimes: list[AccountRuntime]) -> None:
+    for runtime in runtimes:
+        try:
+            await runtime.client.disconnect()
+            remaining = max(0, int(runtime.floodwait_until - time.monotonic() + 0.999))
+            if remaining:
+                mark_account_state(conn, runtime.config.name, "cooldown", last_error=f"FloodWait cooldown: {remaining}s remaining", cooldown_until=int(time.time()) + remaining)
+            else:
+                mark_account_state(conn, runtime.config.name, "idle")
+        except Exception as exc:
+            mark_account_state(conn, runtime.config.name, "error", last_error=f"Disconnect: {exc}")
+
+
+async def process_uploads(cfg: AppConfig, conn: Database, login_code: Optional[str] = None, login_password: Optional[str] = None, auth_dir: Optional[str] = None) -> None:
+    runtimes = await _connect_accounts(cfg, conn, login_code, login_password, auth_dir)
+    try:
+        remaining_today = cfg.max_files_per_day - uploaded_today(conn)
+        if remaining_today <= 0:
+            logging.info("Daily limit reached."); return
+        batch_limit = min(cfg.max_files_per_run, remaining_today)
+        rows = fetch_pending(conn, max(batch_limit * 3, batch_limit))[:batch_limit]
+        if not rows:
+            logging.info("No pending files."); return
+        if cfg.strategy == "parallel" and len(runtimes) > 1:
+            buckets: list[list[DBRow]] = [[] for _ in runtimes]
+            for index, row in enumerate(rows): buckets[index % len(runtimes)].append(row)
+            async def worker(start_index: int, bucket: list[DBRow]) -> int:
+                count, order = 0, _rotated_accounts(runtimes, start_index)
+                for row in bucket:
+                    if await _process_row(cfg, conn, row, order): count += 1
+                return count
+            done = sum(await asyncio.gather(*(worker(i,b) for i,b in enumerate(buckets) if b)))
+        else:
+            done, rr_cursor = 0, 0
+            for row in rows:
+                if cfg.strategy == "round_robin":
+                    order = _rotated_accounts(runtimes, rr_cursor); rr_cursor = (rr_cursor + 1) % len(runtimes)
+                elif cfg.strategy == "failover": order = list(runtimes)
+                else: order = [runtimes[0]]
+                if await _process_row(cfg, conn, row, order): done += 1
+        logging.info("Upload batch complete. uploaded=%s failed_or_deferred=%s strategy=%s", done, len(rows)-done, cfg.strategy)
+    finally:
+        await _disconnect_accounts(conn, runtimes)
 
 
 def validate_config(cfg: AppConfig) -> None:
-    if cfg.sleep_min_seconds <= 0 or cfg.sleep_max_seconds <= 0:
-        raise ValueError("Sleep values must be > 0")
-    if cfg.sleep_min_seconds > cfg.sleep_max_seconds:
-        raise ValueError("sleep_min_seconds cannot be greater than sleep_max_seconds")
-    if cfg.max_files_per_run <= 0:
-        raise ValueError("max_files_per_run must be > 0")
-    if cfg.max_files_per_day <= 0:
-        raise ValueError("max_files_per_day must be > 0")
-    if cfg.retry_attempts <= 0:
-        raise ValueError("retry_attempts must be > 0")
-    if cfg.backoff_base_seconds < 0 or cfg.floodwait_buffer_seconds < 0:
-        raise ValueError("Backoff and floodwait buffer values cannot be negative")
-    if cfg.max_file_size_mb < 0:
-        raise ValueError("max_file_size_mb cannot be negative")
-    if cfg.send_mode not in {"document", "media", "auto"}:
-        raise ValueError("send_mode must be document, media, or auto")
-    if not cfg.api_hash.strip():
-        raise ValueError("api_hash must not be empty")
-    if not str(cfg.target).strip():
-        raise ValueError("target must not be empty")
-    try:
-        build_caption("example.txt", cfg.caption_template)
-    except (KeyError, ValueError, IndexError) as exc:
-        raise ValueError("caption_template may only use {name}, {stem}, and {ext}") from exc
-    if not os.path.isdir(cfg.source_dir):
-        raise ValueError(f"source_dir not found: {cfg.source_dir}")
+    if cfg.strategy not in ACCOUNT_STRATEGIES:
+        raise ValueError("telegram.strategy must be single, round_robin, failover, or parallel")
+    if not cfg.accounts or not any(a.enabled for a in cfg.accounts):
+        raise ValueError("At least one Telegram account must be enabled")
+    names, sessions = set(), set()
+    for account in cfg.accounts:
+        if not account.name.strip(): raise ValueError("Telegram account name must not be empty")
+        if account.name in names: raise ValueError(f"Duplicate Telegram account name: {account.name}")
+        names.add(account.name)
+        session = os.path.abspath(account.session_path)
+        if session in sessions: raise ValueError(f"Telegram accounts must use different session_path values: {account.session_path}")
+        sessions.add(session)
+        if account.enabled:
+            if account.api_id <= 0: raise ValueError(f"Telegram account '{account.name}' has an invalid api_id")
+            if not account.api_hash.strip(): raise ValueError(f"Telegram account '{account.name}' api_hash must not be empty")
+            if not str(account.target).strip(): raise ValueError(f"Telegram account '{account.name}' target must not be empty")
+    if cfg.sleep_min_seconds <= 0 or cfg.sleep_max_seconds <= 0: raise ValueError("Sleep values must be > 0")
+    if cfg.sleep_min_seconds > cfg.sleep_max_seconds: raise ValueError("sleep_min_seconds cannot be greater than sleep_max_seconds")
+    if cfg.max_files_per_run <= 0 or cfg.max_files_per_day <= 0: raise ValueError("Upload limits must be > 0")
+    if cfg.retry_attempts <= 0: raise ValueError("retry_attempts must be > 0")
+    if cfg.backoff_base_seconds < 0 or cfg.floodwait_buffer_seconds < 0: raise ValueError("Backoff and floodwait buffer values cannot be negative")
+    if cfg.max_file_size_mb < 0: raise ValueError("max_file_size_mb cannot be negative")
+    if cfg.send_mode not in {"document", "media", "auto"}: raise ValueError("send_mode must be document, media, or auto")
+    try: build_caption("example.txt", cfg.caption_template)
+    except (KeyError, ValueError, IndexError) as exc: raise ValueError("caption_template may only use {name}, {stem}, and {ext}") from exc
+    if not os.path.isdir(cfg.source_dir): raise ValueError(f"source_dir not found: {cfg.source_dir}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -561,16 +639,17 @@ async def async_main() -> int:
     validate_config(cfg)
     conn = connect_db(cfg.db_path)
 
-    with uploader_lock(cfg.db_path):
-        if not args.no_scan:
-            inserted, updated, unchanged = scan_and_queue(conn, cfg)
-            logging.info("Scan complete. inserted=%s updated=%s unchanged=%s", inserted, updated, unchanged)
-
-        if args.scan_only and not args.run_once:
-            return 0
-
-        await process_uploads(cfg, conn, login_code=args.login_code, login_password=args.login_password, auth_dir=args.auth_dir)
-    return 0
+    try:
+        with uploader_lock(cfg.db_path):
+            if not args.no_scan:
+                inserted, updated, unchanged = scan_and_queue(conn, cfg)
+                logging.info("Scan complete. inserted=%s updated=%s unchanged=%s", inserted, updated, unchanged)
+            if args.scan_only and not args.run_once:
+                return 0
+            await process_uploads(cfg, conn, login_code=args.login_code, login_password=args.login_password, auth_dir=args.auth_dir)
+        return 0
+    finally:
+        conn.close()
 
 
 def main() -> int:

@@ -18,6 +18,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, statu
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import uploader
 from db import redact_database_url
@@ -31,6 +32,11 @@ WEB_PASSWORD = os.environ.get("TELEDRIVE_WEB_PASSWORD", "")
 ALLOW_INSECURE = os.environ.get("TELEDRIVE_ALLOW_INSECURE", "").strip().lower() in {"1", "true", "yes"}
 REDACTED = "__REDACTED__"
 MAX_REQUEST_BYTES = int(os.environ.get("TELEDRIVE_MAX_REQUEST_BYTES", "1048576"))
+ALLOWED_HOSTS = [
+    item.strip()
+    for item in os.environ.get("TELEDRIVE_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",")
+    if item.strip()
+]
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
 PROMPT_RE = re.compile(r"Please enter the (code|password) for account '([^']+)':", re.I)
 
@@ -53,7 +59,8 @@ def _secure_mkdir(path: Path) -> None:
 
 def _secure_write(path: Path, content: str) -> None:
     _secure_mkdir(path.parent)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
@@ -132,6 +139,8 @@ def default_config() -> dict[str, Any]:
 
 def ensure_config() -> None:
     _secure_mkdir(CONFIG_PATH.parent)
+    if CONFIG_PATH.is_symlink():
+        raise RuntimeError("Refusing to use a symlinked TeleDrive config file")
     _secure_mkdir(AUTH_DIR)
     _secure_mkdir(Path("/data/sessions"))
     _secure_mkdir(Path("/data/tmp"))
@@ -226,6 +235,18 @@ def db_connect():
     return uploader.connect_db(cfg.db_path)
 
 
+def _cleanup_auth_files() -> None:
+    if not AUTH_DIR.exists():
+        return
+    for pattern in ("*_code.txt", "*_password.txt", "*.tmp"):
+        for path in AUTH_DIR.glob(pattern):
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def process_snapshot() -> dict[str, Any]:
     proc = current_process
     return {
@@ -260,6 +281,7 @@ async def _capture_process(proc: asyncio.subprocess.Process) -> None:
                 current_mode = None
                 current_started_at = None
                 current_prompt = None
+                _cleanup_auth_files()
 
 
 async def start_uploader(mode: str) -> dict[str, Any]:
@@ -276,6 +298,7 @@ async def start_uploader(mode: str) -> dict[str, Any]:
             args.extend(["--run-once", "--no-scan"])
         else:
             args.append("--run-once")
+        _cleanup_auth_files()
         current_prompt = None
         current_mode = mode
         current_started_at = int(time.time())
@@ -318,7 +341,7 @@ async def scheduler_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOG_BUFFER.append(f"[web] scheduler error: {exc}")
+            LOG_BUFFER.append(_scrub_text(f"[web] scheduler error: {exc}"))
             await asyncio.sleep(10)
 
 
@@ -330,12 +353,14 @@ async def lifespan(_: FastAPI):
         raise RuntimeError(
             "TELEDRIVE_WEB_PASSWORD is required. Set TELEDRIVE_ALLOW_INSECURE=1 only for explicitly trusted local deployments."
         )
+    if WEB_PASSWORD and len(WEB_PASSWORD) < 16:
+        raise RuntimeError("TELEDRIVE_WEB_PASSWORD must be at least 16 characters")
     ensure_config()
     try:
         conn = db_connect()
         conn.close()
     except Exception as exc:
-        LOG_BUFFER.append(f"[web] startup database warning: {exc}")
+        LOG_BUFFER.append(_scrub_text(f"[web] startup database warning: {exc}"))
     scheduler_task = asyncio.create_task(scheduler_loop())
     yield
     if scheduler_task:
@@ -343,18 +368,36 @@ async def lifespan(_: FastAPI):
     await stop_uploader()
 
 
-app = FastAPI(title="TeleDrive Web UI", version="2.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="TeleDrive Web UI",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_REQUEST_BYTES:
+    if request.method in {"POST", "PUT", "PATCH"}:
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_REQUEST_BYTES:
                 return JSONResponse(status_code=413, content={"detail": "Request body too large"})
-        except ValueError:
-            pass
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            delivered = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        request = Request(request.scope, receive)
+
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -362,7 +405,7 @@ async def security_middleware(request: Request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
-        "form-action 'self'; connect-src 'self'; img-src 'self' data:; "
+        "form-action 'self'; object-src 'none'; connect-src 'self'; img-src 'self' data:; "
         "style-src 'self' 'unsafe-inline'; script-src 'self'"
     )
     if request.url.path == "/" or request.url.path.startswith("/api/"):

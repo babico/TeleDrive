@@ -21,6 +21,7 @@ services:
       TELEDRIVE_ALLOWED_LOG_ROOTS: /data
       TELEDRIVE_ALLOWED_SQLITE_ROOTS: /data
       TELEDRIVE_SPLIT_DIR: /data/tmp
+      TELEDRIVE_LOCK_DIR: /data/tmp
       TZ: ${TZ:-Europe/Istanbul}
     init: true
     read_only: true

@@ -3,6 +3,7 @@ import argparse
 import asyncio
 from contextlib import contextmanager
 import logging
+import getpass
 import os
 import random
 import re
@@ -179,10 +180,19 @@ def ensure_parent(path: str) -> None:
 
 
 _LOG_SECRET_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\s]+:)[^@\s]+(@)")
+_LOG_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:password|passwd|pwd|token|access_token|secret|api_key|apikey)=)[^&#\s]+"
+)
 
 
 def _scrub_log_text(value: str) -> str:
-    return _LOG_SECRET_URL_RE.sub(r"\1***\2", value)
+    value = _LOG_SECRET_URL_RE.sub(r"\1***\2", value)
+    return _LOG_QUERY_SECRET_RE.sub(r"\1***", value)
+
+
+def _safe_error_text(value: object, limit: int = 1000) -> str:
+    cleaned = _scrub_log_text(str(value)).replace("\r", "\\r").replace("\n", "\\n")
+    return cleaned[:limit]
 
 
 class _RedactingFormatter(logging.Formatter):
@@ -221,7 +231,7 @@ def mark_account_state(
     success_ts = now if last_success else (existing["last_success_ts"] if existing else None)
     conn.set_account_state(
         name, state,
-        last_error=last_error[:1000] if last_error else None,
+        last_error=_safe_error_text(last_error) if last_error else None,
         cooldown_until=cooldown_until,
         last_success_ts=success_ts,
         now=now,
@@ -375,7 +385,7 @@ def fetch_pending(conn: Database, limit: int) -> list[DBRow]:
 
 
 def mark_failed(conn: Database, path: str, err: str, attempts_inc: int = 1) -> None:
-    conn.mark_failed(path, err, attempts_inc, int(time.time()))
+    conn.mark_failed(path, _safe_error_text(err), attempts_inc, int(time.time()))
     conn.commit()
 
 
@@ -393,6 +403,8 @@ def build_caption(path: str, template: str) -> str:
 def wait_for_auth_value(auth_dir: Optional[str], name: str, timeout: int = 600, account_name: Optional[str] = None) -> str:
     suffix = f" for account '{account_name}'" if account_name else ""
     if not auth_dir:
+        if name == "password":
+            return getpass.getpass(f"Please enter the {name}{suffix}: ")
         return input(f"Please enter the {name}{suffix}: ")
     print(f"Please enter the {name}{suffix}:", flush=True)
     root = Path(auth_dir)
@@ -405,6 +417,9 @@ def wait_for_auth_value(auth_dir: Optional[str], name: str, timeout: int = 600, 
     while time.time() < deadline:
         for path in candidates:
             try:
+                if path.is_symlink():
+                    path.unlink(missing_ok=True)
+                    continue
                 value = path.read_text(encoding="utf-8").strip()
             except FileNotFoundError:
                 value = ""
@@ -431,7 +446,13 @@ async def ensure_client(account: TelegramAccountConfig, login_code: Optional[str
                 await client.sign_in(password=password)
         logging.info("[%s] Telegram authentication complete.", account.name)
     else:
-        await client.start()
+        await client.connect()
+        if not await client.is_user_authorized():
+            if auth_dir:
+                raise RuntimeError(
+                    f"Telegram account '{account.name}' has no authorized session; configure phone for Web UI login"
+                )
+            await client.start()
     return client
 
 
@@ -723,7 +744,12 @@ def validate_config(cfg: AppConfig) -> None:
         if account.enabled:
             if account.api_id <= 0: raise ValueError(f"Telegram account '{account.name}' has an invalid api_id")
             if not account.api_hash.strip(): raise ValueError(f"Telegram account '{account.name}' api_hash must not be empty")
-            if not str(account.target).strip(): raise ValueError(f"Telegram account '{account.name}' target must not be empty")
+            if account.phone and not re.fullmatch(r"\+?[0-9]{5,20}", str(account.phone)):
+                raise ValueError(f"Telegram account '{account.name}' has an invalid phone number")
+            target_text = str(account.target)
+            if not target_text.strip(): raise ValueError(f"Telegram account '{account.name}' target must not be empty")
+            if len(target_text) > 256 or any(ord(ch) < 32 for ch in target_text):
+                raise ValueError(f"Telegram account '{account.name}' target contains invalid characters")
     if cfg.sleep_min_seconds <= 0 or cfg.sleep_max_seconds <= 0: raise ValueError("Sleep values must be > 0")
     if cfg.sleep_min_seconds > cfg.sleep_max_seconds: raise ValueError("sleep_min_seconds cannot be greater than sleep_max_seconds")
     if cfg.max_files_per_run <= 0 or cfg.max_files_per_day <= 0: raise ValueError("Upload limits must be > 0")

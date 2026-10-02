@@ -358,9 +358,10 @@ def wait_for_auth_value(auth_dir: Optional[str], name: str, timeout: int = 600, 
     print(f"Please enter the {name}{suffix}:", flush=True)
     root = Path(auth_dir)
     generic = root / f"{name.replace(' ', '_')}.txt"
-    candidates = [generic]
     if account_name:
-        candidates.insert(0, root / f"{_safe_account_token(account_name)}_{name.replace(' ', '_')}.txt")
+        candidates = [root / f"{_safe_account_token(account_name)}_{name.replace(' ', '_')}.txt"]
+    else:
+        candidates = [generic]
     deadline = time.time() + timeout
     while time.time() < deadline:
         for path in candidates:
@@ -381,7 +382,7 @@ async def ensure_client(account: TelegramAccountConfig, login_code: Optional[str
     if account.phone:
         await client.connect()
         if not await client.is_user_authorized():
-            logging.info("[%s] Requesting Telegram login code for %s", account.name, account.phone)
+            logging.info("[%s] Requesting Telegram login code", account.name)
             sent = await client.send_code_request(account.phone)
             code = login_code or wait_for_auth_value(auth_dir, "code", account_name=account.name)
             try:
@@ -519,8 +520,11 @@ async def _attempt_upload_on_account(cfg: AppConfig, runtime: AccountRuntime, so
     return AccountAttemptResult(False, error="Unknown upload failure")
 
 
-def _validate_pending_file(row: DBRow, conn: Database) -> Optional[str]:
+def _validate_pending_file(row: DBRow, conn: Database, cfg: AppConfig) -> Optional[str]:
     path = row["path"]
+    if os.path.islink(path) or not _path_within(path, cfg.source_dir):
+        mark_failed(conn, path, "Unsafe path: symlink or outside source root")
+        return "Unsafe path"
     if not os.path.exists(path):
         mark_failed(conn, path, "File missing on disk"); return "File missing on disk"
     try: st = os.stat(path)
@@ -535,11 +539,11 @@ async def _process_row(cfg: AppConfig, conn: Database, row: DBRow, account_order
     path = row["path"]
     claim_token = f"{RUN_HOLDER}:{secrets.token_hex(8)}"
     if not conn.claim_file(path, claim_token, int(time.time()), CLAIM_STALE_SECONDS):
-        logging.info("Skipping already-claimed file: %s", path)
+        logging.info("Skipping already-claimed file: %r", path)
         return False
-    error = _validate_pending_file(row, conn)
+    error = _validate_pending_file(row, conn, cfg)
     if error:
-        logging.warning("Skipped %s: %s", path, error); return False
+        logging.warning("Skipped %r: %s", path, error); return False
     caption = build_caption(path, cfg.caption_template)
     split_dir: Optional[str] = None
     upload_paths = [path]
@@ -556,7 +560,7 @@ async def _process_row(cfg: AppConfig, conn: Database, row: DBRow, account_order
             if result.success:
                 mark_uploaded(conn, path, result.message_id, runtime.config.name)
                 mark_account_state(conn, runtime.config.name, "ready", last_success=True)
-                logging.info("[%s] Uploaded: %s", runtime.config.name, path)
+                logging.info("[%s] Uploaded: %r", runtime.config.name, path)
                 return True
             last_error = result.error or last_error
             if result.floodwait_seconds:
@@ -566,7 +570,11 @@ async def _process_row(cfg: AppConfig, conn: Database, row: DBRow, account_order
             if not result.retry_on_other_account:
                 break
         mark_failed(conn, path, last_error)
-        logging.error("Upload failed for %s: %s", path, last_error)
+        logging.error("Upload failed for %r: %s", path, last_error)
+        return False
+    except Exception as exc:
+        mark_failed(conn, path, f"{type(exc).__name__}: {exc}")
+        logging.exception("Unexpected upload pipeline failure for %r", path)
         return False
     finally:
         if split_dir: shutil.rmtree(split_dir, ignore_errors=True)
@@ -665,7 +673,8 @@ def validate_config(cfg: AppConfig) -> None:
         raise ValueError("At least one Telegram account must be enabled")
     names, sessions = set(), set()
     for account in cfg.accounts:
-        if not account.name.strip(): raise ValueError("Telegram account name must not be empty")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", account.name):
+            raise ValueError("Telegram account name must be 1-64 characters using only letters, digits, '.', '_' or '-'")
         if account.name in names: raise ValueError(f"Duplicate Telegram account name: {account.name}")
         names.add(account.name)
         session = os.path.abspath(account.session_path)
@@ -770,8 +779,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-only", action="store_true", help="Only scan and queue files, then exit")
     p.add_argument("--run-once", action="store_true", help="Run one upload batch and exit")
     p.add_argument("--no-scan", action="store_true", help="Skip scan phase before upload")
-    p.add_argument("--login-code", help=argparse.SUPPRESS)
-    p.add_argument("--login-password", help=argparse.SUPPRESS)
     p.add_argument("--auth-dir", help=argparse.SUPPRESS)
     return p.parse_args()
 
@@ -792,8 +799,8 @@ async def async_main() -> int:
                 no_scan=args.no_scan,
                 scan_only=args.scan_only,
                 run_once=args.run_once,
-                login_code=args.login_code,
-                login_password=args.login_password,
+                login_code=None,
+                login_password=None,
                 auth_dir=args.auth_dir,
             )
     finally:

@@ -146,3 +146,17 @@ The database account used by TeleDrive should have only the schema permissions n
 ### Secret files
 
 Keep `.env`, `config/`, `data/` and `uploads/` out of source control. They are ignored by this branch. On a multi-user Linux host, also restrict the project directory itself.
+
+
+### Web password from a secret file
+
+Instead of placing the Web password directly in the container environment, TeleDrive also supports `TELEDRIVE_WEB_PASSWORD_FILE`. Mount a secret file read-only and point the variable at it. When this is used, the Web password is not passed to the uploader subprocess.
+
+```yaml
+services:
+  teledrive:
+    environment:
+      TELEDRIVE_WEB_PASSWORD_FILE: /run/secrets/teledrive_web_password
+    volumes:
+      - ./secrets/web_password:/run/secrets/teledrive_web_password:ro
+```

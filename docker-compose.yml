@@ -18,6 +18,8 @@ services:
       TELEDRIVE_ALLOWED_HOSTS: ${TELEDRIVE_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
       TELEDRIVE_ALLOWED_SOURCE_ROOTS: /uploads
       TELEDRIVE_ALLOWED_SESSION_ROOTS: /data/sessions
+      TELEDRIVE_ALLOWED_LOG_ROOTS: /data
+      TELEDRIVE_ALLOWED_SQLITE_ROOTS: /data
       TELEDRIVE_SPLIT_DIR: /data/tmp
       TZ: ${TZ:-Europe/Istanbul}
     init: true

@@ -324,6 +324,13 @@ def iter_source_files(source_dir: str) -> Iterable[str]:
             if not _path_within(path, source_real):
                 logging.warning("Skipping path outside source root: %r", path)
                 continue
+            try:
+                file_stat = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(file_stat.st_mode):
+                logging.warning("Skipping non-regular file: %r", path)
+                continue
             yield path
 
 

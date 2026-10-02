@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import copy
+import sys
 import os
 import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any
 
 import yaml
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 import uploader
+from db import redact_database_url
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("TELEDRIVE_CONFIG", "/config/config.yaml"))
@@ -24,6 +28,9 @@ AUTH_DIR = Path(os.environ.get("TELEDRIVE_AUTH_DIR", "/data/auth"))
 STATIC_DIR = BASE_DIR / "static"
 WEB_USER = os.environ.get("TELEDRIVE_WEB_USER", "admin")
 WEB_PASSWORD = os.environ.get("TELEDRIVE_WEB_PASSWORD", "")
+ALLOW_INSECURE = os.environ.get("TELEDRIVE_ALLOW_INSECURE", "").strip().lower() in {"1", "true", "yes"}
+REDACTED = "__REDACTED__"
+MAX_REQUEST_BYTES = int(os.environ.get("TELEDRIVE_MAX_REQUEST_BYTES", "1048576"))
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
 PROMPT_RE = re.compile(r"Please enter the (code|password) for account '([^']+)':", re.I)
 
@@ -34,6 +41,47 @@ current_mode: str | None = None
 current_started_at: int | None = None
 current_prompt: dict[str, str] | None = None
 scheduler_task: asyncio.Task | None = None
+
+
+def _secure_mkdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _secure_write(path: Path, content: str) -> None:
+    _secure_mkdir(path.parent)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+def _scrub_text(value: str) -> str:
+    # Redact URL userinfo from logs/errors returned to browsers.
+    return re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://[^:/@\\s]+:)[^@\\s]+(@)", r"\\1***\\2", value)
+
+
+def _same_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    host = request.headers.get("host", "").lower()
+    try:
+        origin_host = urlsplit(origin).netloc.lower()
+    except Exception:
+        raise HTTPException(403, "Invalid Origin header")
+    if not host or origin_host != host:
+        raise HTTPException(403, "Cross-origin state change rejected")
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
@@ -83,17 +131,66 @@ def default_config() -> dict[str, Any]:
 
 
 def ensure_config() -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
-    Path("/data/sessions").mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(CONFIG_PATH.parent)
+    _secure_mkdir(AUTH_DIR)
+    _secure_mkdir(Path("/data/sessions"))
+    _secure_mkdir(Path("/data/tmp"))
     Path("/uploads").mkdir(parents=True, exist_ok=True)
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(yaml.safe_dump(default_config(), sort_keys=False), encoding="utf-8")
+        _secure_write(CONFIG_PATH, yaml.safe_dump(default_config(), sort_keys=False))
+    else:
+        try:
+            CONFIG_PATH.chmod(0o600)
+        except OSError:
+            pass
 
 
 def read_raw_config() -> dict[str, Any]:
     ensure_config()
     return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+
+
+def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(raw)
+    tg = result.get("telegram", {})
+    if tg.get("api_hash"):
+        tg["api_hash"] = REDACTED
+    for account in tg.get("accounts", []) or []:
+        if isinstance(account, dict) and account.get("api_hash"):
+            account["api_hash"] = REDACTED
+    state_cfg = result.get("state", {})
+    db_url = state_cfg.get("database_url") or state_cfg.get("db_path")
+    if db_url:
+        state_cfg["database_url"] = redact_database_url(str(db_url))
+        state_cfg.pop("db_path", None)
+    return result
+
+
+def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(candidate)
+    new_tg = result.setdefault("telegram", {})
+    old_tg = current.get("telegram", {})
+    if new_tg.get("api_hash") == REDACTED:
+        new_tg["api_hash"] = old_tg.get("api_hash", "")
+
+    old_accounts = {
+        str(a.get("name")): a
+        for a in (old_tg.get("accounts") or [])
+        if isinstance(a, dict) and a.get("name")
+    }
+    for account in new_tg.get("accounts", []) or []:
+        if not isinstance(account, dict):
+            continue
+        if account.get("api_hash") == REDACTED:
+            account["api_hash"] = old_accounts.get(str(account.get("name")), {}).get("api_hash", "")
+
+    new_state = result.setdefault("state", {})
+    old_state = current.get("state", {})
+    old_url = old_state.get("database_url") or old_state.get("db_path")
+    submitted = new_state.get("database_url")
+    if old_url and submitted == redact_database_url(str(old_url)):
+        new_state["database_url"] = old_url
+    return result
 
 
 def effective_config():
@@ -102,17 +199,26 @@ def effective_config():
 
 
 def validate_and_write_config(raw: dict[str, Any]) -> None:
+    current = read_raw_config()
+    merged = _restore_secrets(raw, current)
     tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
-    tmp.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _secure_write(tmp, yaml.safe_dump(merged, sort_keys=False))
     try:
         cfg = uploader.load_config(str(tmp))
         uploader.validate_config(cfg)
         conn = uploader.connect_db(cfg.db_path)
         conn.close()
-    except Exception:
+    except ValueError:
         tmp.unlink(missing_ok=True)
         raise
-    tmp.replace(CONFIG_PATH)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("Database connection/initialization failed") from exc
+    os.replace(tmp, CONFIG_PATH)
+    try:
+        CONFIG_PATH.chmod(0o600)
+    except OSError:
+        pass
 
 
 def db_connect():
@@ -141,7 +247,7 @@ async def _capture_process(proc: asyncio.subprocess.Process) -> None:
                 break
             message = line.decode("utf-8", errors="replace").rstrip()
             if message:
-                LOG_BUFFER.append(message)
+                LOG_BUFFER.append(_scrub_text(message))
                 match = PROMPT_RE.search(message)
                 if match:
                     current_prompt = {"kind": match.group(1).lower(), "account": match.group(2)}
@@ -163,7 +269,7 @@ async def start_uploader(mode: str) -> dict[str, Any]:
     async with process_lock:
         if current_process is not None and current_process.returncode is None:
             raise HTTPException(409, "Uploader is already running")
-        args = ["python", str(BASE_DIR / "uploader.py"), "--config", str(CONFIG_PATH), "--auth-dir", str(AUTH_DIR)]
+        args = [sys.executable, str(BASE_DIR / "uploader.py"), "--config", str(CONFIG_PATH), "--auth-dir", str(AUTH_DIR)]
         if mode == "scan-only":
             args.append("--scan-only")
         elif mode == "connect":
@@ -219,6 +325,11 @@ async def scheduler_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global scheduler_task
+    os.umask(0o077)
+    if not WEB_PASSWORD and not ALLOW_INSECURE:
+        raise RuntimeError(
+            "TELEDRIVE_WEB_PASSWORD is required. Set TELEDRIVE_ALLOW_INSECURE=1 only for explicitly trusted local deployments."
+        )
     ensure_config()
     try:
         conn = db_connect()
@@ -233,6 +344,32 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="TeleDrive Web UI", version="2.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+        except ValueError:
+            pass
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; connect-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    )
+    if request.url.path == "/" or request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -243,15 +380,20 @@ def index(_: None = Depends(require_auth)):
 
 @app.get("/api/config")
 def get_config(_: None = Depends(require_auth)):
-    return read_raw_config()
+    return _redacted_config(read_raw_config())
 
 
 @app.put("/api/config")
-def put_config(payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
+def put_config(request: Request, payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
+    _same_origin(request)
+    if current_process is not None and current_process.returncode is None:
+        raise HTTPException(409, "Stop the uploader before changing configuration")
     try:
         validate_and_write_config(payload)
+    except ValueError as exc:
+        raise HTTPException(400, _scrub_text(str(exc))) from exc
     except Exception as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(400, "Configuration/database validation failed") from exc
     return {"ok": True}
 
 
@@ -286,7 +428,7 @@ def dashboard(_: None = Depends(require_auth)):
 
     return {
         "strategy": cfg.strategy,
-        "database_url": cfg.db_path,
+        "database_url": redact_database_url(cfg.db_path),
         "queue": {
             "pending": counts.get("pending", 0),
             "failed": counts.get("failed", 0),
@@ -312,31 +454,41 @@ def files_endpoint(
 
 
 @app.post("/api/process/start")
-async def process_start(payload: dict[str, Any] = Body(default={}), _: None = Depends(require_auth)):
+async def process_start(request: Request, payload: dict[str, Any] = Body(default={}), _: None = Depends(require_auth)):
+    _same_origin(request)
     return await start_uploader(str(payload.get("mode", "run-once")))
 
 
 @app.post("/api/process/stop")
-async def process_stop(_: None = Depends(require_auth)):
+async def process_stop(request: Request, _: None = Depends(require_auth)):
+    _same_origin(request)
     return await stop_uploader()
 
 
 @app.post("/api/auth")
-def submit_auth(payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
+def submit_auth(request: Request, payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
     global current_prompt
+    _same_origin(request)
     account = str(payload.get("account", "")).strip()
     kind = str(payload.get("kind", "")).strip().lower()
     value = str(payload.get("value", "")).strip()
     if not account or kind not in {"code", "password"} or not value:
         raise HTTPException(400, "account, kind(code/password), and value are required")
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    if len(value) > 1024:
+        raise HTTPException(400, "Auth value is too long")
+    if not current_prompt or current_prompt.get("account") != account or current_prompt.get("kind") != kind:
+        raise HTTPException(409, "No matching Telegram authentication prompt is active")
+    _secure_mkdir(AUTH_DIR)
     token = uploader._safe_account_token(account)
     path = AUTH_DIR / f"{token}_{kind}.txt"
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(value, encoding="utf-8")
-    tmp.replace(path)
-    if current_prompt and current_prompt.get("account") == account and current_prompt.get("kind") == kind:
-        current_prompt = None
+    _secure_write(tmp, value)
+    os.replace(tmp, path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    current_prompt = None
     return {"ok": True}
 
 
@@ -347,7 +499,7 @@ def logs(limit: int = Query(300, ge=1, le=1500), _: None = Depends(require_auth)
     log_path = Path(cfg.log_path)
     if log_path.exists():
         try:
-            combined = (log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:] + combined)[-limit:]
+            combined = ([_scrub_text(line) for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]] + combined)[-limit:]
         except OSError:
             pass
     return {"lines": combined, "process": process_snapshot()}
@@ -355,4 +507,4 @@ def logs(limit: int = Query(300, ge=1, le=1500), _: None = Depends(require_auth)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "password_protected": bool(WEB_PASSWORD)}
+    return {"ok": True}

@@ -8,6 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN groupadd --gid 10001 teledrive && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin teledrive
 
 WORKDIR /app
+
+# Apply base-image security updates available from Debian before installing Python deps.
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/*
 COPY requirements-web.txt /app/requirements-web.txt
 ARG TELEDRIVE_DB_EXTRA_PACKAGES=""
 RUN pip install --no-cache-dir -r /app/requirements-web.txt \

@@ -1,6 +1,7 @@
 name: Security CI
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feature/docker-webui-multiaccount
@@ -42,8 +43,38 @@ jobs:
         run: bandit -q -r uploader.py db.py webapp.py -ll
       - name: Dependency audit
         run: pip-audit -r requirements-web.txt
+      - name: Docker Compose config
+        env:
+          TELEDRIVE_WEB_PASSWORD: ci-only-not-a-real-secret
+        run: docker compose config --quiet
+
       - name: Docker build
         run: docker build --pull -t teledrive-security-ci .
+
+      - name: Web UI container smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d --rm             -e TELEDRIVE_WEB_USER=ci             -e TELEDRIVE_WEB_PASSWORD=ci-only-not-a-real-secret             -p 127.0.0.1:18080:8080             teledrive-security-ci)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error               -u ci:ci-only-not-a-real-secret               http://127.0.0.1:18080/api/dashboard >/tmp/dashboard.json; then
+              break
+            fi
+            sleep 1
+          done
+          test -s /tmp/dashboard.json
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/dashboard.json", encoding="utf-8"))
+          assert "queue" in data
+          assert "accounts" in data
+          assert "database_url" in data
+          PY
+          if curl --fail --silent http://127.0.0.1:18080/api/config >/dev/null; then
+            echo "Unauthenticated API access unexpectedly succeeded" >&2
+            exit 1
+          fi
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:

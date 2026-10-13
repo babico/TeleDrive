@@ -59,7 +59,7 @@ def test_invalid_queries_fail_as_s3_protocol_errors(query, presigned):
 def test_valid_unicode_and_duplicate_keys_canonicalize_stably():
     assert _canonical_query(
         b"prefix=%C3%A9&delimiter=%2F&empty=&prefix=a"
-    ) == "delimiter=%2F&empty=&prefix=a&prefix=%C3%A9"
+    ) == "delimiter=%2F&empty=&prefix=%C3%A9&prefix=a"
 
 
 def test_query_limits_are_inclusive_not_off_by_one():

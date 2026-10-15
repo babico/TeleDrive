@@ -1298,7 +1298,7 @@ async def _handle(request: Request):
                     limit = int(raw_limit)
                 except ValueError:
                     raise MultipartError("InvalidArgument", "Invalid ListParts pagination")
-                selected_parts, more = mpu.list_parts(
+                selected_parts, more = mpu.list_parts_page(
                     upload_id, bucket, key, owner, marker=marker, limit=limit,
                 )
                 result = ET.Element("ListPartsResult", xmlns=NAMESPACE)

@@ -164,9 +164,18 @@ class MultipartStore:
         ).all()
         return rows[:limit], len(rows) > limit
 
-    def list_parts(self, identifier: str, bucket: str, key: str, owner: str,
-                   *, marker: int = 0, limit: int = 1000):
-        """Page active parts inside SQL, not after reading every staged part."""
+    def list_parts(self, identifier: str, bucket: str, key: str, owner: str):
+        """Legacy internal unpaged result for recovery/metadata callers."""
+        self.require(identifier, bucket, key, owner)
+        return self.db.connection.execute(
+            select(parts.c.number, parts.c.size, parts.c.etag).where(
+                parts.c.upload_id == identifier
+            ).order_by(parts.c.number)
+        ).all()
+
+    def list_parts_page(self, identifier: str, bucket: str, key: str, owner: str,
+                        *, marker: int = 0, limit: int = 1000):
+        """Bounded S3 ListParts page selected in SQL, never Python slicing."""
         if not 0 <= marker <= MAX_PARTS or not 1 <= limit <= 1000:
             raise MultipartError("InvalidArgument", "Invalid ListParts pagination")
         self.require(identifier, bucket, key, owner)

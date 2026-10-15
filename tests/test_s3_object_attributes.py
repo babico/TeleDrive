@@ -11,7 +11,7 @@ from xml.etree import ElementTree as ET
 
 import boto3
 from botocore.config import Config
- import uvicorn
+import uvicorn
 
 import web.s3 as gateway
 from teledrive.s3.credentials import S3CredentialStore

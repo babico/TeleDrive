@@ -190,13 +190,20 @@ class UnifiedUserTransport:
         self.journal.start(account, chat_id, object_id, ordinal,
                            checksum, path.stat().st_size)
         # Uncertain send errors leave a durable intent for history recovery.
-        received_account, received_chat, message_id = await delegate.upload(
-            path, object_id=object_id, ordinal=ordinal, checksum=checksum,
-        )
-        if (received_account, received_chat) != (account, chat_id):
-            raise RuntimeError("MTProto send returned an unexpected account or channel")
-        self.journal.acknowledged(account, chat_id, object_id, ordinal, message_id)
-        return received_account, received_chat, message_id
+        # Normalize remote I/O errors to an opaque backend failure for REST/S3
+        # without leaking Telegram message text, session data or phone details.
+        try:
+            received_account, received_chat, message_id = await delegate.upload(
+                path, object_id=object_id, ordinal=ordinal, checksum=checksum,
+            )
+            if (received_account, received_chat) != (account, chat_id):
+                raise RuntimeError("MTProto send returned an unexpected account or channel")
+            self.journal.acknowledged(account, chat_id, object_id, ordinal, message_id)
+            return received_account, received_chat, message_id
+        except Exception:
+            raise RuntimeError(
+                "MTProto send outcome uncertain; reconcile protected intent before retry"
+            ) from None
 
     async def download(self, reference, destination):
         if reference.account == self.runtime.account:

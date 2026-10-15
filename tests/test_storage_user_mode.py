@@ -155,3 +155,68 @@ def test_wrong_account_has_no_cross_transport_fallback(service):
             asyncio.run(user_transport.download(ref, Path("/tmp/never-written")))
     finally:
         db.close()
+
+
+def test_live_runtime_uses_honest_client_metadata_and_rejects_bot(monkeypatch, tmp_path):
+    """Telethon app/device identity is explicit; only a user can access history."""
+    import telethon
+    import telethon.sessions
+    import telethon.tl.types
+
+    observed = []
+    fixture_file = tmp_path / "session"
+    fixture_file.write_text("test-user-session\n", encoding="ascii")
+    channel = SimpleNamespace(broadcast=True, creator=True)
+    class FixtureChannel:
+        broadcast = True
+        creator = True
+
+    class FakeClient:
+        bot_identity = False
+        def __init__(self, session, api_id, api_hash, **options):
+            observed.append((session, api_id, api_hash, options))
+            self.connected = False
+        async def connect(self):
+            self.connected = True
+        async def disconnect(self):
+            self.connected = False
+        async def get_me(self):
+            return SimpleNamespace(bot=type(self).bot_identity)
+        async def iter_dialogs(self, limit):
+            assert limit == 5000
+            yield SimpleNamespace(id=-1001234567890, entity=FixtureChannel())
+        async def get_peer_id(self, target):
+            return -1001234567890
+        def is_connected(self):
+            return self.connected
+
+    monkeypatch.setattr(telethon, "TelegramClient", FakeClient)
+    monkeypatch.setattr(telethon.sessions, "StringSession", lambda value: value)
+    monkeypatch.setattr(telethon.tl.types, "Channel", FixtureChannel)
+    for key, value in {
+        "TELEDRIVE_STORAGE_TRANSPORT": "telethon",
+        "TELEDRIVE_STORAGE_MTPROTO_API_ID": "1234",
+        "TELEDRIVE_STORAGE_MTPROTO_API_HASH": "a" * 32,
+        "TELEDRIVE_STORAGE_MTPROTO_CHANNEL": "-1001234567890",
+        "TELEDRIVE_STORAGE_MTPROTO_SESSION_FILE": str(fixture_file),
+    }.items():
+        monkeypatch.setenv(key, value)
+    async def scenario():
+        runtime = UserSessionRuntime()
+        await runtime.start()
+        assert runtime.account == "mtproto-user"
+        assert runtime.chat_id == -1001234567890
+        await runtime.stop()
+        assert runtime.client is None
+        FakeClient.bot_identity = True
+        with pytest.raises(RuntimeError, match="USER session"):
+            await UserSessionRuntime().start()
+    asyncio.run(scenario())
+    assert len(observed) == 2
+    session, api_id, api_hash, options = observed[0]
+    assert session == "test-user-session"
+    assert api_id == 1234 and api_hash == "a" * 32
+    assert options["device_model"] == "TeleDrive Storage Client"
+    assert options["app_version"].startswith("TeleDrive")
+    assert options["receive_updates"] is False
+    assert options["flood_sleep_threshold"] == 0

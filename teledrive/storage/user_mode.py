@@ -8,6 +8,7 @@ Pending sends are never retried automatically after an ambiguous failure.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 import platform
 import re
@@ -200,6 +201,19 @@ class UnifiedUserTransport:
     async def download(self, reference, destination):
         if reference.account == self.runtime.account:
             return await self.runtime.require().download(reference, destination)
-        if reference.account == "api-bot" and self.bot_fallback is not None:
-            return await self.bot_fallback.download(reference, destination)
+        if reference.account == "api-bot":
+            # Historic Bot API objects already persist their real Telegram
+            # channel/message coordinates in the immutable SQL manifest.
+            # An authorized USER of that *same channel* can independently
+            # read those messages, without the Bot token or old file_id.
+            # Never attempt another account's channel or mutate SQL refs.
+            if reference.chat_id == self.runtime.chat_id:
+                try:
+                    rebound = replace(reference, account=self.runtime.account)
+                    return await self.runtime.require().download(rebound, destination)
+                except FileNotFoundError:
+                    if self.bot_fallback is None:
+                        raise
+            if self.bot_fallback is not None:
+                return await self.bot_fallback.download(reference, destination)
         raise FileNotFoundError("Storage source unavailable: original transport required")

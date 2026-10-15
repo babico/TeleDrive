@@ -152,7 +152,7 @@ class UserSendJournal:
             ))
             self.db.commit()
         except IntegrityError:
-            self.db.rollback()
+            self.db.connection.rollback()
             raise RuntimeError("Unresolved MTProto upload intent: reconcile before retry") from None
 
     def acknowledged(self, account: str, chat_id: int, object_id: str,
@@ -165,7 +165,7 @@ class UserSendJournal:
             mtproto_send_intents.c.message_id.is_(None),
         ).values(message_id=message_id))
         if changed.rowcount != 1:
-            self.db.rollback()
+            self.db.connection.rollback()
             raise RuntimeError("MTProto upload receipt could not be journaled")
         self.db.commit()
 

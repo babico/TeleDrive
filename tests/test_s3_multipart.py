@@ -259,9 +259,28 @@ def test_boto3_multipart_real_http_transport(service):
             Bucket="sdk-multipart", Key="large.bin", UploadId=uid,
             PartNumber=2, Body=payload2,
         )
-        assert len(client.list_parts(
-            Bucket="sdk-multipart", Key="large.bin", UploadId=uid
-        )["Parts"]) == 2
+        first_page = client.list_parts(
+            Bucket="sdk-multipart", Key="large.bin", UploadId=uid, MaxParts=1,
+        )
+        assert first_page["IsTruncated"] is True
+        assert first_page["NextPartNumberMarker"] == 1
+        assert first_page["StorageClass"] == "STANDARD"
+        assert first_page["Parts"][0]["LastModified"]
+        next_page = client.list_parts(
+            Bucket="sdk-multipart", Key="large.bin", UploadId=uid,
+            MaxParts=1, PartNumberMarker=1,
+        )
+        assert [x["PartNumber"] for x in next_page["Parts"]] == [2]
+        assert next_page["IsTruncated"] is False
+        pending = client.list_multipart_uploads(
+            Bucket="sdk-multipart", Prefix="large", Delimiter="/",
+            EncodingType="url", MaxUploads=1,
+        )
+        assert pending["Prefix"] == "large"
+        assert pending["Delimiter"] == "/"
+        assert pending["EncodingType"] == "url"
+        assert pending["Uploads"][0]["Key"] == "large.bin"
+        assert pending["Uploads"][0]["StorageClass"] == "STANDARD"
         before = remote.uploads
         done = client.complete_multipart_upload(
             Bucket="sdk-multipart", Key="large.bin", UploadId=uid,

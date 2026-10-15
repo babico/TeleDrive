@@ -220,3 +220,19 @@ def test_live_runtime_uses_honest_client_metadata_and_rejects_bot(monkeypatch, t
     assert options["app_version"].startswith("TeleDrive")
     assert options["receive_updates"] is False
     assert options["flood_sleep_threshold"] == 0
+
+
+def test_user_can_read_old_bot_channel_message_without_bot_token(service, monkeypatch):
+    """An authorized user recovers old bot media by immutable chat/message IDs."""
+    import web.s3 as gateway
+    assert signed(service, "PUT", "/backup-bucket").status_code == 200
+    payload = b"bot-written-payload-restored-with-user"
+    assert signed(service, "PUT", "/backup-bucket/bot-old.bin", payload).status_code == 200
+    runtime, user = configured_runtime()
+    # Telegram history exposes the SAME channel message to the authorized user.
+    user.posts[1] = (payload, "old-bot-document")
+    monkeypatch.setattr(gateway, "storage_bot_transport", lambda db:
+                        UnifiedUserTransport(runtime, UserSendJournal(db)))
+    result = signed(service, "GET", "/backup-bucket/bot-old.bin")
+    assert result.status_code == 200 and result.content == payload
+    assert user.next_id == 0, "Bot message was read, never reuploaded"

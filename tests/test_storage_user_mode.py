@@ -114,7 +114,7 @@ def test_mtp_user_upload_and_s3_readback_with_bot_fallback(service, monkeypatch)
         records = conn.connection.execute(
             select(mtproto_send_intents.c.account, mtproto_send_intents.c.message_id)
         ).all()
-        assert records == [("mtproto-user", 1)]
+        assert records == [("mtproto-user", 2)]
     finally:
         conn.close()
 

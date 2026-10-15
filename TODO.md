@@ -13,7 +13,7 @@
 
 ## 2. Engineering backlog
 
-- [ ] Implement and CI-validate an isolated, read-only **Telethon USER MTProto original-media restore rehearsal** using an independently sealed SQL snapshot, original channel/message references and whole-body/range SHA-256 verification. The existing `scripts/rehearse_telegram_dr.py` accepts only a historical Bot token and cannot satisfy this owner gate.
+- [x] Implement and CI-validate an isolated, read-only **Telethon USER MTProto original-media restore rehearsal** using an independently sealed SQL snapshot, original channel/message references and whole-body/range SHA-256 verification. `scripts/rehearse_telegram_dr.py` authenticates a read-only USER session against the exact original broadcast channel (no Bot token), denies Bot/wrong-channel sessions, and keeps the isolated historical Bot-adapter fixture solely for backward-compatibility tests. Owner-authorized production-equivalent execution remains an operator acceptance task.
 - [x] Require Telethon USER MTProto for every unified REST/S3/local-job upload; reject Bot mode and do not read stale Bot secrets, while retaining hash-verified read access to original Bot objects from the same channel.
 - [x] Add mainline release-gated cleanup of only merged, unchanged, unprotected PR branches; keep open/unmerged/advanced branches untouched.
 - [x] Add bounded, admin-authenticated, read-only history enumeration for the live Telethon storage session, with exclusive cursor pagination and visibly unverified other-sender marker candidates; prohibit guessed bucket/key mapping and Telegram mutations.

@@ -142,7 +142,7 @@ catalog); see [Backup and Restore](BACKUP_RESTORE.md).
 ## 5. Status, CI and unfinished safety gates
 
 The exact-source 9-workflow baseline
-[`c2b7688`](https://github.com/babico/TeleDrive/commit/c2b76880b4ada3d61d47a7926ea819244047fa33)
+[`a430212`](https://github.com/babico/TeleDrive/commit/a4302122ff80d0f5d05bab8a362e1983a5910235)
 passed Security, REST/S3, Databases, Desktop, Docker fault injection, live
 USER MTProto, live Bot **historical-compatibility** E2E, live Multiworker
 PostgreSQL and release gate. Check [Actions](https://github.com/babico/TeleDrive/actions)

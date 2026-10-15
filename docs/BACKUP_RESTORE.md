@@ -74,7 +74,7 @@ It seeds multiple published versions, chunk-boundary SHA metadata, delete marker
 
 ### Dedicated historical Bot-compatibility recovery CI
 
-`scripts/rehearse_telegram_dr.py` remains **Bot API-only** (`TELEDRIVE_BOT_TOKEN`) for a historical/isolated original Bot source. It is **not** evidence for a production Telethon USER restore; that independent verifier and owner-authorized test remain open.
+`scripts/rehearse_telegram_dr.py` now verifies original-media readback through an authorized **read-only USER MTProto** session (`TELEDRIVE_STORAGE_MTPROTO_API_ID` / `TELEDRIVE_STORAGE_MTPROTO_API_HASH` / `TELEDRIVE_STORAGE_MTPROTO_SESSION_FILE`, plus `--target` for the original channel) without any Bot token. Old `api-bot` chunks in the **same** authorized channel remain readable by message ID. Its isolated historical Bot-adapter fixture is retained only for backward-compatibility testing. The USER-MTProto drill is a single named-object check from a sealed SQLite snapshot; it is **not** proof of a complete independent payload backup or full archive recovery.
 
 The [Bot API E2E workflow](../.github/workflows/live-telegram-bot.yml) takes a disposable SQLite snapshot from a dedicated **test** Bot/channel transfer, verifies its SHA-256, opens it independently, and retrieves real Bot message bytes using the persisted file IDs. Full checksums and ranges are rechecked. Cleanup is scoped to messages created by that test run.
 

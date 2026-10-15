@@ -6,7 +6,7 @@
 
 1. Work on a **fresh dedicated clone and dedicated disposable environment**, never on an existing production `data/`, `config/`, database, Telegram channel or `~/.ssh` keys. Name all Docker Compose projects with a unique prefix; never run `docker system prune`, global image/volume deletion, `git reset --hard`, or blanket Telegram message deletion. Clean up only fixtures explicitly created and recorded by this run.
 2. **No automatic physical Telegram GC** and no mutating original-media recovery. Unknown acknowledgments, orphan-looking messages, removed versions, aliases, historical copies, multipart parts, active write leases, and Bot file IDs with uncertain origin are all **protected**. If a complete owner-approved independent payload backup and restore proof is absent, stop at a signed dry-run plan.
-3. Use a **new private test channel** with an authorized USER Telethon session and posting rights. Verify Bot mode is rejected, old same-channel Bot objects are still readable by MTProto without Bot credentials, and test the required USER transport: create a private `0600` session via `scripts/create_storage_user_session.py`, verify channel history after a forced lost-send ACK, restore readback across restart, and preserve old Bot chunks if supplied. Do not run two active clients on one Telethon session. Bot-only installs cannot enumerate arbitrary history. If the owner authorizes a *read-only* inspection of an original channel, separate it entirely from test fixtures. Do not use the Bot-only `scripts/rehearse_telegram_dr.py` as evidence of a USER MTProto original-media restore. Require an independently verified Telethon USER readback from a sealed, isolated catalog and complete SHA evidence. An inaccessible old Bot channel is a migration blocker, not evidence of successful recovery or permission to delete anything. No test is allowed to manufacture or substitute an original `bucket`, `key`, `versionId`, full SHA-256, machine identity, original-media claim, Telegram HTTP 429, or approval signature.
+3. Use a **new private test channel** with an authorized USER Telethon session and posting rights. Verify Bot mode is rejected, old same-channel Bot objects are still readable by MTProto without Bot credentials, and test the required USER transport: create a private `0600` session via `scripts/create_storage_user_session.py`, verify channel history after a forced lost-send ACK, restore readback across restart, and preserve old Bot chunks if supplied. Do not run two active clients on one Telethon session. Bot-only installs cannot enumerate arbitrary history. If the owner authorizes a *read-only* inspection of an original channel, separate it entirely from test fixtures. For original-media verification use the read-only USER-MTProto `scripts/rehearse_telegram_dr.py` against a sealed isolated catalog and complete SHA evidence; it checks one named object and is **not** proof of a complete independent payload backup or full archive recovery. An inaccessible old Bot channel is a migration blocker, not evidence of successful recovery or permission to delete anything. No test is allowed to manufacture or substitute an original `bucket`, `key`, `versionId`, full SHA-256, machine identity, original-media claim, Telegram HTTP 429, or approval signature.
 4. Keep credentials in protected `0600` private files or a secret manager; do not expose tokens, sessions, Bot file IDs, SQL URLs, chat IDs or actual media filenames in commit messages, logs, CI artifacts or GitHub issues. Use redacted, integrity-checked evidence only.
 5. A **single Docker host, even with several containers, is not two physically independent hosts**. A fabricated 429 and fake Telegram transport are not rate-limit/real-media evidence. Two owner/operator approvals require two real independent people. On unmet gates, report `BLOCKED_OWNER_ACTION` — never mark TODO items passed.
 
@@ -41,8 +41,12 @@ Provision test-only configuration from `README.md` section 1 and 4. **Check exis
 cp -n .env.example .env
 chmod 600 .env
 mkdir -p config data uploads
-# Set a unique long TELEDRIVE_WEB_PASSWORD, PUID/PGID, and ONLY
-# disposable TELEDRIVE_STORAGE_BOT_TOKEN / TELEDRIVE_STORAGE_BOT_CHAT_ID.
+# Set a unique long TELEDRIVE_WEB_PASSWORD and PUID/PGID. Provision ONLY
+# disposable test credentials: TELEDRIVE_STORAGE_MTPROTO_API_ID /
+# TELEDRIVE_STORAGE_MTPROTO_API_HASH / TELEDRIVE_STORAGE_MTPROTO_CHANNEL
+# plus a dedicated test-channel USER StringSession (see
+# docs/TELETHON_STORAGE.md and README section 4). Bot uploads are retired;
+# stale Bot tokens are never used by the unified runtime.
 # Create config/config.yaml and config/s3-master.key according to README.
 docker compose up -d --build
 docker compose ps
@@ -83,13 +87,14 @@ For PostgreSQL, use `pg_dump -Fc` and `pg_restore` into a **new database**; for 
 
 Before any GC experiment, produce a **separate encrypted payload archive**, independent of both SQL and Telegram, with all bytes needed for *all* candidate media and referenced aliases/versions/parts. Manifest the full SHA-256/size and exact source relationships in private storage; verify archive integrity from an independent location and a separate read-only restoration process. Rehydrate archive bytes into a **new disposable test channel**, then prove full-body and range hash matches using a **new isolated SQL catalog**. Do not claim that Telegram message IDs can be restored after deletion; only a complete separately maintained plaintext archive can rebuild the logical content with new Telegram references.
 
-For an owner-authorized **original** dataset, run the read-only original-media check separately, with the original *sealed* archive and its independent hash:
+For an owner-authorized **original** dataset, run the read-only USER-MTProto original-media check separately, with the original *sealed* archive and its independent hash. Point `TELEDRIVE_STORAGE_MTPROTO_SESSION_FILE` at a protected copy of the original user's StringSession and set `TELEDRIVE_STORAGE_MTPROTO_API_ID` / `TELEDRIVE_STORAGE_MTPROTO_API_HASH` privately in the staging shell:
 
 ```bash
 python scripts/rehearse_telegram_dr.py \
   --snapshot "$ORIGINAL_SEALED_DB" --sha256 "$ORIGINAL_SEALED_SHA256" \
   --bucket "$ORIGINAL_BUCKET" --key "$ORIGINAL_KEY" \
-  --account "$ORIGINAL_ACCOUNT" --chat-id "$ORIGINAL_CHAT_ID"
+  --account "$ORIGINAL_ACCOUNT" --chat-id "$ORIGINAL_CHAT_ID" \
+  --target "$ORIGINAL_CHANNEL_ID_OR_USERNAME"
 ```
 
 Do not substitute synthetic fixtures for this command or reuse production DB paths. Record `BLOCKED_OWNER_ACTION` if original inputs or permissions do not exist.

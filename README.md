@@ -16,6 +16,7 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 | [CI and Test Guide](docs/CI_WORKFLOWS.md) | GitHub Actions, local tests, Docker fault injection and development acceptance |
 | [Project Status and Acceptance](docs/IMPLEMENTATION_STATUS.md) | P0/P1/P2 capabilities, release boundaries, original-data production acceptance and recovery risks |
 | [Backup and Restore](docs/BACKUP_RESTORE.md) | Database backup commands, isolation and restore checks |
+| [Telethon USER Storage](docs/TELETHON_STORAGE.md) | Telethon-only installation, USER session provisioning and original-media DR |
 | [Security Policy](docs/SECURITY.md) | Responsible disclosure, trusted components, credentials and network isolation |
 | [Contributing](CONTRIBUTING.md) | Development workflow and documentation rules |
 | [S3 Compatibility Matrix](docs/S3_SPECS.md) | 116-operation status matrix, supported limits and P2 advanced implementation roadmap |
@@ -301,7 +302,7 @@ For additional reviewed packages, set `TELEDRIVE_DB_EXTRA_PACKAGES` in `.env` an
 ## 8. Security and operational limits
 
 - Keep WebUI/REST/S3 on loopback unless protected by an HTTPS reverse proxy or VPN.
-- Treat session files, `.env`, Bot tokens, `config.yaml`, the S3 master key and SQL backups as secrets.
+- Treat session files, `.env`, historical Bot tokens, `config.yaml`, the S3 master key and SQL backups as secrets.
 - Docker defaults include non-root execution, a read-only filesystem, capability drops and a read-only source mount.
 - Never assume a successful database-only restore is proof of original Telegram media recovery.
 - Never enable automatic physical Telegram deletion or bypass unresolved ACK/reference fences.

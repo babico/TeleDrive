@@ -83,7 +83,7 @@ The evidence must demonstrate a run of at least one hour, `telemetry_gate_passed
 
 Keep the original SQL snapshot, expected archive SHA-256, Telegram account credentials and destination/channel identifiers in separate protected storage. Restore into an **isolated staging database**, never over the live production DB.
 
-SQLite backup validation is described in [Backup and Restore](BACKUP_RESTORE.md). With the owner's original sealed SQL metadata and authorized access to the original channel via a Telegram USER MTProto account (or separately retained historical Bot credentials for an isolated old-source rehearsal):
+SQLite backup validation is described in [Backup and Restore](BACKUP_RESTORE.md). **Current script limitation:** `scripts/rehearse_telegram_dr.py` currently requires `TELEDRIVE_BOT_TOKEN` and uses a historical Bot API adapter. It is **not** a Telethon USER restore verifier. The following command is suitable **only for an isolated original Bot-backed source** with retained original Bot credentials; do not use it to certify a Telethon-only original-media recovery:
 
 ~~~bash
 python scripts/rehearse_telegram_dr.py \
@@ -95,7 +95,7 @@ python scripts/rehearse_telegram_dr.py \
   --chat-id ORIGINAL_CHAT_ID
 ~~~
 
-The drill checks archive identity, published SQL metadata, original Telegram bytes, object SHA/length and cross-chunk ranges without reuploading or deleting media. PostgreSQL/MySQL installations must use their appropriate native backups and independent restore databases. A consistent SQL dump **alone** is insufficient original-data disaster-recovery proof.
+For the historical Bot-backed fixture, this drill checks archive identity, published SQL metadata, original Telegram bytes, object SHA/length and cross-chunk ranges without reuploading or deleting media. **Telethon-only production recovery remains blocked** until an independent USER MTProto restore verifier can attest those same checks from a sealed SQL snapshot and original channel in an isolated environment. PostgreSQL/MySQL installations must use their appropriate native backups and independent restore databases. A consistent SQL dump **alone** is insufficient original-data disaster-recovery proof.
 
 ### 3.3 Legacy cutover only if original legacy sources exist
 

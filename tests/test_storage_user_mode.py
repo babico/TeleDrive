@@ -292,3 +292,30 @@ def test_authenticated_admin_can_scan_user_channel_history_without_mutation(monk
     )
     assert disabled.status_code == 503
     assert list(scannable.posts) == [9]
+
+
+def test_production_storage_uses_only_user_mtproto_even_with_stale_bot_secrets(service, monkeypatch):
+    from fastapi import HTTPException
+    import web.app as web
+
+    conn = service[3]()
+    runtime, _ = configured_runtime()
+    monkeypatch.setattr(web, "mtproto_storage_runtime", runtime)
+    monkeypatch.setenv("TELEDRIVE_STORAGE_BOT_TOKEN", "unused-old-credential")
+    monkeypatch.setenv("TELEDRIVE_STORAGE_BOT_CHAT_ID", "-1001234567890")
+    try:
+        monkeypatch.setenv("TELEDRIVE_STORAGE_TRANSPORT", "telethon")
+        transport = web.storage_bot_transport(conn)
+        assert isinstance(transport, UnifiedUserTransport)
+        assert not hasattr(transport, "bot_fallback")
+        monkeypatch.setenv("TELEDRIVE_STORAGE_TRANSPORT", "bot")
+        with pytest.raises(HTTPException) as invalid:
+            web.storage_bot_transport(conn)
+        assert invalid.value.status_code == 503
+        monkeypatch.setenv("TELEDRIVE_STORAGE_TRANSPORT", "telethon")
+        runtime.client = None
+        with pytest.raises(HTTPException) as unavailable:
+            web.storage_bot_transport(conn)
+        assert unavailable.value.status_code == 503
+    finally:
+        conn.close()

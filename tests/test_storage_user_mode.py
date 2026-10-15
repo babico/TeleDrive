@@ -267,7 +267,7 @@ def test_authenticated_admin_can_scan_user_channel_history_without_mutation(monk
     monkeypatch.setattr(web, "mtproto_storage_runtime", runtime)
     monkeypatch.setattr(web, "WEB_USER", "owner")
     monkeypatch.setattr(web, "WEB_PASSWORD", "secure-test-password-1234")
-    client = TestClient(web.app)
+    client = TestClient(web.app, base_url="http://localhost")
     assert client.get("/api/v1/admin/storage/channel-history").status_code == 401
     response = client.get(
         "/api/v1/admin/storage/channel-history?limit=3",

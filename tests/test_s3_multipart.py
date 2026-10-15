@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 from xml.etree import ElementTree as ET
+from urllib.parse import quote
 
 import pytest
 from test_s3_gateway import service, signed
@@ -24,7 +25,7 @@ def xml_text(response, key):
 
 
 def begin(svc, key="asset.bin"):
-    response = signed(svc, "POST", "/backup-bucket/" + key + "?uploads")
+    response = signed(svc, "POST", "/backup-bucket/" + quote(key, safe="/") + "?uploads")
     assert response.status_code == 200, response.text
     return xml_text(response, "UploadId")
 
@@ -415,7 +416,7 @@ def test_list_multipart_uploads_grouping_unicode_encoding_and_cursors(service):
     before_download = service[2].downloads
 
     grouped = signed(service, "GET",
-                     "/backup-bucket?uploads&prefix=assets/&delimiter=/&max-uploads=2")
+                     "/backup-bucket?uploads&prefix=assets%2F&delimiter=%2F&max-uploads=2")
     assert grouped.status_code == 200, grouped.text
     root = ET.fromstring(grouped.content)
     assert root.findtext(NS + "Prefix") == "assets/"
@@ -427,7 +428,7 @@ def test_list_multipart_uploads_grouping_unicode_encoding_and_cursors(service):
     assert root.findtext(NS + "NextKeyMarker") == "assets/b/"
     from urllib.parse import quote
     next_page = signed(service, "GET",
-                       "/backup-bucket?uploads&prefix=assets/&delimiter=/&max-uploads=2"
+                       "/backup-bucket?uploads&prefix=assets%2F&delimiter=%2F&max-uploads=2"
                        "&key-marker=" + quote(root.findtext(NS+"NextKeyMarker"), safe="")
                        + "&upload-id-marker=")
     assert next_page.status_code == 200, next_page.text
@@ -437,7 +438,7 @@ def test_list_multipart_uploads_grouping_unicode_encoding_and_cursors(service):
     assert follow.findtext(NS+"IsTruncated") == "false"
 
     utf8 = signed(service, "GET",
-                  "/backup-bucket?uploads&prefix=misc/&encoding-type=url")
+                  "/backup-bucket?uploads&prefix=misc%2F&encoding-type=url")
     assert utf8.status_code == 200, utf8.text
     encoded = ET.fromstring(utf8.content)
     assert encoded.findtext(NS+"EncodingType") == "url"
@@ -488,7 +489,7 @@ def test_list_multipart_pages_are_scoped_to_credential_without_telegram_reads(se
     finally:
         db.close()
     before = service[2].downloads
-    page = signed(service, "GET", "/backup-bucket?uploads&delimiter=/",
+    page = signed(service, "GET", "/backup-bucket?uploads&delimiter=%2F",
                   access=guest.access_key, secret=guest.secret_key)
     assert page.status_code == 200
     assert ET.fromstring(page.content).findall(NS+"Upload") == []

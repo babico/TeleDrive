@@ -35,7 +35,7 @@ bash scripts/run_docker_fault_injection.sh
 
 Use Docker only on the explicitly approved test instance. Run the normal single-service `docker-compose.yml` **separately** from the two-Web fault-injection fixture: normal WebUI/REST port 8080 and S3 port 9000 must live inside **one `teledrive` container**, sharing one SQL catalog and Telegram object store.
 
-Provision test-only configuration from `README.md` section 1 and 4:
+Provision test-only configuration from `README.md` section 1 and 4. **Check existing `docker ps -a --format '{{.Names}}'` and port 8080/9000 owners first:** normal Compose uses global `container_name: teledrive`. Do not reuse, replace, stop or rename any existing installation to make this test fit. If there is a collision, use a genuinely separate VM/host or stop with a request for owner direction. The fault runner uses isolated Compose project resources:
 
 ```bash
 cp -n .env.example .env

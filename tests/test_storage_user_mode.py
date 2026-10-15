@@ -93,6 +93,9 @@ def test_mtp_user_upload_and_s3_readback_with_bot_fallback(service, monkeypatch)
     assert earlier.status_code == 200, earlier.text
 
     runtime, user = configured_runtime()
+    # A real Telegram channel assigns message IDs across ALL senders.
+    # The fake Bot and fake user must not independently reuse message ID 1.
+    user.next_id = service[2].uploads
     def transport(db):
         fallback = BotApiChunkTransport(
             service[2], BotFileIndex(db),
@@ -103,7 +106,7 @@ def test_mtp_user_upload_and_s3_readback_with_bot_fallback(service, monkeypatch)
     data = b"new-user-mtproto-bytes" * 19
     response = signed(service, "PUT", "/backup-bucket/user.bin", data)
     assert response.status_code == 200, response.text
-    assert user.next_id == 1
+    assert user.next_id == 2
     assert signed(service, "GET", "/backup-bucket/user.bin").content == data
     assert signed(service, "GET", "/backup-bucket/old.bin").content == b"original-bot-data"
     conn = service[3]()

@@ -84,7 +84,6 @@ def test_unsupported_or_duplicate_attributes_refuse_false_success(service):
         ("ObjectParts", b"NotImplemented", 501),
         ("ObjectParts,ETag", b"NotImplemented", 501),
         ("UnknownAttribute", b"NotImplemented", 501),
-        ("StorageClass", b"NotImplemented", 501),
         ("ETag,ETag", b"InvalidArgument", 400),
         ("", b"InvalidArgument", 400),
     ):

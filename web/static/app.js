@@ -45,7 +45,7 @@ e.innerHTML=`<div class="form-grid">
 <button class="btn danger compact ae-remove" type="button">Remove</button></div>`;
 e.querySelector('.ae-remove').onclick=()=>{e.remove()};
 return e}
-function wireApiEditors(){
+function wireApiEditors(){}
 
 $('#saveSettings').onclick=async()=>{try{
 if(!config)await loadSettings();const tg=config.telegram=config.telegram||{},up=config.upload=config.upload||{},st=config.state=config.state||{},app=config.app=config.app||{},storage=config.storage=config.storage||{};

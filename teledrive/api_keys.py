@@ -114,6 +114,19 @@ class ApiKeyStore:
         self.db.commit()
         return True
 
+    def name_for_token(self, token: str) -> str | None:
+        """Return the name of the API key for a given token, or None."""
+        if (not isinstance(token, str) or len(token) > 200
+                or not token.startswith("td_live_")):
+            return None
+        result = self.db.connection.execute(
+            select(api_keys.c.name)
+            .where(api_keys.c.digest == self._digest(token))
+        ).first()
+        if result is None:
+            return None
+        return result[0]
+
     def revoke(self, identifier: str) -> bool:
         changed = self.db.connection.execute(
             update(api_keys).where(api_keys.c.id == identifier, api_keys.c.revoked.is_(False))

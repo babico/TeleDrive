@@ -170,16 +170,28 @@ def _extract_user(request: Request) -> str:
                 return username
         except Exception:
             pass
-    # Bearer token (API key) — just note it's a bearer
+    # Bearer token (API key) — resolve to the key name if possible.
     if auth.lower().startswith("bearer "):
-        return "bearer-token"
+        token = auth[7:].strip()
+        try:
+            from teledrive.api_keys import ApiKeyStore
+            conn = db_connect()
+            try:
+                name = ApiKeyStore(conn).name_for_token(token)
+                if name:
+                    return name
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        return "api-key"
     return "anonymous"
 
 
-def _log(msg: str, source: str = "web") -> None:
-    """Append a timestamped, source-tagged entry to LOG_BUFFER."""
+def _log(msg: str, source: str = "web", user: str = "system") -> None:
+    """Append a timestamped, user-tagged, source-tagged entry to LOG_BUFFER."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    LOG_BUFFER.append(f"[{ts}] [{source}] {msg}")
+    LOG_BUFFER.append(f"[{ts}] [{user}] [{source}] {msg}")
     try:
         import logging as _logging
         record = _logging.LogRecord(
@@ -187,6 +199,7 @@ def _log(msg: str, source: str = "web") -> None:
             msg=msg, args=(), exc_info=None
         )
         record.source = source
+        record.user = user
         record.created = time.time()
         if _FILE_LOG_HANDLER is not None:
             _FILE_LOG_HANDLER.emit(record)
@@ -499,7 +512,7 @@ async def lifespan(_: FastAPI):
             encoding="utf-8", delay=True
         )
         file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(source)s] %(message)s",
+            "%(asctime)s [%(user)s] [%(source)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         ))
         class _SourceFilter(logging.Filter):
@@ -588,7 +601,7 @@ async def _audit_log_middleware(request: Request, call_next):
     if path not in {"/api/health", "/__health"} and not path.startswith("/static/"):
         client = request.client.host if request.client else "-"
         user = _extract_user(request)
-        _log(f"{method} {path} from {client} [user={user}]", "http")
+        _log(f"{method} {path} from {client}", "http", user=user)
     try:
         response = await call_next(request)
     except Exception as exc:

@@ -12,7 +12,8 @@ h1{font-size:20px;margin:0}.muted{color:var(--muted)}main{max-width:1400px;margi
 nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}.tab,.btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:9px 13px;border-radius:10px;cursor:pointer}.tab.active,.btn.primary{background:#173c63;border-color:#2a77b7}.btn.danger{background:#51202a}.btn:disabled{opacity:.5;cursor:not-allowed}
 .page{display:none}.page.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}.metric b{display:block;font-size:28px;margin-top:5px}.section{margin-top:16px}.accounts{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#24314a;font-size:12px}.pill.ready,.pill.idle{background:#173a31;color:#8ae2bb}.pill.cooldown{background:#49391e;color:#ffda8a}.pill.error,.pill.unavailable{background:#4b2029;color:#ff9caa}
 table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;font-size:12px}th{color:#b5c1d3;background:#141d31}.scroll{overflow:auto;border-radius:12px}
-label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,select,textarea{width:100%;background:#0f1728;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.account-edit{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row .compact{flex:0 0 auto}.prompt{display:none;background:#332a15;border:1px solid #6d5928;padding:12px;border-radius:12px;margin-bottom:16px}.prompt.show{display:block}.logs{white-space:pre-wrap;background:#080c16;border:1px solid var(--line);padding:14px;border-radius:12px;min-height:300px;max-height:600px;overflow:auto;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.toast{position:fixed;right:18px;bottom:18px;padding:12px 16px;border-radius:10px;background:#173a31;border:1px solid #285b4a;display:none}.toast.bad{background:#4b2029;border-color:#7d3342}.tiny{font-size:12px;color:var(--muted)}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,select,textarea{width:100%;background:#0f1728;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.form-stack{display:flex;flex-direction:column;gap:12px;max-width:480px}.account-edit{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row .compact{flex:0 0 auto}.prompt{display:none;background:#332a15;border:1px solid #6d5928;padding:12px;border-radius:12px;margin-bottom:16px}.prompt.show{display:block}.logs{white-space:pre-wrap;background:#080c16;border:1px solid var(--line);padding:14px;border-radius:12px;min-height:300px;max-height:600px;overflow:auto;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.toast{position:fixed;right:18px;bottom:18px;padding:12px 16px;border-radius:10px;background:#173a31;border:1px solid #285b4a;display:none}.toast.bad{background:#4b2029;border-color:#7d3342}.tiny{font-size:12px;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -25,6 +26,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 <button class="tab" data-page="history">History</button>
 <button class="tab" data-page="settings">Settings</button>
 <button class="tab" data-page="api-management">API Management</button>
+<button class="tab" data-page="s3">S3</button>
 <button class="tab" data-page="logs">Logs</button>
 </nav>
 
@@ -52,7 +54,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 
 <div class="card section">
 <h3>Active channel settings</h3>
-<div class="form-grid">
+<div class="form-stack">
 <div><label>Active channel</label><select id="activeChannelSelect"></select></div>
 <div><label>Strategy</label><select id="storageStrategy"><option>round_robin</option><option>single</option><option>failover</option><option>parallel</option></select></div>
 <div><label>Scratch directory</label><input class="input" id="storageScratch"></div>
@@ -62,7 +64,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 <div class="card section">
 <h3>Telegram session (USER MTProto)</h3>
 <p class="muted">API credential ve session. DB'ye kaydedilir; config dosyası gerekmez. Send code → kodu gir → Verify.</p>
-<div class="form-grid">
+<div class="form-stack">
 <div><label>API ID</label><input class="input" id="tgApiId" type="number"></div>
 <div><label>API hash</label><input class="input" id="tgApiHash"></div>
 <div><label>Phone (with country code)</label><input class="input" id="tgPhone" placeholder="+90..."></div>
@@ -72,7 +74,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 <span id="tgSessionStatus" class="muted"></span>
 </div>
 <div class="section" id="tgCodeSection" style="display:none">
-<div class="form-grid">
+<div class="form-stack">
 <div><label>Code (from Telegram app)</label><input class="input" id="tgCode"></div>
 <div><label>2FA password (optional)</label><input class="input" id="tgPassword" type="password"></div>
 </div>
@@ -80,7 +82,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 </div>
 </div>
 
-<div class="card section"><h3>Upload</h3><div class="form-grid">
+<div class="card section"><h3>Upload</h3><div class="form-stack">
 <div><label>Source directory</label><input class="input" id="sourceDir"></div>
 <div><label>Send mode</label><select id="sendMode"><option>document</option><option>media</option><option>auto</option></select></div>
 <div><label>Max files / run</label><input class="input" id="perRun" type="number"></div>
@@ -100,7 +102,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 <div class="tiny" style="margin-top:7px">No vendor whitelist. Any synchronous SQLAlchemy dialect works when its dialect/DBAPI driver is installed in the image.</div>
 </div>
 
-<div class="card section"><h3>Automation</h3><div class="form-grid">
+<div class="card section"><h3>Automation</h3><div class="form-stack">
 <div><label><input type="checkbox" id="autoRun"> Run upload batches automatically</label></div>
 <div><label>Interval (minutes)</label><input class="input" id="runInterval" type="number"></div>
 </div></div>
@@ -143,6 +145,10 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 <h3>Existing keys</h3>
 <div class="scroll"><table><thead><tr><th>Name</th><th>Key prefix</th><th>Permissions</th><th>Created / last used</th><th>Status</th><th>Actions</th></tr></thead><tbody id="apiKeysRows"></tbody></table></div>
 </div>
+</div>
+</section>
+
+<section id="s3" class="page">
 <div class="card section">
 <h3>S3-compatible gateway (initial core)</h3>
 <p class="muted">Telegram is the only payload backend. S3 credentials are encrypted at rest, scoped independently of REST keys, and displayed once. Configure the S3 master key before issuing credentials.</p>
@@ -243,6 +249,7 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 <p class="tiny">Use <code>Authorization: Bearer &lt;token&gt;</code> for scoped endpoints. Administrative key management still requires the WebUI Basic login and CSRF header. The Telegram binary upload and S3 protocol endpoints are under development.</p>
 <a href="/docs" target="_blank" rel="noopener">OpenAPI / Swagger documentation ↗</a>
 </div>
+</section>
 </section>
 
 <section id="logs" class="page"><div id="logBox" class="logs"></div></section>

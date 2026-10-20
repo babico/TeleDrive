@@ -1,462 +1,284 @@
-const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
-let config=null, authPrompt=null;
-async function api(url,opt={}){const r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})},...opt});if(!r.ok)throw new Error(await r.text()||r.statusText);return r.json()}
-function toast(msg,bad=false){const e=$('#toast');e.textContent=msg;e.className='toast'+(bad?' bad':'');e.style.display='block';setTimeout(()=>e.style.display='none',3500)}
-function fmtTs(v){return v?new Date(v*1000).toLocaleString():'-'}
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function app(){
+  return {
+    // State
+    page: 'dashboard',
+    tabs: [
+      {id:'dashboard',label:'Dashboard'},
+      {id:'queue',label:'Queue'},
+      {id:'history',label:'History'},
+      {id:'settings',label:'Settings'},
+      {id:'api-management',label:'API Management'},
+      {id:'s3',label:'S3'},
+      {id:'logs',label:'Logs'}
+    ],
+    toastMsg: '',
+    toastBad: false,
+    authPrompt: null,
+    authValue: '',
 
-$$('.tab').forEach(b=>b.onclick=()=>{$$('.tab').forEach(x=>x.classList.remove('active'));$$('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.page).classList.add('active');if(b.dataset.page==='queue')loadFiles('queue');if(b.dataset.page==='history')loadFiles('history');if(b.dataset.page==='settings')loadSettings();if(b.dataset.page==='api-management'){loadKeys();loadS3Keys();loadPendingRecovery();loadStorageJobs();}if(b.dataset.page==='logs')loadLogs()});
+    // Dashboard
+    dashboard: {pending:0,failed:0,uploaded:0,strategy:'-'},
+    queueRows: [],
+    historyRows: [],
 
-async function refreshDashboard(){
-try{
-const d=await api('/api/dashboard');const q=d.queue||{};
-$('#mPending').textContent=q.pending||0;$('#mFailed').textContent=q.failed||0;$('#mUploaded').textContent=q.uploaded||0;$('#mToday').textContent=q.uploaded_today||0;
-$('#strategyView').textContent=d.strategy||'-';$('#dbView').textContent=d.database_url||'-';
-const p=d.process||{};$('#processView').textContent=p.running?('running · '+(p.mode||'')):'idle';$('#subtitle').textContent=(d.strategy||'single')+' · '+(p.running?'running':'idle');
-authPrompt=p.auth_prompt||null;const ap=$('#authPrompt');if(authPrompt){ap.classList.add('show');$('#authTitle').textContent=authPrompt.account+' is waiting for Telegram '+authPrompt.kind;$('#authValue').type=authPrompt.kind==='password'?'password':'text'}else{ap.classList.remove('show');$('#authValue').value=''}
-$('#accounts').innerHTML=(d.accounts||[]).map(a=>'<div class="card"><div class="row"><b>'+esc(a.name)+'</b><span class="pill '+esc(a.state)+'">'+esc(a.state)+'</span></div><div class="tiny" style="margin-top:9px">enabled: '+a.enabled+' · uploaded: '+(a.uploaded_count||0)+'</div><div class="tiny">target: '+esc(a.target)+' · last success: '+fmtTs(a.last_success_ts)+'</div>'+(a.last_error?'<div style="color:var(--bad);margin-top:7px">'+esc(a.last_error)+'</div>':'')+'</div>').join('');
-}catch(e){toast(e.message,true)}
-}
-async function loadFiles(kind){try{const rows=await api('/api/files?kind='+kind+'&limit=200');if(kind==='queue')$('#queueRows').innerHTML=rows.map(r=>'<tr><td>'+esc(r.path)+'</td><td>'+esc(r.status)+'</td><td>'+r.attempts+'</td><td>'+esc(r.tg_account||'-')+'</td><td>'+esc(r.last_error||'')+'</td></tr>').join('');else $('#historyRows').innerHTML=rows.map(r=>'<tr><td>'+esc(r.path)+'</td><td>'+esc(r.tg_account||'-')+'</td><td>'+esc(r.tg_message_id||'-')+'</td><td>'+fmtTs(r.uploaded_ts)+'</td></tr>').join('')}catch(e){toast(e.message,true)}}
-async function loadLogs(){try{const x=await api('/api/logs?limit=500');$('#logBox').textContent=(x.lines||[]).join('\n');$('#logBox').scrollTop=$('#logBox').scrollHeight}catch(e){toast(e.message,true)}}
+    // Settings
+    config: null,
+    activeChannelId: '',
+    activeChannelLabel: 'Loading...',
+    channels: [],
+    tgApiId: '',
+    tgApiHash: '',
+    tgPhone: '',
+    tgSessionStatus: 'Not checked',
+    tgCodeVisible: false,
+    tgCode: '',
+    tgPassword: '',
+    tgSessionToken: null,
+    extensionsStr: '',
 
-function accountEditor(a={}){return '<div class="account-edit"><div class="row"><label class="compact"><input class="ae-enabled" type="checkbox" '+(a.enabled!==false?'checked':'')+'> enabled</label><button class="btn danger compact ae-remove">Remove</button></div><div class="form-grid"><div><label>Name</label><input class="input ae-name" value="'+esc(a.name||'account')+'"></div><div><label>Phone</label><input class="input ae-phone" value="'+esc(a.phone||'')+'"></div><div><label>Session path</label><input class="input ae-session" value="'+esc(a.session_path||'/data/sessions/account')+'"></div><div><label>Target override</label><input class="input ae-target" value="'+esc(a.target??'')+'"></div><div><label>API ID override</label><input class="input ae-api-id" type="number" value="'+esc(a.api_id??'')+'"></div><div><label>API hash override</label><input class="input ae-api-hash" value="'+esc(a.api_hash??'')+'"></div></div></div>'}
-function wireEditors(){$$('.ae-remove').forEach(b=>b.onclick=()=>b.closest('.account-edit').remove())}
-$('#addAccount').onclick=()=>{$('#accountEditors').insertAdjacentHTML('beforeend',accountEditor({name:'account'+($$('.account-edit').length+1)}));wireEditors()}
+    // API keys
+    apiKeys: [],
+    newKeyName: '',
+    newKeyExpiry: '',
+    keyScopesList: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage','jobs:read','jobs:manage','accounts:read','accounts:manage','settings:read','settings:manage','keys:manage','admin:*'],
+    selectedScopes: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage'],
+    createdKey: null,
 
-async function loadSettings(){try{
-config=await api('/api/config');const tg=config.telegram||{},up=config.upload||{},st=config.state||{},app=config.app||{};
-const storage=config.storage||{},jobs=config.jobs||{};
-$('#storageChannel').value=storage.channel||'';$('#storageStrategy').value=storage.strategy||'round_robin';$('#storageScratch').value=storage.scratch_dir||'/data/tmp';
+    // S3
+    s3KeyName: '',
+    s3KeyExpiry: '',
+    s3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:GetObjectAttributes','s3:GetObjectTagging','s3:PutObjectTagging','s3:DeleteObjectTagging','s3:GetBucketTagging','s3:GetBucketCORS','s3:PutBucketCORS','s3:PutBucketTagging','s3:DeleteBucketTagging','s3:PutObject','s3:DeleteObject','s3:CreateBucket','s3:DeleteBucket'],
+    selectedS3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:PutObject','s3:DeleteObject'],
+    s3Keys: [],
+    createdS3: null,
 
-$('#strategy').value=tg.strategy||'single';$('#apiId').value=tg.api_id||'';$('#apiHash').value=tg.api_hash||'';$('#tgTarget').value=tg.target??'me';
-$('#sourceDir').value=up.source_dir||'/uploads';$('#sendMode').value=up.send_mode||'document';$('#perRun').value=up.max_files_per_run??12;$('#perDay').value=up.max_files_per_day??100;$('#sleepMin').value=up.sleep_min_seconds??60;$('#sleepMax').value=up.sleep_max_seconds??90;$('#retryAttempts').value=up.retry_attempts??5;$('#backoff').value=up.backoff_base_seconds??10;$('#floodBuffer').value=up.floodwait_buffer_seconds??5;$('#maxFileSize').value=up.max_file_size_mb??0;$('#captionTemplate').value=up.caption_template||'{name}';$('#extensions').value=(up.allowed_extensions||[]).join(',');
-$('#databaseUrl').value=st.database_url||st.db_path||'sqlite:////data/state.db';$('#autoRun').checked=!!app.auto_run;$('#runInterval').value=app.run_interval_minutes??60;
-$('#accountEditors').innerHTML=(tg.accounts||[]).map(accountEditor).join('');wireEditors()
-}catch(e){toast(e.message,true)}}
+    // Logs
+    logBox: '',
 
-function apiEditor(entry={}){
-const e=document.createElement('div');e.className='account-edit api-edit';
-e.innerHTML=`<div class="form-grid">
-<div><label>API ID</label><input class="ae-api-id" type="number" value="${entry.api_id??''}"></div>
-<div><label>API hash</label><input class="ae-api-hash" value="${entry.api_hash??''}"></div>
-<div><label>Session file</label><input class="ae-session" value="${entry.session_file??''}"></div>
-<div><label>Account label (optional)</label><input class="ae-name" value="${entry.account??''}"></div>
-<button class="btn danger compact ae-remove" type="button">Remove</button></div>`;
-e.querySelector('.ae-remove').onclick=()=>{e.remove()};
-return e}
-function wireApiEditors(){}
+    async init(){
+      await this.loadSettings();
+      await this.refreshChannels();
+      await this.refreshTgSessionStatus();
+      await this.refreshDashboard();
+      setInterval(()=>this.refreshDashboard(), 30000);
+    },
 
-$('#saveSettings').onclick=async()=>{try{
-if(!config)await loadSettings();const tg=config.telegram=config.telegram||{},up=config.upload=config.upload||{},st=config.state=config.state||{},app=config.app=config.app||{},storage=config.storage=config.storage||{};
-storage.channel=$('#storageChannel').value.trim();storage.strategy=$('#storageStrategy').value;storage.scratch_dir=$('#storageScratch').value.trim()||'/data/tmp';
-tg.strategy=$('#strategy').value;tg.api_id=Number($('#apiId').value||0);tg.api_hash=$('#apiHash').value.trim();tg.target=$('#tgTarget').value.trim()||'me';
-tg.accounts=$$('.account-edit').map(e=>{const o={name:e.querySelector('.ae-name').value.trim(),enabled:e.querySelector('.ae-enabled').checked,phone:e.querySelector('.ae-phone').value.trim(),session_path:e.querySelector('.ae-session').value.trim()};const target=e.querySelector('.ae-target').value.trim(),id=e.querySelector('.ae-api-id').value.trim(),hash=e.querySelector('.ae-api-hash').value.trim();if(target)o.target=target;if(id)o.api_id=Number(id);if(hash)o.api_hash=hash;return o});
-up.source_dir=$('#sourceDir').value.trim();up.send_mode=$('#sendMode').value;up.max_files_per_run=Number($('#perRun').value);up.max_files_per_day=Number($('#perDay').value);up.sleep_min_seconds=Number($('#sleepMin').value);up.sleep_max_seconds=Number($('#sleepMax').value);up.retry_attempts=Number($('#retryAttempts').value);up.backoff_base_seconds=Number($('#backoff').value);up.floodwait_buffer_seconds=Number($('#floodBuffer').value);up.max_file_size_mb=Number($('#maxFileSize').value);up.caption_template=$('#captionTemplate').value;up.allowed_extensions=$('#extensions').value.split(',').map(x=>x.trim()).filter(Boolean);
-st.database_url=$('#databaseUrl').value.trim()||'sqlite:////data/state.db';delete st.db_path;app.auto_run=$('#autoRun').checked;app.run_interval_minutes=Number($('#runInterval').value);
-await api('/api/config',{method:'PUT',body:JSON.stringify(config)});toast('Settings saved');await refreshDashboard()
-}catch(e){toast(e.message,true)}};
+    toast(msg, bad=false){
+      this.toastMsg = msg;
+      this.toastBad = bad;
+      setTimeout(()=>{ this.toastMsg = ''; }, 4000);
+    },
 
-$('#runBtn').onclick=()=>api('/api/process/start',{method:'POST',body:JSON.stringify({mode:'run-once'})}).then(refreshDashboard).catch(e=>toast(e.message,true));
-$('#scanBtn').onclick=()=>api('/api/process/start',{method:'POST',body:JSON.stringify({mode:'scan-only'})}).then(refreshDashboard).catch(e=>toast(e.message,true));
-$('#stopBtn').onclick=()=>api('/api/process/stop',{method:'POST'}).then(refreshDashboard).catch(e=>toast(e.message,true));
-$('#authSubmit').onclick=async()=>{if(!authPrompt)return;try{await api('/api/auth',{method:'POST',body:JSON.stringify({account:authPrompt.account,kind:authPrompt.kind,value:$('#authValue').value})});$('#authValue').value='';toast('Auth value submitted')}catch(e){toast(e.message,true)}};
+    async api(url, opt={}){
+      const r = await fetch(url, {credentials:'include', headers:{'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})}, ...opt});
+      if(!r.ok) throw new Error(await r.text() || r.statusText);
+      return r.json();
+    },
 
-async function loadKeys(){
-  try {
-    const result=await api('/api/v1/admin/keys');
-    const rows=(result.keys||[]).map(k=>{
-      const state=k.revoked?'Revoked':(k.expires_at&&k.expires_at<=Date.now()/1000?'Expired':'Active');
-      return '<tr><td>'+esc(k.name)+'</td><td><code>'+esc(k.prefix)+'…</code></td><td>'+esc((k.scopes||[]).join(', '))+'</td><td>'+fmtTs(k.created_at)+'<br>'+fmtTs(k.last_used_at)+'</td><td>'+state+'</td><td><div class="row"><button class="btn compact key-rotate" data-id="'+esc(k.id)+'" '+(state!=='Active'?'disabled':'')+'>Rotate</button><button class="btn danger compact key-revoke" data-id="'+esc(k.id)+'" '+(state==='Revoked'?'disabled':'')+'>Revoke</button></div></td></tr>';
-    }).join('');
-    $('#apiKeysRows').innerHTML=rows;
-    $$('.key-revoke').forEach(b=>b.onclick=async()=>{
-      if(!confirm('Revoke this API key immediately? Existing clients will lose access.'))return;
-      try{await api('/api/v1/admin/keys/'+encodeURIComponent(b.dataset.id),{method:'DELETE'});toast('Key revoked');await loadKeys()}catch(e){toast(e.message,true)}
-    });
-    $$('.key-rotate').forEach(b=>b.onclick=async()=>{
-      if(!confirm('Rotate this key now? The old token will stop working immediately.'))return;
-      try{const result=await api('/api/v1/admin/keys/'+encodeURIComponent(b.dataset.id)+'/rotate',{method:'POST'});revealKey(result.token);toast('Key rotated');await loadKeys()}catch(e){toast(e.message,true)}
-    });
-  }catch(e){toast(e.message,true)}
-}
+    fmtTs(v){ if(!v) return '-'; return new Date(v*1000).toLocaleString(); },
+    esc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); },
 
-function revealKey(value){
-  $('#createdKeySecret').value=value;
-  $('#createdKeyCard').style.display='block';
-}
-$('#createKey').onclick=async()=>{
-  const scopes=$('#keyScopes input[type=checkbox]:checked').map(e=>e.value);
-  const expiry=$('#keyExpiry').value;
-  try{
-    const response=await api('/api/v1/admin/keys',{method:'POST',body:JSON.stringify({
-      name:$('#keyName').value.trim(),scopes,
-      expires_at:expiry?Math.floor(new Date(expiry).getTime()/1000):null
-    })});
-    revealKey(response.token);
-    $('#keyName').value='';
-    toast('Key created — copy the secret now');
-    await loadKeys();
-  }catch(e){toast(e.message,true)}
-};
-$('#refreshKeys').onclick=loadKeys;
-$('#dismissKey').onclick=()=>{$('#createdKeySecret').value='';$('#createdKeyCard').style.display='none'};
-$('#copyKey').onclick=async()=>{
-  try{await navigator.clipboard.writeText($('#createdKeySecret').value);toast('Key copied')}catch(e){toast('Clipboard access denied; select and copy the key manually',true)}
-};
-$('#keyScopes input[type=checkbox]').forEach(field=>field.onchange=()=>{
-  const admin=$('#keyScopes input[value="admin:*"]');
-  if(field===admin&&admin.checked){$('#keyScopes input[type=checkbox]').forEach(x=>{if(x!==admin)x.checked=false})}
-  else if(field.checked){admin.checked=false}
-});
-
-
-async function loadS3Keys(){
-  try {
-    const data=await api('/api/v1/admin/s3-credentials');
-    $('#s3KeysRows').innerHTML=(data.credentials||[]).map(k=>{
-      const state=k.revoked?'Revoked':(k.expires_at&&k.expires_at<=Date.now()/1000?'Expired':'Active');
-      return '<tr><td>'+esc(k.name)+'</td><td><code>'+esc(k.access_key)+'</code></td><td>'+esc((k.permissions||[]).join(', '))+'</td><td>'+fmtTs(k.created_at)+'</td><td>'+state+'</td><td><button class="btn danger compact s3-revoke" data-id="'+esc(k.id)+'" '+(state==='Revoked'?'disabled':'')+'>Revoke</button></td></tr>';
-    }).join('');
-    $('.s3-revoke').forEach(b=>b.onclick=async()=>{
-      if(!confirm('Revoke this S3 credential immediately? Connected clients will be denied.'))return;
-      try{await api('/api/v1/admin/s3-credentials/'+encodeURIComponent(b.dataset.id),{method:'DELETE'});toast('S3 key revoked');await loadS3Keys()}catch(e){toast(e.message,true)}
-    });
-  }catch(e){$('#s3KeysRows').textContent='S3 key storage unavailable: '+e.message}
-}
-async function loadS3Recovery(){
-  const target=$('#s3RecoveryRows');
-  try {
-    const response=await api('/api/v1/admin/s3-multipart/stale?min_age_seconds=3600');
-    const uploads=response.uploads||[];
-    target.innerHTML=uploads.length?uploads.map(u=>
-      '<tr><td>'+esc(u.bucket)+'</td><td>'+esc(u.object_key)+'</td>'
-      +'<td><code>'+esc(u.id)+'</code></td><td>'+fmtTs(u.lease_until)+'</td>'
-      +'<td><button class="btn compact s3-recover" data-id="'+esc(u.id)+'">Preview / Recover</button></td></tr>'
-    ).join(''):'<tr><td colspan="5">No eligible stale completions</td></tr>';
-    $('.s3-recover').forEach(button=>button.onclick=async()=>{
-      const uploadId=button.dataset.id;
-      const url='/api/v1/admin/s3-multipart/'+encodeURIComponent(uploadId)+'/recover';
-      button.disabled=true;
+    async refreshDashboard(){
       try {
-        const preview=await api(url,{method:'POST',body:JSON.stringify({execute:false,min_age_seconds:3600})});
-        if(!preview.eligible){toast('Upload no longer eligible for recovery',true);await loadS3Recovery();return}
-        if(!confirm('Recover this expired multipart completion? No Telegram messages will be deleted. The S3 client must retry Complete explicitly.'))return;
-        const done=await api(url,{method:'POST',body:JSON.stringify({execute:true,min_age_seconds:3600})});
-        toast(done.recovered?'Upload safely returned to active':'Recovery eligibility changed; no action taken',!done.recovered);
-        await loadS3Recovery();
-      }catch(e){toast(e.message,true)}
-      finally{button.disabled=false}
-    });
-  }catch(e){target.textContent='Cannot scan stale multipart uploads: '+e.message}
-}
-$('#refreshS3Recovery').onclick=loadS3Recovery;
+        const r = await this.api('/api/v1/admin/storage/health');
+        this.dashboard = {pending: r.pending||0, failed: r.failed||0, uploaded: r.uploaded||0, strategy: r.strategy||'-'};
+      } catch(e){}
+      try {
+        const r = await this.api('/api/v1/admin/storage/jobs?limit=100');
+        this.queueRows = r.jobs || [];
+      } catch(e){}
+    },
 
-async function loadPendingRecovery(){
-  const target=$('#pendingRecoveryRows');
-  try{
-    const response=await api('/api/v1/admin/storage/pending-stale?min_age_seconds=3600');
-    const uploads=response.uploads||[];
-    target.innerHTML=uploads.length?uploads.map(u=>
-      '<tr><td>'+esc(u.bucket)+'</td><td>'+esc(u.key)+'</td>'
-      +'<td><code>'+esc(u.id)+'</code></td><td>'+Number(u.journaled_chunks||0)+'</td>'
-      +'<td>'+fmtTs(u.lease_until)+'</td>'
-      +'<td><button class="btn compact pending-abandon" data-id="'+esc(u.id)+'">Preview / Fence</button></td></tr>'
-    ).join(''):'<tr><td colspan="6">No eligible stale PENDING uploads</td></tr>';
-    $('.pending-abandon').forEach(button=>button.onclick=async()=>{
-      const objectId=button.dataset.id;
-      const url='/api/v1/admin/storage/pending-stale/'+encodeURIComponent(objectId)+'/abandon';
-      button.disabled=true;
-      try{
-        const preview=await api(url,{method:'POST',body:JSON.stringify({execute:false,min_age_seconds:3600})});
-        if(!preview.eligible){toast('Writer heartbeat or state changed; no action taken',true);await loadPendingRecovery();return}
-        if(!confirm('Fence only this expired upload and mark its metadata FAILED? Telegram messages will NOT be deleted. It may need subsequent reconciliation.'))return;
-        const executed=await api(url,{method:'POST',body:JSON.stringify({execute:true,min_age_seconds:3600})});
-        toast(executed.abandoned?'Old writer fenced. Telegram journal preserved.':'Writer state changed; no action taken',!executed.abandoned);
-        await loadPendingRecovery();
-      }catch(e){toast(e.message,true)}
-      finally{button.disabled=false}
-    });
-  }catch(e){target.textContent='Cannot inspect PENDING uploads: '+e.message}
-}
-$('#refreshPendingRecovery').onclick=loadPendingRecovery;
+    async loadSettings(){
+      try {
+        const config = await this.api('/api/config');
+        const tg = config.telegram||{}, up = config.upload||{}, st = config.state||{}, app = config.app||{};
+        const storage = config.storage||{}, jobs = config.jobs||{};
+        this.config = config;
+        if(!this.config.storage) this.config.storage = {};
+        if(!this.config.upload) this.config.upload = {};
+        if(!this.config.state) this.config.state = {};
+        if(!this.config.app) this.config.app = {};
+        if(!this.config.telegram) this.config.telegram = {};
+        this.config.storage.channel = storage.channel||'';
+        this.config.storage.strategy = storage.strategy||'round_robin';
+        this.config.storage.scratch_dir = storage.scratch_dir||'/data/tmp';
+        this.config.upload.source_dir = up.source_dir||'/uploads';
+        this.config.upload.send_mode = up.send_mode||'document';
+        this.config.upload.max_files_per_run = up.max_files_per_run??12;
+        this.config.upload.max_files_per_day = up.max_files_per_day??100;
+        this.config.upload.sleep_min_seconds = up.sleep_min_seconds??60;
+        this.config.upload.sleep_max_seconds = up.sleep_max_seconds??90;
+        this.config.upload.retry_attempts = up.retry_attempts??5;
+        this.config.upload.backoff_base_seconds = up.backoff_base_seconds??10;
+        this.config.upload.floodwait_buffer_seconds = up.floodwait_buffer_seconds??5;
+        this.config.upload.max_file_size_mb = up.max_file_size_mb??0;
+        this.config.upload.caption_template = up.caption_template||'{name}';
+        this.config.upload.allowed_extensions = up.allowed_extensions||[];
+        this.extensionsStr = (up.allowed_extensions||[]).join(',');
+        this.config.state.database_url = st.database_url||st.db_path||'sqlite:////data/state.db';
+        this.config.app.auto_run = !!app.auto_run;
+        this.config.app.run_interval_minutes = app.run_interval_minutes??60;
+        this.activeChannelId = storage.channel||'';
+        await this.refreshChannels();
+        await this.refreshTgSessionStatus();
+      } catch(e){ this.toast(e.message,true); }
+    },
 
-async function loadObjectVersions(){
-  const bucket=$('#historyVersionBucket').value.trim();
-  const key=$('#historyVersionKey').value;
-  const target=$('#objectVersionsRows');
-  const summary=$('#objectVersionGeneration');
-  if(!bucket||!key){toast('Bucket and key are required',true);return}
-  try{
-    const d=await api('/api/v1/admin/storage/versions?bucket='+
-      encodeURIComponent(bucket)+'&key='+encodeURIComponent(key));
-    summary.textContent='Current generation: '+d.generation;
-    const versions=d.versions||[];
-    target.innerHTML=versions.length?versions.map(v=>
-      '<tr><td><code>'+esc(v.version_id)+'</code>'+(v.is_current?' <span class="pill ready">current</span>':'')+'</td>'
-      +'<td>'+Number(v.size)+'</td><td><code>'+esc(v.sha256)+'</code></td>'
-      +'<td>'+fmtTs(Math.floor(v.committed_ns/1000000000))+'</td>'
-      +'<td><button class="btn compact object-version-restore" data-id="'+esc(v.version_id)+'">Restore</button></td></tr>'
-    ).join(''):'<tr><td colspan="5">No indexed published versions for this key</td></tr>';
-    $('.object-version-restore').forEach(button=>button.onclick=async()=>{
-      if(!confirm('Restore this historical version as a new immutable HEAD? Telegram media is referenced, never reuploaded or deleted.'))return;
-      button.disabled=true;
-      try{
-        const result=await api('/api/v1/admin/storage/versions/'+
-          encodeURIComponent(button.dataset.id)+'/restore',{
-          method:'POST',body:JSON.stringify({
-            bucket,key,expected_generation:d.generation
-          }),
-        });
-        toast('Version restored: '+result.id);
-        await loadObjectVersions();
-      }catch(e){toast(e.message,true)}
-      finally{button.disabled=false}
-    });
-  }catch(e){target.textContent='History unavailable: '+e.message;summary.textContent=''}
-}
-$('#loadObjectVersions').onclick=loadObjectVersions;
-$('#indexCurrentVersions').onclick=async()=>{
-  const endpoint='/api/v1/admin/storage/versions/index-current';
-  try{
-    const preview=await api(endpoint,{method:'POST',body:JSON.stringify({execute:false,limit:100})});
-    if(!preview.count){toast('No existing published HEADs need indexing');return}
-    if(!confirm('Index '+preview.count+' pre-upgrade current HEAD(s) as known published versions? Unpublished old manifests will stay hidden; Telegram media is not touched.'))return;
-    const done=await api(endpoint,{method:'POST',body:JSON.stringify({execute:true,limit:100})});
-    toast('Indexed '+done.count+' existing HEAD(s)');
-    if($('#historyVersionBucket').value&&$('#historyVersionKey').value)await loadObjectVersions();
-  }catch(e){toast(e.message,true)}
-};
+    async saveSettings(){
+      try {
+        if(!this.config) await this.loadSettings();
+        const c = this.config;
+        c.storage.channel = this.activeChannelId || (this.channels[0]?.channel_id||'');
+        c.storage.strategy = c.storage.strategy||'round_robin';
+        c.storage.scratch_dir = c.storage.scratch_dir||'/data/tmp';
+        c.upload.allowed_extensions = this.extensionsStr.split(',').map(x=>x.trim()).filter(Boolean);
+        delete c.state.db_path;
+        await this.api('/api/config',{method:'PUT',body:JSON.stringify(c)});
+        this.toast('Settings saved');
+        await this.refreshDashboard();
+      } catch(e){ this.toast(e.message,true); }
+    },
 
-async function loadStorageJobs(){
-  const target=$('#storageJobsRows');
-  try{
-    const result=await api('/api/v1/admin/storage/jobs?limit=100');
-    const items=result.jobs||[];
-    target.innerHTML=items.length?items.map(j=>
-      '<tr><td>'+esc(j.bucket)+' / '+esc(j.object_key)+'</td>'
-      +'<td><code>'+esc(j.source_path)+'</code></td>'
-      +'<td>'+esc(j.state)+'</td><td>'+Number(j.attempts||0)+'</td>'
-      +'<td>'+fmtTs(j.updated_at)+'</td>'
-      +'<td>'+(j.state==='failed'?'<button class="btn compact storage-job-retry" data-id="'+esc(j.id)+'">Retry</button> ':'' )+(j.state==='queued'||j.state==='failed'?'<button class="btn compact storage-job-cancel" data-id="'+esc(j.id)+'">Cancel</button>':(j.last_error?esc(j.last_error):'-'))+'</td></tr>'
-    ).join(''):'<tr><td colspan="6">No upload jobs</td></tr>';
-    $('.storage-job-retry').forEach(button=>button.onclick=async()=>{
-      if(!confirm('Requeue this failed job? The original source must still be unchanged. Existing Telegram media will not be deleted.'))return;
-      try{
-        await api('/api/v1/admin/storage/jobs/'+encodeURIComponent(button.dataset.id)+'/retry',{method:'POST'});
-        toast('Job queued for retry');await loadStorageJobs();
-      }catch(e){toast(e.message,true)}
-    });
-    $('.storage-job-cancel').forEach(button=>button.onclick=async()=>{
-      if(!confirm('Cancel this idle upload job? No Telegram message will be deleted.'))return;
-      try{
-        await api('/api/v1/admin/storage/jobs/'+encodeURIComponent(button.dataset.id)+'/cancel',{method:'POST'});
-        toast('Idle job cancelled');await loadStorageJobs();
-      }catch(e){toast(e.message,true)}
-    });
-  }catch(e){target.textContent='Cannot list upload jobs: '+e.message}
-}
-$('#refreshStorageJobs').onclick=loadStorageJobs;
-$('#refreshStorageHealth').onclick=async()=>{
-  const target=$('#storageHealthSummary');
-  try{
-    const h=await api('/api/v1/admin/storage/health');
-    target.textContent=[
-      'Job states: '+JSON.stringify(h.job_states),
-      'Unresolved alerts: '+h.unresolved_alert_count,
-      ...(h.alerts||[]).map(a=>'['+a.severity.toUpperCase()+'] '+a.code+': '+a.count+' — '+a.message),
-      'Stale PENDING uploads: '+h.stale_pending_sample_count,
-      'Stale multipart completions: '+h.stale_multipart_sample_count,
-      'Telegram messages retained: '+h.telegram_messages_retained,
-      'Live object heads: '+h.live_object_heads,
-      'Copy aliases: '+h.copy_aliases,
-      'Physical GC enabled: '+(h.physical_deletion_enabled?'YES':'no'),
-      'Samples truncated: '+(h.samples_truncated?'yes':'no'),
-    ].join('\n');
-  }catch(e){target.textContent='Health check failed: '+e.message}
-};
-$('#queueStorageJob').onclick=async()=>{
-  const bucket=$('#storageJobBucket').value.trim();
-  const key=$('#storageJobKey').value;
-  const source_path=$('#storageJobSource').value.trim();
-  if(!bucket||!key||!source_path){toast('Bucket, key and source path are required',true);return}
-  try{
-    const result=await api('/api/v1/admin/storage/jobs',{
-      method:'POST',body:JSON.stringify({bucket,key,source_path}),
-    });
-    toast('Local file queued: '+result.id);
-    await loadStorageJobs();
-  }catch(e){toast(e.message,true)}
-};
-async function scanLegacyFolder(execute){
-  const bucket=$('#legacyImportBucket').value.trim();
-  const prefix=$('#legacyImportPrefix').value.trim();
-  const max_files=Number($('#legacyImportLimit').value);
-  if(!bucket||!Number.isInteger(max_files)||max_files<1||max_files>1000){
-    toast('Valid bucket and 1..1000 file limit required',true);return
-  }
-  if(execute&&!confirm('Queue eligible legacy files into durable storage jobs? No Telegram upload starts now. Ensure the legacy uploader is stopped.'))return;
-  const target=$('#legacyImportReport');
-  try{
-    const report=await api('/api/v1/admin/storage/jobs/import-legacy',{
-      method:'POST',body:JSON.stringify({bucket,prefix,max_files,execute}),
-    });
-    target.textContent=JSON.stringify(report,null,2);
-    if(execute){toast('Queued '+report.queued+' durable jobs');await loadStorageJobs()}
-  }catch(e){target.textContent='Legacy import failed: '+e.message;toast(e.message,true)}
-}
-$('#previewLegacyImport').onclick=()=>scanLegacyFolder(false);
-$('#executeLegacyImport').onclick=()=>scanLegacyFolder(true);
-$('#runStorageJob').onclick=async()=>{
-  if(!confirm('Process the next upload job and publish its Telegram object if the generation precondition still matches?'))return;
-  const button=$('#runStorageJob');
-  button.disabled=true;
-  try{
-    const result=await api('/api/v1/admin/storage/jobs/run-next',{method:'POST'});
-    toast(result.job?'Upload job '+result.job.state:'No queued upload jobs');
-    await loadStorageJobs();
-  }catch(e){toast(e.message,true);await loadStorageJobs()}
-  finally{button.disabled=false}
-};
+    async refreshChannels(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/channels');
+        this.channels = r.channels||[];
+        const a = await this.api('/api/v1/admin/storage/active-channel');
+        if(a.active){ this.activeChannelId = a.active.id; this.activeChannelLabel = 'Active: '+a.active.name+' ('+a.active.channel_id+')'; }
+        else { this.activeChannelLabel = 'No active channel.'; }
+      } catch(e){ this.toast(e.message,true); }
+    },
 
-$('#runGCAudit').onclick=async()=>{
-  const target=$('#gcAuditSummary');
-  target.textContent='Auditing references…';
-  try{
-    const d=await api('/api/v1/admin/storage/gc-audit?limit=100');
-    target.textContent=[
-      'Telegram messages: '+d.total_telegram_messages,
-      'Stored manifests: '+d.total_manifests,
-      'Current object heads: '+d.live_object_heads,
-      'CopyObject aliases: '+d.copy_aliases,
-      'Multipart part references: '+d.multipart_parts,
-      'Deletion-eligible: '+d.eligible_for_deletion,
-      'Protected chunk owners shown: '+d.protected_chunks.length+(d.truncated?' (list truncated)':''),
-      'Physical deletion disabled: '+(!d.physical_deletion_enabled?'yes':'NO')
-    ].join('\n');
-  }catch(e){target.textContent='Audit failed: '+e.message;toast(e.message,true)}
-};
-function hideS3Secret(){
-  $('#s3NewSecret').value='';$('#s3NewAccess').value='';$('#createdS3Card').style.display='none';
-}
-$('#createS3Key').onclick=async()=>{
-  hideS3Secret();
-  const permissions=$('#s3Permissions input[type=checkbox]:checked').map(x=>x.value);
-  const expiry=$('#s3KeyExpiry').value;
-  try{
-    const k=await api('/api/v1/admin/s3-credentials',{method:'POST',body:JSON.stringify({
-      name:$('#s3KeyName').value.trim(),permissions,
-      expires_at:expiry?Math.floor(new Date(expiry).getTime()/1000):null
-    })});
-    $('#s3NewAccess').value=k.access_key;
-    $('#s3NewSecret').value=k.secret_key;
-    $('#createdS3Card').style.display='block';
-    $('#s3KeyName').value='';
-    toast('S3 credential created; copy the secret now');
-    await loadS3Keys();
-  }catch(e){toast(e.message,true)}
-};
-$('#refreshS3Keys').onclick=loadS3Keys;
-$('#hideS3Credentials').onclick=hideS3Secret;
-$('#copyS3Credentials').onclick=async()=>{
-  const text='AWS_ACCESS_KEY_ID='+$('#s3NewAccess').value+'\nAWS_SECRET_ACCESS_KEY='+$('#s3NewSecret').value;
-  try{await navigator.clipboard.writeText(text);toast('S3 keys copied')}catch(e){toast('Clipboard unavailable; select and copy manually',true)}
-};
+    async addChannel(){
+      const name = prompt('Channel name (display):');
+      if(!name) return;
+      const cid = prompt('Channel ID or username:');
+      if(!cid) return;
+      try {
+        await this.api('/api/v1/admin/storage/channels',{method:'POST',body:JSON.stringify({name:name.trim(),channel_id:cid.trim(),strategy:this.config?.storage?.strategy||'round_robin',scratch_dir:this.config?.storage?.scratch_dir||'/data/tmp'})});
+        this.toast('Channel added');
+        await this.refreshChannels();
+      } catch(e){ this.toast(e.message,true); }
+    },
 
-refreshDashboard();setInterval(refreshDashboard,3000);
+    async activateChannel(id){
+      try { await this.api('/api/v1/admin/storage/channels/'+id+'/activate',{method:'POST'}); this.toast('Activated'); await this.refreshChannels(); }
+      catch(e){ this.toast(e.message,true); }
+    },
 
-// --- Telegram session management (UI-driven) -------------------------------
-let tgSessionToken = null;
-async function refreshTgSessionStatus(){
-  try{
-    const r = await api('/api/v1/admin/storage/telegram-session');
-    const el = $('#tgSessionStatus');
-    if(r.configured && r.session){
-      el.textContent = 'Authorized: ' + r.session.account + ' (api_id ' + r.session.api_id + '), channel ' + (r.session.channel||'-');
-    } else {
-      el.textContent = 'No session configured.';
+    async deleteChannel(id){
+      if(!confirm('Remove this channel?')) return;
+      try { await this.api('/api/v1/admin/storage/channels/'+id,{method:'DELETE'}); this.toast('Removed'); await this.refreshChannels(); }
+      catch(e){ this.toast(e.message,true); }
+    },
+
+    async refreshTgSessionStatus(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/telegram-session');
+        if(r.configured && r.session){
+          this.tgSessionStatus = 'Authorized: '+r.session.account+' (api_id '+r.session.api_id+'), channel '+(r.session.channel||'-');
+        } else {
+          this.tgSessionStatus = 'No session configured.';
+        }
+      } catch(e){ this.tgSessionStatus = 'Error: '+e.message; }
+    },
+
+    async sendTgCode(){
+      try {
+        const body = {
+          api_id: Number(this.tgApiId||0),
+          api_hash: this.tgApiHash.trim(),
+          phone: this.tgPhone.trim(),
+          channel: this.activeChannelId ? (this.channels.find(c=>c.id==this.activeChannelId)?.channel_id||null) : null,
+          strategy: this.config?.storage?.strategy||'round_robin'
+        };
+        const r = await this.api('/api/v1/admin/storage/telegram-session/request-code',{method:'POST',body:JSON.stringify(body)});
+        this.tgSessionToken = r.token;
+        this.tgCodeVisible = true;
+        this.toast('Code sent to Telegram app');
+      } catch(e){ this.toast(e.message,true); }
+    },
+
+    async verifyTgCode(){
+      try {
+        const body = { token: this.tgSessionToken, code: this.tgCode.trim(), password: this.tgPassword||null };
+        const r = await this.api('/api/v1/admin/storage/telegram-session/verify-code',{method:'POST',body:JSON.stringify(body)});
+        this.toast('Session saved: '+r.account);
+        this.tgSessionToken = null;
+        this.tgCodeVisible = false;
+        this.tgCode = '';
+        this.tgPassword = '';
+        await this.refreshTgSessionStatus();
+        await this.loadSettings();
+      } catch(e){ this.toast(e.message,true); }
+    },
+
+    async runJob(){
+      try { await this.api('/api/v1/admin/storage/jobs/run-next',{method:'POST'}); this.toast('Job triggered'); await this.refreshDashboard(); }
+      catch(e){ this.toast(e.message,true); }
+    },
+
+    async submitAuth(){
+      if(!this.authPrompt) return;
+      try {
+        await this.api('/api/auth',{method:'POST',body:JSON.stringify({account:this.authPrompt.account,kind:this.authPrompt.kind,value:this.authValue})});
+        this.authValue=''; this.toast('Auth value submitted');
+      } catch(e){ this.toast(e.message,true); }
+    },
+
+    async refreshKeys(){
+      try { const r = await this.api('/api/v1/admin/keys'); this.apiKeys = r.keys||[]; }
+      catch(e){ this.toast(e.message,true); }
+    },
+
+    async createKey(){
+      try {
+        const scopes = this.selectedScopes.slice();
+        const body = {name:this.newKeyName.trim()||'key', scopes:scopes};
+        if(this.newKeyExpiry) body.expires_at = Math.floor(new Date(this.newKeyExpiry).getTime()/1000);
+        const r = await this.api('/api/v1/admin/keys',{method:'POST',body:JSON.stringify(body)});
+        this.createdKey = {prefix:r.prefix, token:r.token};
+        this.toast('Key created');
+        await this.refreshKeys();
+      } catch(e){ this.toast(e.message,true); }
+    },
+
+    async revokeKey(id){
+      if(!confirm('Revoke this key?')) return;
+      try { await this.api('/api/v1/admin/keys/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshKeys(); }
+      catch(e){ this.toast(e.message,true); }
+    },
+
+    async copyText(t){
+      try{ await navigator.clipboard.writeText(t); this.toast('Copied'); }catch(e){ this.toast('Clipboard unavailable',true); }
+    },
+
+    async revokeS3Key(id){
+      if(!confirm('Revoke this S3 key?')) return;
+      try { await this.api('/api/v1/admin/s3-credentials/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshS3Keys(); }
+      catch(e){ this.toast(e.message,true); }
+    },
+
+    async refreshS3Keys(){
+      try { const r = await this.api('/api/v1/admin/s3-credentials'); this.s3Keys = r.credentials||[]; }
+      catch(e){ this.toast(e.message,true); }
+    },
+
+    async createS3Key(){
+      try {
+        const body = {name:this.s3KeyName.trim()||'s3-key', permissions:this.selectedS3Perms.slice()};
+        if(this.s3KeyExpiry) body.expires_at = Math.floor(new Date(this.s3KeyExpiry).getTime()/1000);
+        const r = await this.api('/api/v1/admin/s3-credentials',{method:'POST',body:JSON.stringify(body)});
+        this.createdS3 = {access:r.access_key, secret:r.secret_key};
+        this.toast('S3 credentials created');
+        await this.refreshS3Keys();
+      } catch(e){ this.toast(e.message,true); }
+    },
+
+    async loadLogs(){
+      try { const x = await this.api('/api/logs?limit=500'); this.logBox = (x.lines||[]).join('\n'); }
+      catch(e){ this.toast(e.message,true); }
     }
-  } catch(e){ toast(e.message,true) }
+  }
 }
-
-$('#sendTgCode').onclick = async () => {
-  try {
-    const body = {
-      api_id: Number($('#tgApiId').value||0),
-      api_hash: $('#tgApiHash').value.trim(),
-      phone: $('#tgPhone').value.trim(),
-      channel: $('#storageChannel').value.trim() || null,
-      strategy: $('#storageStrategy').value
-    };
-    const r = await api('/api/v1/admin/storage/telegram-session/request-code', {method:'POST', body: JSON.stringify(body)});
-    tgSessionToken = r.token;
-    $('#tgCodeSection').style.display = 'block';
-    toast('Code sent to Telegram app');
-  } catch(e){ toast(e.message,true) }
-};
-
-$('#verifyTgCode').onclick = async () => {
-  try {
-    const body = {
-      token: tgSessionToken,
-      code: $('#tgCode').value.trim(),
-      password: $('#tgPassword').value || null
-    };
-    const r = await api('/api/v1/admin/storage/telegram-session/verify-code', {method:'POST', body: JSON.stringify(body)});
-    toast('Session saved: ' + r.account);
-    tgSessionToken = null;
-    $('#tgCodeSection').style.display = 'none';
-    $('#tgCode').value = '';
-    $('#tgPassword').value = '';
-    await refreshTgSessionStatus();
-    await loadSettings();
-  } catch(e){ toast(e.message,true) }
-};
-
-// Load session status when settings page is shown
-const _origLoadSettings = loadSettings;
-loadSettings = async function(){ await _origLoadSettings(); await refreshTgSessionStatus(); };
-
-// --- Channel management (multi-channel) ------------------------------------
-async function refreshChannels(){
-  try {
-    const r = await api('/api/v1/admin/storage/channels');
-    const channels = r.channels || [];
-    const sel = $('#activeChannelSelect');
-    sel.innerHTML = channels.map(c => '<option value="'+c.id+'">'+esc(c.name)+' ('+esc(c.channel_id)+')'+(c.is_active?' *':'')+'</option>').join('');
-    const active = await api('/api/v1/admin/storage/active-channel');
-    if(active.active){ sel.value = active.active.id; $('#activeChannelLabel').textContent = 'Active: ' + active.active.name + ' (' + active.active.channel_id + ')'; }
-    else { $('#activeChannelLabel').textContent = 'No active channel.'; }
-    // Render channel list
-    $('#channelEditors').innerHTML = channels.map(c =>
-      '<div class="account-edit channel-edit" data-id="'+c.id+'"><div class="row"><strong>'+esc(c.name)+'</strong> <span class="muted">'+esc(c.channel_id)+'</span>'+(c.is_active?' <span class="tag">active</span>':'')+'<button class="btn danger compact ce-remove" data-id="'+c.id+'">Remove</button>'+(c.is_active?'':'<button class="btn compact ce-activate" data-id="'+c.id+'">Activate</button>')+'</div></div>'
-    ).join('');
-    $$('.ce-remove').forEach(b=>b.onclick=async()=>{ try{ await api('/api/v1/admin/storage/channels/'+b.dataset.id,{method:'DELETE'}); toast('Channel removed'); await refreshChannels(); }catch(e){toast(e.message,true)} });
-    $$('.ce-activate').forEach(b=>b.onclick=async()=>{ try{ await api('/api/v1/admin/storage/channels/'+b.dataset.id+'/activate',{method:'POST'}); toast('Activated'); await refreshChannels(); }catch(e){toast(e.message,true)} });
-  } catch(e){ toast(e.message,true) }
-}
-
-$('#addChannel').onclick = async () => {
-  const name = prompt('Channel name (display):');
-  if(!name) return;
-  const cid = prompt('Channel ID or username:');
-  if(!cid) return;
-  try {
-    await api('/api/v1/admin/storage/channels', {method:'POST', body: JSON.stringify({name:name.trim(), channel_id:cid.trim(), strategy: $('#storageStrategy').value, scratch_dir: $('#storageScratch').value.trim()})});
-    toast('Channel added');
-    await refreshChannels();
-  } catch(e){ toast(e.message,true) }
-};
-
-// Wire active channel change
-$('#activeChannelSelect').onchange = async () => {
-  const id = $('#activeChannelSelect').value;
-  if(id) { try{ await api('/api/v1/admin/storage/channels/'+id+'/activate',{method:'POST'}); toast('Active channel changed'); await refreshChannels(); }catch(e){toast(e.message,true)} }
-};
-
-// Refresh channels when settings loaded
-const _origLoadSettings2 = loadSettings;
-loadSettings = async function(){ await _origLoadSettings2(); await refreshChannels(); await refreshTgSessionStatus(); };
-
-// Initial load
-refreshChannels();

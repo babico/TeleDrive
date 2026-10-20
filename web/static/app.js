@@ -1,3 +1,4 @@
+console.log('APP.JS LOADED');
 const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
 let config=null, authPrompt=null;
 async function api(url,opt={}){const r=await fetch(url,{headers:{'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})},...opt});if(!r.ok)throw new Error(await r.text()||r.statusText);return r.json()}
@@ -380,6 +381,7 @@ async function refreshTgSessionStatus(){
 }
 
 $('#sendTgCode').onclick = async () => {
+  console.log('SEND CODE CLICKED');
   try {
     const body = {
       api_id: Number($('#tgApiId').value||0),

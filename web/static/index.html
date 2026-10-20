@@ -3,19 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TeleDrive</title>
+<title>TeleDrive - Dashboard</title>
 <script src="/static/vendor/tailwindcss.js"></script>
 <script defer src="/static/vendor/alpine.min.js"></script>
 <script>
 tailwind.config = {
   darkMode: 'class',
-  theme: {
-    extend: {
-      colors: {
-        brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' }
-      }
-    }
-  }
+  theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' } } } }
 }
 </script>
 <style>
@@ -70,24 +64,37 @@ tailwind.config = {
 
 <div id="toast" class="toast" :class="toastBad?'bad':'good'" x-show="toastMsg" x-text="toastMsg" x-transition></div>
 
-<header class="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-30">
-  <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-sm">T</div>
-      <span class="font-semibold text-lg">TeleDrive</span>
-    </div>
-    <nav class="flex gap-1">
-      <template x-for="tab in tabs" :key="tab.id">
-        <button class="tab" :class="page===tab.id?'active':''" @click="page=tab.id; if(tab.id==='logs') loadLogs()" x-text="tab.label"></button>
-      </template>
-    </nav>
+<div class="flex h-screen overflow-hidden">
+<aside class="w-56 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
+  <div class="px-4 py-4 border-b border-gray-800 flex items-center gap-2">
+    <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-sm">T</div>
+    <span class="font-semibold text-lg">TeleDrive</span>
+  </div>
+  <nav class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
+        <a href="/dashboard" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-brand-600 text-white">Dashboard</a>
+    <a href="/queue" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Queue</a>
+    <a href="/history" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">History</a>
+    <a href="/storage" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Storage</a>
+    <a href="/settings" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Settings</a>
+    <a href="/api-management" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">API Management</a>
+    <a href="/s3" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">S3</a>
+    <a href="/logs" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Logs</a>
+    <a href="/users" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Users</a>
+  </nav>
+  <div class="px-4 py-3 border-t border-gray-800 text-xs text-gray-500">TeleDrive</div>
+</aside>
+
+<div class="flex-1 flex flex-col overflow-hidden">
+<header class="h-14 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
+  <div class="text-sm text-gray-400">Dashboard</div>
+  <div class="flex items-center gap-3">
+    <span class="text-sm text-gray-300" x-text="currentUser||'admin'"></span>
+    <div class="w-8 h-8 rounded-full bg-brand-700 flex items-center justify-center text-xs font-bold" x-text="(currentUser||'A').charAt(0).toUpperCase()"></div>
   </div>
 </header>
 
-<main class="max-w-7xl mx-auto px-4 py-6">
-
-<!-- Dashboard -->
-<section x-show="page==='dashboard'" class="space-y-4">
+<main class="flex-1 overflow-y-auto px-6 py-6">
+<section class="space-y-4">
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
     <div class="card"><div class="muted text-xs uppercase">Pending jobs</div><div class="text-2xl font-bold mt-1" x-text="dashboard.pending||0"></div></div>
     <div class="card"><div class="muted text-xs uppercase">Failed jobs</div><div class="text-2xl font-bold mt-1" x-text="dashboard.failed||0"></div></div>
@@ -102,238 +109,9 @@ tailwind.config = {
     </div>
   </div>
 </section>
-
-<!-- Queue -->
-<section x-show="page==='queue'" class="space-y-4">
-  <div class="card">
-    <h3>Upload queue</h3>
-    <div class="scroll mt-3">
-      <table><thead><tr><th>Path</th><th>Status</th><th>Attempts</th><th>Account</th><th>Error</th></tr></thead>
-      <tbody><template x-for="r in queueRows" :key="r.path"><tr>
-        <td x-text="r.path"></td><td><span class="badge" :class="r.status==='done'?'badge-green':r.status==='failed'?'badge-red':'badge-gray'" x-text="r.status"></span></td>
-        <td x-text="r.attempts"></td><td x-text="r.tg_account||'-'"></td><td x-text="r.last_error||''"></td>
-      </tr></template></tbody></table>
-    </div>
-  </div>
-</section>
-
-<!-- History -->
-<section x-show="page==='history'" class="space-y-4">
-  <div class="card">
-    <h3>Upload history</h3>
-    <div class="scroll mt-3">
-      <table><thead><tr><th>Path</th><th>Account</th><th>Message ID</th><th>Uploaded</th></tr></thead>
-      <tbody><template x-for="r in historyRows" :key="r.path"><tr>
-        <td x-text="r.path"></td><td x-text="r.tg_account||'-'"></td><td x-text="r.tg_message_id||'-'"></td><td x-text="fmtTs(r.uploaded_ts)"></td>
-      </tr></template></tbody></table>
-    </div>
-  </div>
-</section>
-
-<!-- Settings -->
-<section x-show="page==='settings'" class="space-y-4">
-  <div class="card">
-    <h3>Upload</h3>
-    <div class="field"><label>Source directory</label><input x-model="config.upload.source_dir" class="input"></div>
-    <div class="field"><label>Send mode</label>
-      <select x-model="config.upload.send_mode" class="input"><option>document</option><option>media</option><option>auto</option></select>
-    </div>
-    <div class="grid grid-cols-2 gap-3">
-      <div class="field"><label>Max files / run</label><input x-model="config.upload.max_files_per_run" class="input" type="number"></div>
-      <div class="field"><label>Max files / day</label><input x-model="config.upload.max_files_per_day" class="input" type="number"></div>
-      <div class="field"><label>Sleep min (sec)</label><input x-model="config.upload.sleep_min_seconds" class="input" type="number"></div>
-      <div class="field"><label>Sleep max (sec)</label><input x-model="config.upload.sleep_max_seconds" class="input" type="number"></div>
-      <div class="field"><label>Retry attempts</label><input x-model="config.upload.retry_attempts" class="input" type="number"></div>
-      <div class="field"><label>Backoff base (sec)</label><input x-model="config.upload.backoff_base_seconds" class="input" type="number"></div>
-      <div class="field"><label>FloodWait buffer (sec)</label><input x-model="config.upload.floodwait_buffer_seconds" class="input" type="number"></div>
-      <div class="field"><label>Max file size MB (0=unlimited)</label><input x-model="config.upload.max_file_size_mb" class="input" type="number"></div>
-    </div>
-    <div class="field"><label>Caption template</label><input x-model="config.upload.caption_template" class="input"></div>
-    <div class="field"><label>Allowed extensions (comma)</label><input x-model="extensionsStr" class="input"></div>
-  </div>
-
-  <div class="card">
-    <h3>Database</h3>
-    <div class="field"><label>SQLAlchemy database URL</label><input x-model="config.state.database_url" class="input" placeholder="sqlite:////data/state.db"></div>
-    <p class="muted text-xs">No vendor whitelist. Any synchronous SQLAlchemy dialect works when its driver is installed.</p>
-  </div>
-
-  <div class="card">
-    <h3>Automation</h3>
-    <div class="field"><label class="flex items-center gap-2"><input type="checkbox" x-model="config.app.auto_run" class="w-4 h-4"> Run upload batches automatically</label></div>
-    <div class="field"><label>Interval (minutes)</label><input x-model="config.app.run_interval_minutes" class="input" type="number"></div>
-  </div>
-
-  <div class="flex gap-3">
-    <button class="btn btn-primary" @click="saveSettings()">Save settings</button>
-  </div>
-</section>
-
-<section x-show="page==='storage'" class="space-y-4">
-<div class="card">
-    <h3>Channels</h3>
-    <p class="muted">Birden fazla kanal ekle. Aktif kanal seç; yazma işlemleri aktif kanala gider.</p>
-    <div class="row mt-3">
-      <button class="btn btn-primary btn-sm" @click="addChannel()">Add channel</button>
-      <span class="muted" x-text="activeChannelLabel"></span>
-    </div>
-    <div class="mt-3 space-y-2" id="channelEditors">
-      <template x-for="ch in channels" :key="ch.id">
-        <div class="flex items-center justify-between p-3 border border-gray-800 rounded-lg">
-          <div><strong x-text="ch.name"></strong> <span class="muted" x-text="ch.channel_id"></span>
-            <span x-show="ch.is_active" class="badge badge-green ml-2">active</span></div>
-          <div class="flex gap-2">
-            <button x-show="!ch.is_active" class="btn btn-sm" @click="activateChannel(ch.id)">Activate</button>
-            <button class="btn btn-danger btn-sm" @click="deleteChannel(ch.id)">Remove</button>
-          </div>
-        </div>
-      </template>
-    </div>
-  </div>
-
-  <div class="card">
-    <h3>Active channel settings</h3>
-    <div class="field"><label>Active channel</label>
-      <select x-model="activeChannelId" class="input" @change="activateChannel(activeChannelId)">
-        <template x-for="ch in channels" :key="ch.id">
-          <option :value="ch.id" x-text="ch.name + ' (' + ch.channel_id + ')'"></option>
-        </template>
-      </select>
-    </div>
-    <div class="field"><label>Strategy</label>
-      <select x-model="config.storage.strategy" class="input">
-        <option value="round_robin">round_robin</option><option value="single">single</option>
-        <option value="failover">failover</option><option value="parallel">parallel</option>
-      </select>
-    </div>
-    <div class="field"><label>Scratch directory</label><input x-model="config.storage.scratch_dir" class="input"></div>
-  </div>
-
-  <div class="card">
-    <h3>Telegram session (USER MTProto)</h3>
-    <p class="muted">API credential ve session. DB'ye kaydedilir; config dosyası gerekmez.</p>
-    <div class="field"><label>API ID</label><input x-model="tgApiId" class="input" type="number"></div>
-    <div class="field"><label>API hash</label><input x-model="tgApiHash" class="input"></div>
-    <div class="field"><label>Phone (with country code)</label><input x-model="tgPhone" class="input" placeholder="+90..."></div>
-    <div class="row mt-2">
-      <button class="btn btn-primary" @click="sendTgCode()">Send code</button>
-      <span class="muted" x-text="tgSessionStatus"></span>
-    </div>
-    <div class="mt-3 space-y-3" x-show="tgCodeVisible">
-      <div class="field"><label>Code (from Telegram app)</label><input x-model="tgCode" class="input"></div>
-      <div class="field"><label>2FA password (optional)</label><input x-model="tgPassword" class="input" type="password"></div>
-      <button class="btn btn-primary" @click="verifyTgCode()">Verify & save session</button>
-    </div>
-  </div>
-
-</section>
-
-<!-- API Management -->
-<section x-show="page==='api-management'" class="space-y-4">
-  <div class="card">
-    <h3>REST API access keys</h3>
-    <p class="muted">Keys are stored hashed. Secret values shown once.</p>
-    <div class="grid grid-cols-2 gap-3 mt-3">
-      <div class="field"><label>Key name</label><input x-model="newKeyName" class="input" placeholder="Backup client"></div>
-      <div class="field"><label>Expiry (optional, UTC)</label><input x-model="newKeyExpiry" class="input" type="datetime-local"></div>
-    </div>
-    <div class="field mt-2"><label>Permissions</label>
-      <div class="grid grid-cols-2 gap-2">
-        <template x-for="s in keyScopesList" :key="s">
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" :value="s" x-model="selectedScopes"> <span x-text="s"></span></label>
-        </template>
-      </div>
-    </div>
-    <div class="row mt-3">
-      <button class="btn btn-primary btn-sm" @click="createKey()">Create API key</button>
-      <button class="btn btn-sm" @click="refreshKeys()">Refresh</button>
-    </div>
-    <div class="mt-3" x-show="createdKey">
-      <div class="card bg-gray-900">
-        <b class="text-amber-400">New API key — copy now; it will not be shown again</b>
-        <div class="field mt-2"><label>Access Key ID</label><input class="input" :value="createdKey.prefix+'…'" readonly></div>
-        <div class="field"><label>Secret</label><input class="input" :value="createdKey.token" readonly></div>
-        <button class="btn btn-sm mt-2" @click="copyText(createdKey.token)">Copy secret</button>
-      </div>
-    </div>
-    <div class="scroll mt-3">
-      <table><thead><tr><th>Name</th><th>Prefix</th><th>Permissions</th><th>Created</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody><template x-for="k in apiKeys" :key="k.id"><tr>
-        <td x-text="k.name"></td><td x-text="k.prefix+'…'"></td><td x-text="(k.scopes||[]).join(', ')"></td>
-        <td x-text="fmtTs(k.created_at)"></td><td x-text="k.revoked?'Revoked':'Active'"></td>
-        <td><button class="btn btn-danger btn-sm" @click="revokeKey(k.id)">Revoke</button></td>
-      </tr></template></tbody></table>
-    </div>
-  </div>
-</section>
-
-<!-- S3 -->
-<section x-show="page==='s3'" class="space-y-4">
-  <div class="card">
-    <h3>S3-compatible gateway</h3>
-    <p class="muted">Telegram is the only payload backend. S3 credentials are encrypted at rest. Configure the S3 master key before issuing credentials.</p>
-    <div class="grid grid-cols-2 gap-3 mt-3">
-      <div class="field"><label>S3 access name</label><input x-model="s3KeyName" class="input" placeholder="AWS CLI backup"></div>
-      <div class="field"><label>Expiry (optional)</label><input x-model="s3KeyExpiry" class="input" type="datetime-local"></div>
-    </div>
-    <div class="field mt-2"><label>Allowed S3 actions</label>
-      <div class="grid grid-cols-2 gap-2">
-        <template x-for="p in s3Perms" :key="p">
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" :value="p" x-model="selectedS3Perms"> <span x-text="p"></span></label>
-        </template>
-      </div>
-    </div>
-    <div class="row mt-3">
-      <button class="btn btn-primary btn-sm" @click="createS3Key()">Create S3 credentials</button>
-      <button class="btn btn-sm" @click="refreshS3Keys()">Refresh list</button>
-    </div>
-    <div class="mt-3" x-show="createdS3">
-      <div class="card bg-gray-900">
-        <b class="text-amber-400">S3 credentials — copy now; secret cannot be recovered.</b>
-        <div class="field mt-2"><label>Access Key ID</label><input class="input" :value="createdS3.access" readonly></div>
-        <div class="field"><label>Secret Access Key</label><input class="input" :value="createdS3.secret" readonly></div>
-        <button class="btn btn-sm mt-2" @click="copyText(createdS3.access+'\n'+createdS3.secret)">Copy</button>
-      </div>
-    </div>
-  </div>
-  <div class="card">
-    <h3>Existing S3 credentials</h3>
-    <div class="scroll">
-      <table><thead><tr><th>Name</th><th>Access Key ID</th><th>Permissions</th><th>Created</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody><template x-for="k in s3Keys" :key="k.id"><tr>
-        <td x-text="k.name"></td><td x-text="k.access_key"></td><td x-text="(k.permissions||[]).join(', ')"></td>
-        <td x-text="fmtTs(k.created_at)"></td><td x-text="k.revoked?'Revoked':'Active'"></td>
-        <td><button class="btn btn-danger btn-sm" @click="revokeS3Key(k.id)">Revoke</button></td>
-      </tr></template></tbody></table>
-    </div>
-  </div>
-</section>
-
-<!-- Logs -->
-<section x-show="page==='logs'" class="space-y-4">
-  <div class="card">
-    <h3>Logs</h3>
-    <div class="row mt-2">
-      <div class="field" style="flex:2"><label>Filter (text)</label><input x-model="logFilter" class="input" placeholder="filter by text, source, user..." @input.debounce.300ms="loadLogs()"></div>
-      <div class="field" style="flex:1"><label>Lines</label><select x-model="logLimit" class="input" @change="loadLogs()"><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="1500">1500</option></select></div>
-      <button class="btn btn-sm" @click="loadLogs()">Refresh</button>
-      <button class="btn btn-sm" :class="logLive?'btn-primary':''" @click="toggleLogLive()" x-text="logLive?'Live ON':'Live OFF'"></button>
-    </div>
-    <div class="scroll mt-3">
-      <table><thead><tr><th>Time</th><th>User</th><th>Source</th><th>Message</th></tr></thead>
-      <tbody><template x-for="e in logEntries" :key="e.ts+e.message"><tr>
-        <td class="text-xs text-gray-400 whitespace-nowrap" x-text="e.ts"></td>
-        <td class="text-xs" x-text="e.user"></td>
-        <td class="text-xs text-gray-400" x-text="e.source"></td>
-        <td class="text-xs" x-text="e.message"></td>
-      </tr></template></tbody></table>
-    </div>
-  </div>
-</section>
-
 </main>
-
-<div id="toast" class="toast" :class="toastBad?'bad':'good'" x-show="toastMsg" x-text="toastMsg" x-transition></div>
+</div>
+</div>
 
 <script src="/static/app.js"></script>
 </body></html>

@@ -10,7 +10,7 @@ function app(){
       {id:'settings',label:'Settings'},
       {id:'api-management',label:'API Management'},
       {id:'s3',label:'S3'},
-      {id:'logs',label:'Logs'}
+      {id:'logs',label:'Logs'},{id:'users',label:'Users'}
     ],
     toastMsg: '',
     toastBad: false,
@@ -57,13 +57,21 @@ function app(){
     logEntries: [],
     logLive: false,
     _logTimer: null,
+    users: [],
+    showNewUser: false,
+    newUser: {username:'', password:'', role:'viewer'},
+    logLive: false,
+    _logTimer: null,
     logFilter: '',
     logLimit: 1000,
 
     async init(){
+      const path = window.location.pathname.replace(/^\/+/, '').replace(/\.html$/, '') || 'dashboard';
+      this.page = path === '' ? 'dashboard' : path;
       await this.loadSettings();
       await this.refreshChannels();
       await this.refreshTgSessionStatus();
+      await this.loadUsers();
       await this.refreshDashboard();
       setInterval(()=>this.refreshDashboard(), 30000);
       this.$watch('page', (v) => { if(v !== 'logs' && this.logLive) this.toggleLogLive(); });
@@ -300,6 +308,26 @@ function app(){
       } else {
         if(this._logTimer){ clearInterval(this._logTimer); this._logTimer=null; }
       }
-    }
+    },
+
+    async loadUsers(){
+      try { const r = await this.api('/api/v1/admin/users'); this.users = r.users||[]; }
+      catch(e){ this.toast(e.message,true); }
+    },
+    async createUser(){
+      try {
+        const body = {username:this.newUser.username.trim(), password:this.newUser.password, role:this.newUser.role};
+        await this.api('/api/v1/admin/users',{method:'POST',body:JSON.stringify(body)});
+        this.toast('User created');
+        this.showNewUser = false;
+        this.newUser = {username:'', password:'', role:'viewer'};
+        await this.loadUsers();
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async deleteUser(id){
+      if(!confirm('Delete this user?')) return;
+      try { await this.api('/api/v1/admin/users/'+id,{method:'DELETE'}); this.toast('User deleted'); await this.loadUsers(); }
+      catch(e){ this.toast(e.message,true); }
+    },
   }
 }

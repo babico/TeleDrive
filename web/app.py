@@ -806,6 +806,33 @@ def index(_: None = Depends(require_auth)):
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/{page_name}.html", include_in_schema=False)
+def page_html(page_name: str, request: Request):
+    try:
+        require_auth(request)
+    except HTTPException:
+        raise
+    candidate = STATIC_DIR / f"{page_name}.html"
+    if candidate.is_file():
+        return FileResponse(candidate)
+    raise HTTPException(404, "Page not found")
+
+
+@app.get("/{page_name}", include_in_schema=False)
+def page_route(page_name: str, request: Request):
+    if page_name in {"api", "static", "openapi.json", "docs", "redoc",
+                     "__health", "favicon.ico"}:
+        raise HTTPException(404, "Not found")
+    try:
+        require_auth(request)
+    except HTTPException:
+        raise
+    candidate = STATIC_DIR / f"{page_name}.html"
+    if candidate.is_file():
+        return FileResponse(candidate)
+    raise HTTPException(404, "Page not found")
+
+
 @app.get("/api/config", tags=["Configuration"], summary="Read configuration (secrets redacted)")
 def get_config(_: None = Depends(require_auth)):
     return _redacted_config(read_raw_config())
@@ -1458,6 +1485,94 @@ def logs(limit: int = 1000, _: None = Depends(require_auth)):
             entries.append({"ts": "", "user": "", "source": "", "message": line})
     return {"lines": combined, "entries": entries}
 
+
+
+# --- User management (multi-user WebUI) ------------------------------------
+
+@app.get("/api/v1/admin/users", tags=["Users"], summary="List WebUI users")
+def list_users(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        rows = conn.connection.execute(_text(
+            "SELECT id, username, role, created_at, updated_at, last_login "
+            "FROM users ORDER BY id"
+        )).fetchall()
+        return {"users": [
+            {"id": r[0], "username": r[1], "role": r[2],
+             "created_at": r[3], "updated_at": r[4], "last_login": r[5]}
+            for r in rows]}
+    finally:
+        conn.close()
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "viewer"
+
+
+@app.post("/api/v1/admin/users", tags=["Users"], status_code=201,
+          summary="Create a WebUI user")
+def create_user(request: Request, payload: UserCreateRequest,
+                _: None = Depends(require_auth)):
+    _same_origin(request)
+    if not payload.username or not payload.password:
+        raise HTTPException(400, "username and password are required")
+    if payload.role not in ("admin", "operator", "viewer"):
+        raise HTTPException(400, "role must be admin, operator or viewer")
+    if len(payload.password) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    import hashlib as _hl, secrets as _sec, time as _t
+    salt = _sec.token_hex(16)
+    pw_hash = salt + ":" + _hl.sha256((salt + payload.password).encode()).hexdigest()
+    now = int(_t.time())
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        try:
+            conn.connection.execute(_text(
+                "INSERT INTO users (username, password_hash, role, created_at, updated_at) "
+                "VALUES (:u, :ph, :r, :now, :now)"
+            ), {"u": payload.username, "ph": pw_hash, "r": payload.role, "now": now})
+            conn.connection.commit()
+        except Exception as exc:
+            raise HTTPException(409, "username already exists") from exc
+        row = conn.connection.execute(_text(
+            "SELECT id FROM users WHERE username = :u"
+        ), {"u": payload.username}).fetchone()
+    finally:
+        conn.close()
+    _log(f"create user: username={payload.username} role={payload.role}", "users")
+    return {"id": row[0], "username": payload.username, "role": payload.role}
+
+
+@app.delete("/api/v1/admin/users/{user_id}", tags=["Users"],
+            summary="Delete a WebUI user")
+def delete_user(user_id: int, request: Request, _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        # Prevent deleting the last admin
+        admin_count = conn.connection.execute(_text(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+        )).scalar()
+        row = conn.connection.execute(_text(
+            "SELECT username, role FROM users WHERE id = :id"
+        ), {"id": user_id}).fetchone()
+        if row is None:
+            raise HTTPException(404, "user not found")
+        if row[1] == "admin" and admin_count <= 1:
+            raise HTTPException(409, "cannot delete the last admin")
+        conn.connection.execute(_text(
+            "DELETE FROM users WHERE id = :id"
+        ), {"id": user_id})
+        conn.connection.commit()
+        _log(f"delete user: id={user_id} username={row[0]}", "users")
+    finally:
+        conn.close()
+    return {"ok": True}
 
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],
          summary="Read storage jobs, stale leases and protected-media metrics")

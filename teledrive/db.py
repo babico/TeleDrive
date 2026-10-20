@@ -91,6 +91,17 @@ telegram_session_pending = Table(
     Column("created_at", BigInteger, nullable=False),
 )
 
+users = Table(
+    "users", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String(128), nullable=False, unique=True),
+    Column("password_hash", String(255), nullable=False),
+    Column("role", String(32), nullable=False, server_default="viewer"),
+    Column("created_at", BigInteger, nullable=False),
+    Column("updated_at", BigInteger, nullable=False),
+    Column("last_login", BigInteger),
+)
+
 
 class DBRow:
     def __init__(self, row: Row[Any]):

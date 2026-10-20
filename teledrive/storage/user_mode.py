@@ -92,9 +92,64 @@ def _session_from_file_for(session_file: str) -> str:
 
 
 def _config_storage_section() -> dict | None:
-    """Read the `storage:` section from the deployment config (config.yaml)."""
-    import yaml
+    """Read the `storage:` section.
 
+    DB-stored channels/sessions take precedence (UI-managed). Falls back to
+    the config.yaml storage section.
+    """
+    # Try DB first.
+    try:
+        import yaml
+        cfg_path = os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml").strip()
+        db_url = None
+        if cfg_path and os.path.isfile(cfg_path):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(cfg_path, flags)
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                document = yaml.safe_load(handle) or {}
+            state = document.get("state") or {}
+            db_url = state.get("database_url") or state.get("db_path")
+        if db_url:
+            from teledrive.db import connect_database
+            from sqlalchemy import text as _text
+            conn = connect_database(str(db_url))
+            try:
+                ch = conn.connection.execute(_text(
+                    "SELECT channel_id, strategy, scratch_dir FROM "
+                    "telegram_channels WHERE is_active = 1 LIMIT 1"
+                )).fetchone()
+                if ch is None:
+                    ch = conn.connection.execute(_text(
+                        "SELECT channel_id, strategy, scratch_dir FROM "
+                        "telegram_channels ORDER BY id LIMIT 1"
+                    )).fetchone()
+                if ch is not None:
+                    channel_id, strategy, scratch_dir = ch
+                    sessions = conn.connection.execute(_text(
+                        "SELECT api_id, api_hash, session_string, account "
+                        "FROM telegram_sessions"
+                    )).fetchall()
+                    apis = []
+                    for srow in sessions:
+                        apis.append({
+                            "api_id": srow[0],
+                            "api_hash": srow[1],
+                            "session_string": srow[2],
+                            "account": srow[3],
+                        })
+                    if apis:
+                        return {
+                            "channel": channel_id,
+                            "strategy": strategy or "round_robin",
+                            "scratch_dir": scratch_dir or "/data/tmp",
+                            "apis": apis,
+                        }
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+    # Fall back to config.yaml.
     config_path = os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml").strip()
     if not config_path or not os.path.isfile(config_path):
         return None
@@ -138,14 +193,17 @@ def _config_api_sets(section: dict | None) -> list[tuple[str, int, str, str]] | 
         except (TypeError, ValueError):
             raise RuntimeError("Invalid MTProto credential set") from None
         api_hash = str(entry.get("api_hash") or "").strip()
-        session_file = str(entry.get("session_file") or "").strip()
-        if not session_file:
-            raise RuntimeError("Invalid authorized user session file")
+        # Support both file-based (config) and string-based (DB) sessions.
+        session_string = entry.get("session_string")
+        if not session_string:
+            session_file = str(entry.get("session_file") or "").strip()
+            if not session_file:
+                raise RuntimeError("Invalid authorized user session file")
+            session_string = _session_from_file_for(session_file)
         if label in labels:
             raise RuntimeError("Invalid MTProto credential set")
         labels.add(label)
-        session_string = _session_from_file_for(session_file)
-        sets.append(_validate_set_db(label, api_id, api_hash, session_string))
+        sets.append(_validate_set_db(label, api_id, api_hash, str(session_string)))
     return sets
 
 

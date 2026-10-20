@@ -976,11 +976,30 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
     import secrets as _secrets
     token = _secrets.token_urlsafe(16)
     # Store pending state; the verify step will complete sign-in.
+    channel = payload.channel
+    if not channel:
+        try:
+            conn_ch = db_connect()
+            try:
+                from sqlalchemy import text as _t
+                row = conn_ch.connection.execute(_t(
+                    "SELECT channel_id FROM telegram_channels WHERE is_active=1 LIMIT 1"
+                )).fetchone()
+                if row is None:
+                    row = conn_ch.connection.execute(_t(
+                        "SELECT channel_id FROM telegram_channels ORDER BY id LIMIT 1"
+                    )).fetchone()
+                if row is not None:
+                    channel = row[0]
+            finally:
+                conn_ch.close()
+        except Exception:
+            pass
     TELEGRAM_SESSION_PENDING[token] = {
         "api_id": payload.api_id,
         "api_hash": payload.api_hash,
         "phone": payload.phone,
-        "channel": payload.channel,
+        "channel": channel,
         "strategy": payload.strategy or "round_robin",
         "created_at": int(time.time()),
     }
@@ -1090,6 +1109,38 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     finally:
         conn.close()
 
+    # Create or activate a channel entry for this session.
+    if channel:
+        conn2 = db_connect()
+        try:
+            from sqlalchemy import text as _text
+            existing = conn2.connection.execute(_text(
+                "SELECT id FROM telegram_channels WHERE channel_id = :cid"
+            ), {"cid": channel}).fetchone()
+            now2 = int(time.time())
+            if existing:
+                cid = existing[0]
+                conn2.connection.execute(_text(
+                    "UPDATE telegram_channels SET is_active = 0"
+                ))
+                conn2.connection.execute(_text(
+                    "UPDATE telegram_channels SET is_active = 1, strategy = :s, "
+                    "updated_at = :now WHERE id = :id"
+                ), {"s": strategy, "now": now2, "id": cid})
+            else:
+                conn2.connection.execute(_text(
+                    "UPDATE telegram_channels SET is_active = 0"
+                ))
+                conn2.connection.execute(_text(
+                    "INSERT INTO telegram_channels (name, channel_id, strategy, "
+                    "scratch_dir, is_active, created_at, updated_at) "
+                    "VALUES (:name, :cid, :s, :sd, 1, :now, :now)"
+                ), {"name": channel, "cid": channel, "s": strategy,
+                    "sd": "/data/tmp", "now": now2})
+            conn2.connection.commit()
+        finally:
+            conn2.close()
+
     # Also write the session file so the existing file-based runtime works.
     session_file = f"/data/sessions/{account}.session"
     try:
@@ -1118,6 +1169,122 @@ def delete_telegram_session(request: Request, _: None = Depends(require_auth)):
     finally:
         conn.close()
     return {"ok": True}
+
+
+# --- Telegram channel management (multi-channel) ----------------------------
+
+@app.get("/api/v1/admin/storage/channels", tags=["Storage jobs"],
+         summary="List configured Telegram storage channels")
+def list_telegram_channels(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        rows = conn.connection.execute(_text(
+            "SELECT id, name, channel_id, strategy, scratch_dir, is_active, "
+            "created_at, updated_at FROM telegram_channels ORDER BY id"
+        )).fetchall()
+        return {"channels": [
+            {"id": r[0], "name": r[1], "channel_id": r[2], "strategy": r[3],
+             "scratch_dir": r[4], "is_active": bool(r[5]),
+             "created_at": r[6], "updated_at": r[7]} for r in rows]}
+    finally:
+        conn.close()
+
+
+class TelegramChannelCreate(BaseModel):
+    name: str
+    channel_id: str
+    strategy: str | None = None
+    scratch_dir: str | None = None
+
+
+@app.post("/api/v1/admin/storage/channels", tags=["Storage jobs"],
+          status_code=201, summary="Add a Telegram storage channel")
+def create_telegram_channel(payload: TelegramChannelCreate, request: Request,
+                           _: None = Depends(require_auth)):
+    _same_origin(request)
+    if not payload.name or not payload.channel_id:
+        raise HTTPException(400, "name and channel_id are required")
+    strategy = (payload.strategy or "round_robin").strip().lower()
+    if strategy not in ("single", "round_robin", "failover", "parallel"):
+        raise HTTPException(400, "invalid strategy")
+    now = int(time.time())
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        result = conn.connection.execute(_text(
+            "INSERT INTO telegram_channels (name, channel_id, strategy, "
+            "scratch_dir, is_active, created_at, updated_at) "
+            "VALUES (:name, :channel_id, :strategy, :scratch_dir, 0, :now, :now)"
+        ), {"name": payload.name, "channel_id": payload.channel_id,
+            "strategy": strategy, "scratch_dir": payload.scratch_dir or "/data/tmp",
+            "now": now})
+        conn.connection.commit()
+        new_id = result.lastrowid
+    finally:
+        conn.close()
+    return {"id": new_id, "name": payload.name, "channel_id": payload.channel_id}
+
+
+@app.delete("/api/v1/admin/storage/channels/{channel_id}", tags=["Storage jobs"],
+            summary="Remove a Telegram storage channel")
+def delete_telegram_channel(channel_id: int, request: Request,
+                           _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "DELETE FROM telegram_channels WHERE id = :id"
+        ), {"id": channel_id})
+        conn.connection.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/storage/channels/{channel_id}/activate",
+          tags=["Storage jobs"], summary="Set the active write channel")
+def activate_telegram_channel(channel_id: int, request: Request,
+                             _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "UPDATE telegram_channels SET is_active = 0"
+        ))
+        conn.connection.execute(_text(
+            "UPDATE telegram_channels SET is_active = 1 WHERE id = :id"
+        ), {"id": channel_id})
+        conn.connection.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/v1/admin/storage/active-channel", tags=["Storage jobs"],
+         summary="Read the active write channel")
+def get_active_channel(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT id, name, channel_id, strategy, scratch_dir FROM "
+            "telegram_channels WHERE is_active = 1 LIMIT 1"
+        )).fetchone()
+        if row is None:
+            # Fall back to first channel
+            row = conn.connection.execute(_text(
+                "SELECT id, name, channel_id, strategy, scratch_dir FROM "
+                "telegram_channels ORDER BY id LIMIT 1"
+            )).fetchone()
+        if row is None:
+            return {"active": None}
+        return {"active": {"id": row[0], "name": row[1], "channel_id": row[2],
+                           "strategy": row[3], "scratch_dir": row[4]}}
+    finally:
+        conn.close()
 
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],
          summary="Read storage jobs, stale leases and protected-media metrics")

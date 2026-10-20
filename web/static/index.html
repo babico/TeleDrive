@@ -44,18 +44,24 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 
 <section id="settings" class="page">
 <div class="card">
-<h3>Storage · Telethon USER MTProto</h3>
-<p class="muted">One or more API credential sets sharing the same dedicated channel. Sessions are pre-authorized files; phone/2FA never appears here.</p>
+<h3>Channels</h3>
+<p class="muted">Birden fazla kanal ekle. Aktif kanal seç; yazma işlemleri aktif kanala gider.</p>
+<div class="section row"><button class="btn compact" id="addChannel">Add channel</button><span id="activeChannelLabel" class="muted"></span></div>
+<div id="channelEditors"></div>
+</div>
+
+<div class="card section">
+<h3>Active channel settings</h3>
 <div class="form-grid">
-<div><label>Channel (ID or username)</label><input class="input" id="storageChannel"></div>
+<div><label>Active channel</label><select id="activeChannelSelect"></select></div>
 <div><label>Strategy</label><select id="storageStrategy"><option>round_robin</option><option>single</option><option>failover</option><option>parallel</option></select></div>
 <div><label>Scratch directory</label><input class="input" id="storageScratch"></div>
 </div>
 </div>
 
-<div class="card">
+<div class="card section">
 <h3>Telegram session (USER MTProto)</h3>
-<p class="muted">Create or replace the authorized Telegram USER session from the UI. Credentials and the session are stored in the database; no CLI or config file editing needed.</p>
+<p class="muted">API credential ve session. DB'ye kaydedilir; config dosyası gerekmez. Send code → kodu gir → Verify.</p>
 <div class="form-grid">
 <div><label>API ID</label><input class="input" id="tgApiId" type="number"></div>
 <div><label>API hash</label><input class="input" id="tgApiHash"></div>

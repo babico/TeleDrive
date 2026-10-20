@@ -67,6 +67,18 @@ telegram_sessions = Table(
     Column("updated_at", BigInteger, nullable=False),
 )
 
+telegram_channels = Table(
+    "telegram_channels", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String(128), nullable=False),
+    Column("channel_id", String(255), nullable=False),
+    Column("strategy", String(32), nullable=False, server_default="round_robin"),
+    Column("scratch_dir", String(512), server_default="/data/tmp"),
+    Column("is_active", Integer, nullable=False, server_default="0"),
+    Column("created_at", BigInteger, nullable=False),
+    Column("updated_at", BigInteger, nullable=False),
+)
+
 
 class DBRow:
     def __init__(self, row: Row[Any]):

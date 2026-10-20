@@ -416,3 +416,47 @@ $('#verifyTgCode').onclick = async () => {
 // Load session status when settings page is shown
 const _origLoadSettings = loadSettings;
 loadSettings = async function(){ await _origLoadSettings(); await refreshTgSessionStatus(); };
+
+// --- Channel management (multi-channel) ------------------------------------
+async function refreshChannels(){
+  try {
+    const r = await api('/api/v1/admin/storage/channels');
+    const channels = r.channels || [];
+    const sel = $('#activeChannelSelect');
+    sel.innerHTML = channels.map(c => '<option value="'+c.id+'">'+esc(c.name)+' ('+esc(c.channel_id)+')'+(c.is_active?' *':'')+'</option>').join('');
+    const active = await api('/api/v1/admin/storage/active-channel');
+    if(active.active){ sel.value = active.active.id; $('#activeChannelLabel').textContent = 'Active: ' + active.active.name + ' (' + active.active.channel_id + ')'; }
+    else { $('#activeChannelLabel').textContent = 'No active channel.'; }
+    // Render channel list
+    $('#channelEditors').innerHTML = channels.map(c =>
+      '<div class="account-edit channel-edit" data-id="'+c.id+'"><div class="row"><strong>'+esc(c.name)+'</strong> <span class="muted">'+esc(c.channel_id)+'</span>'+(c.is_active?' <span class="tag">active</span>':'')+'<button class="btn danger compact ce-remove" data-id="'+c.id+'">Remove</button>'+(c.is_active?'':'<button class="btn compact ce-activate" data-id="'+c.id+'">Activate</button>')+'</div></div>'
+    ).join('');
+    $$('.ce-remove').forEach(b=>b.onclick=async()=>{ try{ await api('/api/v1/admin/storage/channels/'+b.dataset.id,{method:'DELETE'}); toast('Channel removed'); await refreshChannels(); }catch(e){toast(e.message,true)} });
+    $$('.ce-activate').forEach(b=>b.onclick=async()=>{ try{ await api('/api/v1/admin/storage/channels/'+b.dataset.id+'/activate',{method:'POST'}); toast('Activated'); await refreshChannels(); }catch(e){toast(e.message,true)} });
+  } catch(e){ toast(e.message,true) }
+}
+
+$('#addChannel').onclick = async () => {
+  const name = prompt('Channel name (display):');
+  if(!name) return;
+  const cid = prompt('Channel ID or username:');
+  if(!cid) return;
+  try {
+    await api('/api/v1/admin/storage/channels', {method:'POST', body: JSON.stringify({name:name.trim(), channel_id:cid.trim(), strategy: $('#storageStrategy').value, scratch_dir: $('#storageScratch').value.trim()})});
+    toast('Channel added');
+    await refreshChannels();
+  } catch(e){ toast(e.message,true) }
+};
+
+// Wire active channel change
+$('#activeChannelSelect').onchange = async () => {
+  const id = $('#activeChannelSelect').value;
+  if(id) { try{ await api('/api/v1/admin/storage/channels/'+id+'/activate',{method:'POST'}); toast('Active channel changed'); await refreshChannels(); }catch(e){toast(e.message,true)} }
+};
+
+// Refresh channels when settings loaded
+const _origLoadSettings2 = loadSettings;
+loadSettings = async function(){ await _origLoadSettings2(); await refreshChannels(); await refreshTgSessionStatus(); };
+
+// Initial load
+refreshChannels();

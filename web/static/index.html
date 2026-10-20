@@ -313,7 +313,12 @@ tailwind.config = {
 <section x-show="page==='logs'" class="space-y-4">
   <div class="card">
     <h3>Logs</h3>
-    <pre x-text="logBox" class="logs"></pre>
+    <div class="row mt-2">
+      <div class="field" style="flex:2"><label>Filter (text)</label><input x-model="logFilter" class="input" placeholder="filter by text, source, user..." @input.debounce.300ms="loadLogs()"></div>
+      <div class="field" style="flex:1"><label>Lines</label><select x-model="logLimit" class="input" @change="loadLogs()"><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="1500">1500</option></select></div>
+      <button class="btn btn-sm" @click="loadLogs()">Refresh</button>
+    </div>
+    <pre x-text="logBox" class="logs mt-3"></pre>
   </div>
 </section>
 

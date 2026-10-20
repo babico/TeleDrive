@@ -55,6 +55,8 @@ function app(){
 
     // Logs
     logBox: '',
+    logFilter: '',
+    logLimit: 1000,
 
     async init(){
       await this.loadSettings();
@@ -278,8 +280,14 @@ function app(){
     },
 
     async loadLogs(){
-      try { const x = await this.api('/api/logs?limit=500'); this.logBox = (x.lines||[]).join('\n'); }
-      catch(e){ this.toast(e.message,true); }
+      try {
+        const limit = this.logLimit || 1000;
+        const filter = (this.logFilter||'').trim().toLowerCase();
+        const x = await this.api('/api/logs?limit='+limit);
+        let lines = x.lines||[];
+        if(filter) lines = lines.filter(l => l.toLowerCase().includes(filter));
+        this.logBox = lines.join('\n');
+      } catch(e){ this.toast(e.message,true); }
     }
   }
 }

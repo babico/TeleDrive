@@ -588,7 +588,7 @@ async def _audit_log_middleware(request: Request, call_next):
     if path not in {"/api/health", "/__health"} and not path.startswith("/static/"):
         client = request.client.host if request.client else "-"
         user = _extract_user(request)
-        _log(f"{method} {path} from {client} user={user}", "http")
+        _log(f"{method} {path} from {client} [user={user}]", "http")
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -1431,7 +1431,7 @@ def get_active_channel(_: None = Depends(require_auth)):
         conn.close()
 
 @app.get("/api/logs", tags=["System"], summary="Read recent redacted activity logs")
-def logs(limit: int = 500, _: None = Depends(require_auth)):
+def logs(limit: int = 1000, _: None = Depends(require_auth)):
     combined = list(LOG_BUFFER)[-limit:]
     return {"lines": combined}
 

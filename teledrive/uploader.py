@@ -36,7 +36,6 @@ CLAIM_STALE_SECONDS = int(os.environ.get("TELEDRIVE_CLAIM_STALE_SECONDS", "86400
 SPLIT_MIN_FREE_BYTES = int(os.environ.get("TELEDRIVE_SPLIT_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
 
 
-@dataclass(frozen=True)
 @dataclass
 class AppConfig:
     api_id: int
@@ -247,26 +246,6 @@ def build_caption(path: str, template: str) -> str:
 def validate_config(cfg: AppConfig) -> None:
     if cfg.strategy not in ACCOUNT_STRATEGIES:
         raise ValueError("telegram.strategy must be single, round_robin, failover, or parallel")
-    if not cfg.accounts or not any(a.enabled for a in cfg.accounts):
-        raise ValueError("At least one Telegram account must be enabled")
-    names, sessions = set(), set()
-    for account in cfg.accounts:
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", account.name):
-            raise ValueError("Telegram account name must be 1-64 characters using only letters, digits, '.', '_' or '-'")
-        if account.name in names: raise ValueError(f"Duplicate Telegram account name: {account.name}")
-        names.add(account.name)
-        session = os.path.abspath(account.session_path)
-        if session in sessions: raise ValueError(f"Telegram accounts must use different session_path values: {account.session_path}")
-        sessions.add(session)
-        if account.enabled:
-            if account.api_id <= 0: raise ValueError(f"Telegram account '{account.name}' has an invalid api_id")
-            if not account.api_hash.strip(): raise ValueError(f"Telegram account '{account.name}' api_hash must not be empty")
-            if account.phone and not re.fullmatch(r"\+?[0-9]{5,20}", str(account.phone)):
-                raise ValueError(f"Telegram account '{account.name}' has an invalid phone number")
-            target_text = str(account.target)
-            if not target_text.strip(): raise ValueError(f"Telegram account '{account.name}' target must not be empty")
-            if len(target_text) > 256 or any(ord(ch) < 32 for ch in target_text):
-                raise ValueError(f"Telegram account '{account.name}' target contains invalid characters")
     if cfg.sleep_min_seconds <= 0 or cfg.sleep_max_seconds <= 0: raise ValueError("Sleep values must be > 0")
     if cfg.sleep_min_seconds > cfg.sleep_max_seconds: raise ValueError("sleep_min_seconds cannot be greater than sleep_max_seconds")
     if cfg.max_files_per_run <= 0 or cfg.max_files_per_day <= 0: raise ValueError("Upload limits must be > 0")

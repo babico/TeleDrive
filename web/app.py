@@ -2306,6 +2306,30 @@ async def put_object_content(
                 sink.write(data)
             sink.flush()
             os.fsync(sink.fileno())
+        # Enforce bucket quota (TeleDrive-level; S3 has no native quota).
+        from sqlalchemy import text as _text
+        qrow = conn.connection.execute(_text(
+            "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
+        ), {"b": bucket}).fetchone()
+        if qrow:
+            max_size_q, max_objects_q = qrow
+            if max_size_q is not None:
+                cur_size = conn.connection.execute(_text(
+                    "SELECT COALESCE(SUM(size),0) FROM storage_objects "
+                    "WHERE bucket = :b AND is_current = 1"
+                ), {"b": bucket}).scalar() or 0
+                if cur_size + transferred > max_size_q:
+                    raise HTTPException(413, "Upload exceeds bucket quota (max size)")
+            if max_objects_q is not None:
+                cur_count = conn.connection.execute(_text(
+                    "SELECT COUNT(*) FROM storage_objects WHERE bucket = :b AND is_current = 1"
+                ), {"b": bucket}).scalar() or 0
+                # Check if this is a new object (not an overwrite)
+                existing = conn.connection.execute(_text(
+                    "SELECT COUNT(*) FROM storage_objects WHERE bucket = :b AND key = :k AND is_current = 1"
+                ), {"b": bucket, "k": key}).scalar() or 0
+                if existing == 0 and cur_count >= max_objects_q:
+                    raise HTTPException(413, "Upload exceeds bucket quota (max objects)")
         engine = TelegramObjectStorage(manifests, transport,
                                        chunk_size=RECOMMENDED_CHUNK_SIZE,
                                        scratch_directory=stage_root)

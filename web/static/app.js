@@ -61,6 +61,14 @@ function app(){
     // Logs
     logEntries: [],
     logLive: false,
+    buckets: [],
+    currentBucket: null,
+    bucketObjects: [],
+    showNewBucket: false,
+    newBucketName: '',
+    quotaEditBucket: null,
+    quotaMaxSize: '',
+    quotaMaxObjects: '',
     _logTimer: null,
     users: [],
     showNewUser: false,
@@ -77,6 +85,7 @@ function app(){
       await this.refreshChannels();
       await this.refreshTgSessionStatus();
       await this.loadUsers();
+      await this.refreshBuckets();
       await this.refreshDashboard();
       setInterval(()=>this.refreshDashboard(), 30000);
       this.$watch('page', (v) => { if(v !== 'logs' && this.logLive) this.toggleLogLive(); });
@@ -302,6 +311,55 @@ function app(){
         let entries = x.entries||[];
         if(filter) entries = entries.filter(e => (e.ts+' '+e.user+' '+e.source+' '+e.message).toLowerCase().includes(filter));
         this.logEntries = entries;
+      } catch(e){ this.toast(e.message,true); }
+    },
+    fmtBytes(b){ if(b==null) return '-'; if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; if(b<1073741824) return (b/1048576).toFixed(1)+' MB'; return (b/1073741824).toFixed(2)+' GB'; },
+    async refreshBuckets(){
+      try { const r = await this.api('/api/v1/admin/storage/buckets'); this.buckets = r.buckets||[]; }
+      catch(e){ this.toast(e.message,true); }
+    },
+    async createBucket(){
+      if(!this.newBucketName.trim()) return;
+      try {
+        await this.api('/api/v1/buckets',{method:'POST',body:JSON.stringify({name:this.newBucketName.trim()})});
+        this.toast('Bucket created');
+        this.showNewBucket = false;
+        this.newBucketName = '';
+        await this.refreshBuckets();
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async deleteBucket(name){
+      if(!confirm('Delete bucket '+name+'? (must be empty)')) return;
+      try { await this.api('/api/v1/buckets/'+encodeURIComponent(name),{method:'DELETE'}); this.toast('Deleted'); await this.refreshBuckets(); if(this.currentBucket===name) this.currentBucket=null; }
+      catch(e){ this.toast(e.message,true); }
+    },
+    async browseBucket(name){
+      this.currentBucket = name;
+      try { const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name)+'/objects'); this.bucketObjects = r.objects||[]; }
+      catch(e){ this.toast(e.message,true); }
+    },
+    async deleteObject(bucket,key){
+      if(!confirm('Delete '+key+'?')) return;
+      try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}),{method:'DELETE'}); this.toast('Deleted'); await this.browseBucket(bucket); await this.refreshBuckets(); }
+      catch(e){ this.toast(e.message,true); }
+    },
+    async editQuota(name){
+      this.quotaEditBucket = name;
+      try {
+        const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name)+'/quota');
+        this.quotaMaxSize = r.max_size_bytes||'';
+        this.quotaMaxObjects = r.max_objects||'';
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async saveQuota(){
+      try {
+        const body = {};
+        if(this.quotaMaxSize) body.max_size_bytes = Number(this.quotaMaxSize);
+        if(this.quotaMaxObjects) body.max_objects = Number(this.quotaMaxObjects);
+        await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.quotaEditBucket)+'/quota',{method:'PUT',body:JSON.stringify(body)});
+        this.toast('Quota saved');
+        this.quotaEditBucket = null;
+        await this.refreshBuckets();
       } catch(e){ this.toast(e.message,true); }
     },
     toggleLogLive(){

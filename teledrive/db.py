@@ -106,6 +106,7 @@ users = Table(
     Column("username", String(128), nullable=False, unique=True),
     Column("password_hash", String(255), nullable=False),
     Column("role", String(32), nullable=False, server_default="viewer"),
+    Column("enabled", Integer, nullable=False, server_default="1"),
     Column("created_at", BigInteger, nullable=False),
     Column("updated_at", BigInteger, nullable=False),
     Column("last_login", BigInteger),

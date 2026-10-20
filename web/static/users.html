@@ -7,10 +7,7 @@
 <script src="/static/vendor/tailwindcss.js"></script>
 <script defer src="/static/vendor/alpine.min.js"></script>
 <script>
-tailwind.config = {
-  darkMode: 'class',
-  theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' } } } }
-}
+tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600:'#4f46e5',700:'#4338ca' } } } } }
 </script>
 <style>
   [x-cloak]{display:none!important}
@@ -27,10 +24,9 @@ tailwind.config = {
   .btn-ghost:hover{background:#1f2937;color:#e5e7eb}
   .btn-sm{padding:4px 8px;font-size:12px}
   .badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:500}
-  .badge-green{background:#064e3b;color:#6ee7b7}
-  .badge-red{background:#7f1d1d;color:#fca5a5}
-  .badge-gray{background:#374151;color:#9ca3af}
   .badge-blue{background:#1e3a8a;color:#93c5fd}
+  .badge-green{background:#064e3b;color:#6ee7b7}
+  .badge-gray{background:#374151;color:#9ca3af}
   .toast{position:fixed;right:16px;bottom:16px;padding:12px 16px;border-radius:10px;display:none;z-index:50;max-width:400px}
   .toast.show{display:block}
   .toast.bad{background:#7f1d1d;border:1px solid #991b1b;color:#fecaca}
@@ -71,53 +67,54 @@ tailwind.config = {
     <span class="font-semibold text-lg">TeleDrive</span>
   </div>
   <nav class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
-        <a href="/dashboard" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Dashboard</a>
+    <a href="/" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Dashboard</a>
     <a href="/queue" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Queue</a>
     <a href="/history" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">History</a>
     <a href="/storage" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Storage</a>
     <a href="/settings" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Settings</a>
     <a href="/api-management" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">API Management</a>
     <a href="/s3" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">S3</a>
-    <a href="/logs" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Logs</a>
     <a href="/users" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-brand-600 text-white">Users</a>
+    <a href="/logs" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Logs</a>
   </nav>
   <div class="px-4 py-3 border-t border-gray-800 text-xs text-gray-500">TeleDrive</div>
 </aside>
 
 <div class="flex-1 flex flex-col overflow-hidden">
 <header class="h-14 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
-  <div class="text-sm text-gray-400">Users</div>
+  <div class="text-sm text-gray-400">User management</div>
   <div class="flex items-center gap-3">
-    <span class="text-sm text-gray-300" x-text="currentUser||'admin'"></span>
+    <span class="text-sm text-gray-300" x-text="currentUser||''"></span>
+    <span class="text-xs text-gray-500" x-text="currentRole"></span>
     <div class="w-8 h-8 rounded-full bg-brand-700 flex items-center justify-center text-xs font-bold" x-text="(currentUser||'A').charAt(0).toUpperCase()"></div>
+    <button class="btn btn-sm btn-ghost" @click="logout()">Logout</button>
   </div>
 </header>
 
 <main class="flex-1 overflow-y-auto px-6 py-6">
-<section class="space-y-4">
   <div class="card">
     <h3>User management</h3>
-    <p class="muted">Manage WebUI users, roles and permissions.</p>
+    <p class="muted">Manage WebUI users, roles and permissions. Roles: admin (full access), operator (storage/jobs/logs), viewer (read-only).</p>
     <div class="row mt-3">
-      <button class="btn btn-primary btn-sm" @click="showNewUser=true">Add user</button>
+      <button class="btn btn-primary btn-sm" @click="showNewUser=!showNewUser">Add user</button>
       <span class="muted" x-text="users.length+' users'"></span>
     </div>
     <div class="mt-3" x-show="showNewUser">
-      <div class="card bg-gray-900">
+      <div class="card bg-gray-900 space-y-3">
         <h4>New user</h4>
         <div class="field"><label>Username</label><input x-model="newUser.username" class="input"></div>
-        <div class="field"><label>Password</label><input x-model="newUser.password" class="input" type="password"></div>
+        <div class="field"><label>Password (min 8 chars)</label><input x-model="newUser.password" class="input" type="password"></div>
         <div class="field"><label>Role</label>
           <select x-model="newUser.role" class="input"><option value="admin">admin</option><option value="operator">operator</option><option value="viewer">viewer</option></select>
         </div>
-        <div class="row mt-2">
+        <div class="row">
           <button class="btn btn-primary btn-sm" @click="createUser()">Create</button>
           <button class="btn btn-sm" @click="showNewUser=false">Cancel</button>
         </div>
       </div>
     </div>
     <div class="scroll mt-3">
-      <table><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Last login</th><th>Actions</th></tr></thead>
+      <table><thead><tr><th>Username</th><th>Role</th><th>Enabled</th><th>Created</th><th>Last login</th><th>Actions</th></tr></thead>
       <tbody><template x-for="u in users" :key="u.id"><tr>
         <td x-text="u.username"></td>
         <td>
@@ -126,6 +123,7 @@ tailwind.config = {
           </select>
           <span x-show="u.username==='admin'" class="badge badge-blue" x-text="u.role"></span>
         </td>
+        <td><span class="badge" :class="u.enabled?'badge-green':'badge-gray'" x-text="u.enabled?'Yes':'No'"></span></td>
         <td x-text="fmtTs(u.created_at)"></td>
         <td x-text="u.last_login?fmtTs(u.last_login):'-'"></td>
         <td><div class="flex gap-2">
@@ -135,7 +133,6 @@ tailwind.config = {
       </tr></template></tbody></table>
     </div>
   </div>
-</section>
 </main>
 </div>
 </div>

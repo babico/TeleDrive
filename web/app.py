@@ -1121,6 +1121,128 @@ def change_user_role(user_id: int, request: Request, payload: dict,
     return {"ok": True}
 
 
+
+# --- Detailed user management & role control --------------------------------
+
+@app.get("/api/v1/admin/users/{user_id}", tags=["Users"],
+         summary="Get user detail")
+def get_user_detail(user_id: int, _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT id, username, role, enabled, created_at, updated_at, last_login "
+            "FROM users WHERE id = :id"
+        ), {"id": user_id}).fetchone()
+        if row is None:
+            raise HTTPException(404, "user not found")
+        sessions = conn.connection.execute(_text(
+            "SELECT token, created_at, expires_at FROM user_sessions "
+            "WHERE user_id = :uid ORDER BY created_at DESC"
+        ), {"uid": user_id}).fetchall()
+        return {
+            "id": row[0], "username": row[1], "role": row[2],
+            "enabled": bool(row[3]), "created_at": row[4],
+            "updated_at": row[5], "last_login": row[6],
+            "sessions": [{"token_prefix": s[0][:12] + "...", "created_at": s[1],
+                          "expires_at": s[2]} for s in sessions],
+        }
+    finally:
+        conn.close()
+
+
+@app.put("/api/v1/admin/users/{user_id}", tags=["Users"],
+         summary="Update user (username, role, enabled)")
+def update_user(user_id: int, request: Request, payload: dict,
+                _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT id, username, role FROM users WHERE id = :id"
+        ), {"id": user_id}).fetchone()
+        if row is None:
+            raise HTTPException(404, "user not found")
+
+        username = payload.get("username")
+        role = payload.get("role")
+        enabled = payload.get("enabled")
+
+        # Prevent removing last admin
+        if role is not None and role != "admin" and row[1] == "admin":
+            admin_count = conn.connection.execute(_text(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+            )).scalar()
+            if admin_count <= 1:
+                raise HTTPException(409, "cannot demote the last admin")
+
+        if username is not None:
+            if not username or len(username) > 128:
+                raise HTTPException(400, "invalid username")
+            try:
+                conn.connection.execute(_text(
+                    "UPDATE users SET username = :u, updated_at = :now WHERE id = :id"
+                ), {"u": username, "now": int(time.time()), "id": user_id})
+            except Exception as exc:
+                raise HTTPException(409, "username already exists") from exc
+
+        if role is not None:
+            if role not in ("admin", "operator", "viewer"):
+                raise HTTPException(400, "role must be admin, operator or viewer")
+            conn.connection.execute(_text(
+                "UPDATE users SET role = :role, updated_at = :now WHERE id = :id"
+            ), {"role": role, "now": int(time.time()), "id": user_id})
+
+        if enabled is not None:
+            conn.connection.execute(_text(
+                "UPDATE users SET enabled = :en, updated_at = :now WHERE id = :id"
+            ), {"en": 1 if enabled else 0, "now": int(time.time()), "id": user_id})
+            if not enabled:
+                # Revoke sessions for disabled users
+                conn.connection.execute(_text(
+                    "DELETE FROM user_sessions WHERE user_id = :uid"
+                ), {"uid": user_id})
+
+        conn.connection.commit()
+        _log(f"update user: id={user_id} username={username} role={role} enabled={enabled}", "users")
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/v1/admin/users/{user_id}/sessions", tags=["Users"],
+            summary="Revoke all sessions for a user")
+def revoke_user_sessions(user_id: int, request: Request,
+                        _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        result = conn.connection.execute(_text(
+            "DELETE FROM user_sessions WHERE user_id = :uid"
+        ), {"uid": user_id})
+        conn.connection.commit()
+        _log(f"revoke sessions: user_id={user_id} count={result.rowcount}", "users")
+    finally:
+        conn.close()
+    return {"ok": True, "revoked": result.rowcount}
+
+
+@app.get("/api/v1/admin/roles", tags=["Users"], summary="List available roles and permissions")
+def list_roles(_: None = Depends(require_auth)):
+    return {"roles": [
+        {"name": "admin", "description": "Full access to all features",
+         "permissions": ["settings:read", "settings:manage", "users:read", "users:manage",
+                        "storage:read", "storage:manage", "keys:manage", "logs:read",
+                        "s3:manage", "jobs:manage"]},
+        {"name": "operator", "description": "Manage storage and jobs, view logs",
+         "permissions": ["storage:read", "storage:manage", "jobs:read", "jobs:manage",
+                        "logs:read", "s3:read"]},
+        {"name": "viewer", "description": "Read-only access",
+         "permissions": ["storage:read", "jobs:read", "logs:read", "s3:read"]},
+    ]}
+
 @app.get("/api/v1/admin/storage/gc-candidates", tags=["Storage recovery"],
          summary="Retention-aware dry-run FAILED journal planning, never deletion")
 def list_storage_gc_candidates(
@@ -1710,12 +1832,12 @@ def list_users(_: None = Depends(require_auth)):
     try:
         from sqlalchemy import text as _text
         rows = conn.connection.execute(_text(
-            "SELECT id, username, role, created_at, updated_at, last_login "
+            "SELECT id, username, role, enabled, created_at, updated_at, last_login "
             "FROM users ORDER BY id"
         )).fetchall()
         return {"users": [
-            {"id": r[0], "username": r[1], "role": r[2],
-             "created_at": r[3], "updated_at": r[4], "last_login": r[5]}
+            {"id": r[0], "username": r[1], "role": r[2], "enabled": bool(r[3]),
+             "created_at": r[4], "updated_at": r[5], "last_login": r[6]}
             for r in rows]}
     finally:
         conn.close()

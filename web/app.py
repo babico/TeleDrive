@@ -1446,6 +1446,7 @@ def get_active_channel(_: None = Depends(require_auth)):
 @app.get("/api/logs", tags=["System"], summary="Read recent redacted activity logs")
 def logs(limit: int = 1000, _: None = Depends(require_auth)):
     combined = list(LOG_BUFFER)[-limit:]
+    combined = list(reversed(combined))
     entries = []
     for line in combined:
         # Parse "[ts] [user] [source] msg" format.

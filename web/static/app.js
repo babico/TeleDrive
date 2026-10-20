@@ -55,6 +55,8 @@ function app(){
 
     // Logs
     logEntries: [],
+    logLive: false,
+    _logTimer: null,
     logFilter: '',
     logLimit: 1000,
 
@@ -64,6 +66,7 @@ function app(){
       await this.refreshTgSessionStatus();
       await this.refreshDashboard();
       setInterval(()=>this.refreshDashboard(), 30000);
+      this.$watch('page', (v) => { if(v !== 'logs' && this.logLive) this.toggleLogLive(); });
     },
 
     toast(msg, bad=false){
@@ -288,6 +291,15 @@ function app(){
         if(filter) entries = entries.filter(e => (e.ts+' '+e.user+' '+e.source+' '+e.message).toLowerCase().includes(filter));
         this.logEntries = entries;
       } catch(e){ this.toast(e.message,true); }
+    },
+    toggleLogLive(){
+      this.logLive = !this.logLive;
+      if(this.logLive){
+        this.loadLogs();
+        this._logTimer = setInterval(()=>this.loadLogs(), 3000);
+      } else {
+        if(this._logTimer){ clearInterval(this._logTimer); this._logTimer=null; }
+      }
     }
   }
 }

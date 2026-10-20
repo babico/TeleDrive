@@ -317,6 +317,7 @@ tailwind.config = {
       <div class="field" style="flex:2"><label>Filter (text)</label><input x-model="logFilter" class="input" placeholder="filter by text, source, user..." @input.debounce.300ms="loadLogs()"></div>
       <div class="field" style="flex:1"><label>Lines</label><select x-model="logLimit" class="input" @change="loadLogs()"><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="1500">1500</option></select></div>
       <button class="btn btn-sm" @click="loadLogs()">Refresh</button>
+      <button class="btn btn-sm" :class="logLive?'btn-primary':''" @click="toggleLogLive()" x-text="logLive?'Live ON':'Live OFF'"></button>
     </div>
     <div class="scroll mt-3">
       <table><thead><tr><th>Time</th><th>User</th><th>Source</th><th>Message</th></tr></thead>

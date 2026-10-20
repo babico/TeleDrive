@@ -1,7 +1,6 @@
-console.log('APP.JS LOADED');
 const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
 let config=null, authPrompt=null;
-async function api(url,opt={}){const r=await fetch(url,{headers:{'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})},...opt});if(!r.ok)throw new Error(await r.text()||r.statusText);return r.json()}
+async function api(url,opt={}){const r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})},...opt});if(!r.ok)throw new Error(await r.text()||r.statusText);return r.json()}
 function toast(msg,bad=false){const e=$('#toast');e.textContent=msg;e.className='toast'+(bad?' bad':'');e.style.display='block';setTimeout(()=>e.style.display='none',3500)}
 function fmtTs(v){return v?new Date(v*1000).toLocaleString():'-'}
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -381,7 +380,6 @@ async function refreshTgSessionStatus(){
 }
 
 $('#sendTgCode').onclick = async () => {
-  console.log('SEND CODE CLICKED');
   try {
     const body = {
       api_id: Number($('#tgApiId').value||0),

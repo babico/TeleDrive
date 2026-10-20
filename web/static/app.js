@@ -28,8 +28,6 @@ async function loadSettings(){try{
 config=await api('/api/config');const tg=config.telegram||{},up=config.upload||{},st=config.state||{},app=config.app||{};
 const storage=config.storage||{},jobs=config.jobs||{};
 $('#storageChannel').value=storage.channel||'';$('#storageStrategy').value=storage.strategy||'round_robin';$('#storageScratch').value=storage.scratch_dir||'/data/tmp';
-$('#apiEditors').innerHTML=(storage.apis||[]).map(apiEditor).join('');
-wireApiEditors()
 
 $('#strategy').value=tg.strategy||'single';$('#apiId').value=tg.api_id||'';$('#apiHash').value=tg.api_hash||'';$('#tgTarget').value=tg.target??'me';
 $('#sourceDir').value=up.source_dir||'/uploads';$('#sendMode').value=up.send_mode||'document';$('#perRun').value=up.max_files_per_run??12;$('#perDay').value=up.max_files_per_day??100;$('#sleepMin').value=up.sleep_min_seconds??60;$('#sleepMax').value=up.sleep_max_seconds??90;$('#retryAttempts').value=up.retry_attempts??5;$('#backoff').value=up.backoff_base_seconds??10;$('#floodBuffer').value=up.floodwait_buffer_seconds??5;$('#maxFileSize').value=up.max_file_size_mb??0;$('#captionTemplate').value=up.caption_template||'{name}';$('#extensions').value=(up.allowed_extensions||[]).join(',');
@@ -48,13 +46,10 @@ e.innerHTML=`<div class="form-grid">
 e.querySelector('.ae-remove').onclick=()=>{e.remove()};
 return e}
 function wireApiEditors(){
-$('#addApi').onclick=()=>{const wrap=document.createElement('div');wrap.className='api-edit';wrap.innerHTML='<div class="form-grid"><div><label>API ID</label><input class="ae-api-id" type="number"></div><div><label>API hash</label><input class="ae-api-hash"></div><div><label>Session file</label><input class="ae-session"></div><div><label>Account label (optional)</label><input class="ae-name"></div><button class="btn danger compact ae-remove" type="button">Remove</button></div>';wrap.querySelector('.ae-remove').onclick=()=>wrap.remove();$('#apiEditors').appendChild(wrap)};
-$$('#apiEditors .ae-remove').forEach(b=>b.onclick=()=>b.closest('.api-edit').remove())}
 
 $('#saveSettings').onclick=async()=>{try{
 if(!config)await loadSettings();const tg=config.telegram=config.telegram||{},up=config.upload=config.upload||{},st=config.state=config.state||{},app=config.app=config.app||{},storage=config.storage=config.storage||{};
 storage.channel=$('#storageChannel').value.trim();storage.strategy=$('#storageStrategy').value;storage.scratch_dir=$('#storageScratch').value.trim()||'/data/tmp';
-storage.apis=$$('#apiEditors .api-edit').map(e=>{const o={api_id:Number(e.querySelector('.ae-api-id').value||0),api_hash:e.querySelector('.ae-api-hash').value.trim(),session_file:e.querySelector('.ae-session').value.trim()};const name=e.querySelector('.ae-name').value.trim();if(name)o.account=name;return o}).filter(o=>o.api_id&&o.api_hash&&o.session_file);
 tg.strategy=$('#strategy').value;tg.api_id=Number($('#apiId').value||0);tg.api_hash=$('#apiHash').value.trim();tg.target=$('#tgTarget').value.trim()||'me';
 tg.accounts=$$('.account-edit').map(e=>{const o={name:e.querySelector('.ae-name').value.trim(),enabled:e.querySelector('.ae-enabled').checked,phone:e.querySelector('.ae-phone').value.trim(),session_path:e.querySelector('.ae-session').value.trim()};const target=e.querySelector('.ae-target').value.trim(),id=e.querySelector('.ae-api-id').value.trim(),hash=e.querySelector('.ae-api-hash').value.trim();if(target)o.target=target;if(id)o.api_id=Number(id);if(hash)o.api_hash=hash;return o});
 up.source_dir=$('#sourceDir').value.trim();up.send_mode=$('#sendMode').value;up.max_files_per_run=Number($('#perRun').value);up.max_files_per_day=Number($('#perDay').value);up.sleep_min_seconds=Number($('#sleepMin').value);up.sleep_max_seconds=Number($('#sleepMax').value);up.retry_attempts=Number($('#retryAttempts').value);up.backoff_base_seconds=Number($('#backoff').value);up.floodwait_buffer_seconds=Number($('#floodBuffer').value);up.max_file_size_mb=Number($('#maxFileSize').value);up.caption_template=$('#captionTemplate').value;up.allowed_extensions=$('#extensions').value.split(',').map(x=>x.trim()).filter(Boolean);
@@ -390,7 +385,7 @@ $('#sendTgCode').onclick = async () => {
       api_id: Number($('#tgApiId').value||0),
       api_hash: $('#tgApiHash').value.trim(),
       phone: $('#tgPhone').value.trim(),
-      channel: $('#tgChannel').value.trim() || null,
+      channel: $('#storageChannel').value.trim() || null,
       strategy: $('#storageStrategy').value
     };
     const r = await api('/api/v1/admin/storage/telegram-session/request-code', {method:'POST', body: JSON.stringify(body)});

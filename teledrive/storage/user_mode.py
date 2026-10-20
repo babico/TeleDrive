@@ -65,13 +65,20 @@ def _split_list(value: str, name: str) -> list[str]:
     return items
 
 
-def _validate_set(label: str, api_id: int, api_hash: str,
-                  session_file: str) -> tuple[str, int, str, str]:
+def _validate_set_db(label: str, api_id: int, api_hash: str,
+                    session_string: str) -> tuple[str, int, str, str]:
     if (api_id <= 0
             or not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash)
             or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", label)
             or label == "api-bot"):
         raise RuntimeError("Invalid MTProto credential set")
+    value = (session_string or "").strip()
+    if not value or len(value) > 8192:
+        raise RuntimeError("Invalid authorized user session")
+    return label, api_id, api_hash, value
+
+
+def _session_from_file_for(session_file: str) -> str:
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(session_file, flags)
@@ -81,7 +88,7 @@ def _validate_set(label: str, api_id: int, api_hash: str,
         raise RuntimeError("Invalid authorized user session file") from None
     if not value or len(value) > 8192:
         raise RuntimeError("Invalid authorized user session file")
-    return label, api_id, api_hash, session_file
+    return value
 
 
 def _config_storage_section() -> dict | None:
@@ -137,8 +144,59 @@ def _config_api_sets(section: dict | None) -> list[tuple[str, int, str, str]] | 
         if label in labels:
             raise RuntimeError("Invalid MTProto credential set")
         labels.add(label)
-        sets.append(_validate_set(label, api_id, api_hash, session_file))
+        session_string = _session_from_file_for(session_file)
+        sets.append(_validate_set_db(label, api_id, api_hash, session_string))
     return sets
+
+
+def _db_credential_sets() -> list[tuple[str, int, str, str]] | None:
+    """Read credential sets from the telegram_sessions DB table.
+
+    Returns None when the table is empty or unavailable, so the config
+    fallback can be used.
+    """
+    try:
+        from teledrive.db import connect_database
+        cfg_path = os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml").strip()
+        # Resolve database_url from config.
+        import yaml
+        if not cfg_path or not os.path.isfile(cfg_path):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(cfg_path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            document = yaml.safe_load(handle) or {}
+        state = document.get("state") or {}
+        db_url = state.get("database_url") or state.get("db_path")
+        if not db_url:
+            return None
+        conn = connect_database(str(db_url))
+        try:
+            from sqlalchemy import text as _text
+            rows = conn.connection.execute(_text(
+                "SELECT api_id, api_hash, session_string, account, channel, "
+                "strategy FROM telegram_sessions ORDER BY id"
+            )).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    sets = []
+    labels: set[str] = set()
+    for row in rows:
+        api_id, api_hash, session_string, account, channel, strategy = row
+        label = str(account or "mtproto-user").strip()
+        if label in labels:
+            continue
+        labels.add(label)
+        try:
+            sets.append(_validate_set_db(label, int(api_id), str(api_hash),
+                                        str(session_string)))
+        except RuntimeError:
+            continue
+    return sets if sets else None
 
 
 def _credential_sets() -> list[tuple[str, int, str, str]]:
@@ -150,12 +208,16 @@ def _credential_sets() -> list[tuple[str, int, str, str]]:
     fallback). Each set owns its own session; account labels default to
     mtproto-user, mtproto-user-2, ...
     """
+    # DB-stored sessions take precedence (UI-managed).
+    db_sets = _db_credential_sets()
+    if db_sets:
+        return db_sets
     section = _config_storage_section()
     configured = _config_api_sets(section)
     if configured is None:
         raise RuntimeError(
-            "storage.apis in config.yaml must list at least one "
-            "{api_id, api_hash, session_file} credential set"
+            "No Telegram session configured. Use the WebUI Settings -> "
+            "Telegram session to create one, or set storage.apis in config.yaml."
         )
     return configured
 
@@ -204,8 +266,7 @@ class UserSessionRuntime:
         clients: list[tuple[str, Any]] = []
         resolved_chat: int | None = None
         try:
-            for label, api_id, api_hash, session_file in sets:
-                session = _session_from_file_for(session_file)
+            for label, api_id, api_hash, session in sets:
                 # These are honest TeleDrive client details, not a forged
                 # official Telegram fingerprint. MTProto has no HTTP User-Agent.
                 device_model = (

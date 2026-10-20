@@ -1586,7 +1586,7 @@ def create_storage_upload_job(
     _: None = Depends(require_auth),
 ):
     _same_origin(request)
-    _log(f"queue job: bucket={payload.bucket} key={payload.object_key} source={payload.source_path}", "jobs")
+    _log(f"queue job: bucket={payload.bucket} key={payload.key} source={payload.source_path}", "jobs")
     root = _storage_job_root()
     conn = db_connect()
     try:
@@ -1675,7 +1675,7 @@ async def run_next_storage_upload_job(
     request: Request, _: None = Depends(require_auth),
 ):
     _same_origin(request)
-    _log(f"queue job: bucket={payload.bucket} key={payload.object_key} source={payload.source_path}", "jobs")
+    _log("run-next job triggered", "jobs")
     root = _storage_job_root()
     conn = db_connect()
     try:

@@ -808,10 +808,23 @@ def index(_: None = Depends(require_auth)):
 
 @app.get("/{page_name}.html", include_in_schema=False)
 def page_html(page_name: str, request: Request):
-    try:
-        require_auth(request)
-    except HTTPException:
-        raise
+    if WEB_PASSWORD:
+        from fastapi.security import HTTPBasicCredentials
+        creds = None
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("basic "):
+            import base64 as _b64
+            try:
+                decoded = _b64.b64decode(auth_header[6:]).decode("utf-8", "replace")
+                u, p_ = decoded.split(":", 1)
+                creds = HTTPBasicCredentials(username=u, password=p_)
+            except Exception:
+                pass
+        if creds is None or not (
+            hmac.compare_digest(creds.username, WEB_USER)
+            and hmac.compare_digest(creds.password, WEB_PASSWORD)
+        ):
+            raise HTTPException(401, "Unauthorized", headers={"WWW-Authenticate": "Basic"})
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)
@@ -823,10 +836,23 @@ def page_route(page_name: str, request: Request):
     if page_name in {"api", "static", "openapi.json", "docs", "redoc",
                      "__health", "favicon.ico"}:
         raise HTTPException(404, "Not found")
-    try:
-        require_auth(request)
-    except HTTPException:
-        raise
+    if WEB_PASSWORD:
+        from fastapi.security import HTTPBasicCredentials
+        creds = None
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("basic "):
+            import base64 as _b64
+            try:
+                decoded = _b64.b64decode(auth_header[6:]).decode("utf-8", "replace")
+                u, p_ = decoded.split(":", 1)
+                creds = HTTPBasicCredentials(username=u, password=p_)
+            except Exception:
+                pass
+        if creds is None or not (
+            hmac.compare_digest(creds.username, WEB_USER)
+            and hmac.compare_digest(creds.password, WEB_PASSWORD)
+        ):
+            raise HTTPException(401, "Unauthorized", headers={"WWW-Authenticate": "Basic"})
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)
@@ -1570,6 +1596,116 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
         ), {"id": user_id})
         conn.connection.commit()
         _log(f"delete user: id={user_id} username={row[0]}", "users")
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+# --- S3 bucket browser & quota (WebUI, Basic auth) --------------------------
+
+@app.get("/api/v1/admin/storage/buckets", tags=["Object catalog"],
+         summary="List buckets with metadata and quota (WebUI)")
+def admin_list_buckets(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        buckets = catalog.list_buckets()
+        result = []
+        for b in buckets:
+            # Get object count and total size
+            from sqlalchemy import text as _text
+            row = conn.connection.execute(_text(
+                "SELECT COUNT(*), COALESCE(SUM(size),0) FROM storage_objects "
+                "WHERE bucket = :b AND is_current = 1"
+            ), {"b": b}).fetchone()
+            count = row[0] if row else 0
+            size = row[1] if row else 0
+            # Get quota
+            qrow = conn.connection.execute(_text(
+                "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
+            ), {"b": b}).fetchone()
+            quota = None
+            if qrow:
+                quota = {"max_size_bytes": qrow[0], "max_objects": qrow[1]}
+            result.append({"name": b, "object_count": count,
+                           "total_size": size, "quota": quota})
+        return {"buckets": result}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/storage/buckets/{bucket}/objects", tags=["Object catalog"],
+         summary="List objects in a bucket (WebUI)")
+def admin_list_objects(bucket: str, prefix: str = "",
+                       limit: int = 100,
+                       _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        items = catalog.list_objects(bucket, prefix=prefix, limit=limit)
+        return {"objects": [
+            {"id": x.item.id, "key": x.item.key, "size": x.item.size,
+             "sha256": x.item.sha256, "created_at": x.item.created_at,
+             "generation": x.generation} for x in items]}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/admin/storage/buckets/{bucket}/objects", tags=["Object catalog"],
+            summary="Delete an object (WebUI)")
+def admin_delete_object(bucket: str, key: str,
+                        _: None = Depends(require_auth)):
+    from fastapi import Query as _Q
+    conn = db_connect()
+    try:
+        try:
+            deleted = BucketCatalog(ManifestStore(conn)).remove_current(bucket, key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"ok": True, "unlinked": deleted}
+    finally:
+        conn.close()
+
+
+class BucketQuotaRequest(BaseModel):
+    max_size_bytes: int | None = None
+    max_objects: int | None = None
+
+
+@app.get("/api/v1/admin/storage/buckets/{bucket}/quota", tags=["Object catalog"],
+         summary="Get bucket quota")
+def admin_get_quota(bucket: str, _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
+        ), {"b": bucket}).fetchone()
+        if row is None:
+            return {"bucket": bucket, "max_size_bytes": None, "max_objects": None}
+        return {"bucket": bucket, "max_size_bytes": row[0], "max_objects": row[1]}
+    finally:
+        conn.close()
+
+
+@app.put("/api/v1/admin/storage/buckets/{bucket}/quota", tags=["Object catalog"],
+         summary="Set bucket quota")
+def admin_set_quota(bucket: str, payload: BucketQuotaRequest, request: Request,
+                    _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        now = int(time.time())
+        conn.connection.execute(_text(
+            "INSERT INTO bucket_quotas (bucket, max_size_bytes, max_objects, created_at, updated_at) "
+            "VALUES (:b, :ms, :mo, :now, :now) "
+            "ON CONFLICT (bucket) DO UPDATE SET max_size_bytes = :ms, max_objects = :mo, updated_at = :now"
+        ), {"b": bucket, "ms": payload.max_size_bytes, "mo": payload.max_objects, "now": now})
+        conn.connection.commit()
+        _log(f"set quota: bucket={bucket} max_size={payload.max_size_bytes} max_objects={payload.max_objects}", "storage")
     finally:
         conn.close()
     return {"ok": True}

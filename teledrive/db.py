@@ -91,6 +91,15 @@ telegram_session_pending = Table(
     Column("created_at", BigInteger, nullable=False),
 )
 
+bucket_quotas = Table(
+    "bucket_quotas", metadata,
+    Column("bucket", String(255), primary_key=True),
+    Column("max_size_bytes", BigInteger),
+    Column("max_objects", BigInteger),
+    Column("created_at", BigInteger, nullable=False),
+    Column("updated_at", BigInteger, nullable=False),
+)
+
 users = Table(
     "users", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

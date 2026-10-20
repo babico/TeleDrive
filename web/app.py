@@ -486,6 +486,19 @@ def validate_and_write_config(raw: dict[str, Any]) -> None:
     os.replace(tmp, CONFIG_PATH)
     _reload_service_settings()
     _create_default_admin()
+    # Migrate users table: add enabled column if missing.
+    try:
+        conn = db_connect()
+        try:
+            from sqlalchemy import text as _text, inspect as _inspect
+            cols = {c['name'] for c in _inspect(conn.engine).get_columns('users')}
+            if 'enabled' not in cols:
+                conn.connection.execute(_text('ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'))
+                conn.connection.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def db_connect():
@@ -553,6 +566,19 @@ async def lifespan(_: FastAPI):
     ensure_config()
     _reload_service_settings()
     _create_default_admin()
+    # Migrate users table: add enabled column if missing.
+    try:
+        conn = db_connect()
+        try:
+            from sqlalchemy import text as _text, inspect as _inspect
+            cols = {c['name'] for c in _inspect(conn.engine).get_columns('users')}
+            if 'enabled' not in cols:
+                conn.connection.execute(_text('ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'))
+                conn.connection.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
     # Set up rotating compressed log file.
     try:
         cfg = read_raw_config()

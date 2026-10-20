@@ -975,7 +975,8 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
         raise HTTPException(400, "api_id, api_hash and phone are required")
     import secrets as _secrets
     token = _secrets.token_urlsafe(16)
-    # Store pending state; the verify step will complete sign-in.
+    now = int(time.time())
+    # Resolve active channel if not provided.
     channel = payload.channel
     if not channel:
         try:
@@ -995,15 +996,8 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
                 conn_ch.close()
         except Exception:
             pass
-    TELEGRAM_SESSION_PENDING[token] = {
-        "api_id": payload.api_id,
-        "api_hash": payload.api_hash,
-        "phone": payload.phone,
-        "channel": channel,
-        "strategy": payload.strategy or "round_robin",
-        "created_at": int(time.time()),
-    }
     # Send the code via Telethon (synchronously).
+    phone_code_hash = None
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
@@ -1014,15 +1008,32 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
                                     receive_updates=False, flood_sleep_threshold=0)
             await client.connect()
             result = await client.send_code_request(payload.phone)
-            phone_code_hash = result.phone_code_hash
+            h = result.phone_code_hash
             await client.disconnect()
-            return phone_code_hash
+            return h
 
         phone_code_hash = asyncio.run(_send())
-        TELEGRAM_SESSION_PENDING[token]["phone_code_hash"] = phone_code_hash
     except Exception as exc:
-        TELEGRAM_SESSION_PENDING.pop(token, None)
         raise HTTPException(400, _scrub_text(str(exc)))
+
+    # Store pending state in DB (persistent across restarts).
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "DELETE FROM telegram_session_pending WHERE created_at < :cutoff"
+        ), {"cutoff": now - 300})
+        conn.connection.execute(_text(
+            "INSERT INTO telegram_session_pending (token, api_id, api_hash, phone, "
+            "phone_code_hash, channel, strategy, created_at) "
+            "VALUES (:token, :api_id, :api_hash, :phone, :pch, :channel, :strategy, :now)"
+        ), {"token": token, "api_id": payload.api_id, "api_hash": payload.api_hash,
+            "phone": payload.phone, "pch": phone_code_hash, "channel": channel,
+            "strategy": payload.strategy or "round_robin", "now": now})
+        conn.connection.commit()
+    finally:
+        conn.close()
+
     return {"token": token, "phone": payload.phone,
             "expires_in": 300}
 
@@ -1039,18 +1050,31 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                                 request: Request,
                                 _: None = Depends(require_auth)):
     _same_origin(request)
-    pending = TELEGRAM_SESSION_PENDING.get(payload.token)
-    if not pending:
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT api_id, api_hash, phone, phone_code_hash, channel, strategy, "
+            "created_at FROM telegram_session_pending WHERE token = :token"
+        ), {"token": payload.token}).fetchone()
+    finally:
+        conn.close()
+    if row is None:
         raise HTTPException(404, "No pending code request (expired or invalid token)")
-    if int(time.time()) - pending["created_at"] > 300:
-        TELEGRAM_SESSION_PENDING.pop(payload.token, None)
+    api_id, api_hash, phone, phone_code_hash, channel, strategy, created_at = row
+    if int(time.time()) - int(created_at) > 300:
+        c2 = db_connect()
+        try:
+            from sqlalchemy import text as _text
+            c2.connection.execute(_text(
+                "DELETE FROM telegram_session_pending WHERE token = :token"
+            ), {"token": payload.token})
+            c2.connection.commit()
+        finally:
+            c2.close()
         raise HTTPException(410, "Code request expired; request a new one")
     if not payload.code:
         raise HTTPException(400, "code is required")
-    api_id = pending["api_id"]
-    api_hash = pending["api_hash"]
-    phone = pending["phone"]
-    phone_code_hash = pending.get("phone_code_hash")
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
@@ -1081,12 +1105,19 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     except Exception as exc:
         raise HTTPException(400, _scrub_text(str(exc)))
     finally:
-        TELEGRAM_SESSION_PENDING.pop(payload.token, None)
+        c3 = db_connect()
+        try:
+            from sqlalchemy import text as _text
+            c3.connection.execute(_text(
+                "DELETE FROM telegram_session_pending WHERE token = :token"
+            ), {"token": payload.token})
+            c3.connection.commit()
+        finally:
+            c3.close()
 
     # Resolve the channel (optional).
-    channel = pending.get("channel")
     account = getattr(me, "username", None) or f"user-{me.id}"
-    strategy = pending.get("strategy") or "round_robin"
+    strategy = strategy or "round_robin"
     now = int(time.time())
     conn = db_connect()
     try:

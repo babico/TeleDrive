@@ -79,6 +79,18 @@ telegram_channels = Table(
     Column("updated_at", BigInteger, nullable=False),
 )
 
+telegram_session_pending = Table(
+    "telegram_session_pending", metadata,
+    Column("token", String(64), primary_key=True),
+    Column("api_id", BigInteger, nullable=False),
+    Column("api_hash", String(128), nullable=False),
+    Column("phone", String(64), nullable=False),
+    Column("phone_code_hash", String(255)),
+    Column("channel", String(255)),
+    Column("strategy", String(32), server_default="round_robin"),
+    Column("created_at", BigInteger, nullable=False),
+)
+
 
 class DBRow:
     def __init__(self, row: Row[Any]):

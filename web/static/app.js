@@ -6,6 +6,7 @@ function app(){
       {id:'dashboard',label:'Dashboard'},
       {id:'queue',label:'Queue'},
       {id:'history',label:'History'},
+      {id:'storage',label:'Storage'},
       {id:'settings',label:'Settings'},
       {id:'api-management',label:'API Management'},
       {id:'s3',label:'S3'},

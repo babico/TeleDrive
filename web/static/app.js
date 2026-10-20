@@ -27,6 +27,11 @@ function app(){
     activeChannelId: '',
     activeChannelLabel: 'Loading...',
     channels: [],
+    showAddChannel: false,
+    newChannelName: '',
+    newChannelId: '',
+    newChannelStrategy: 'round_robin',
+    newChannelScratch: '/data/tmp',
     tgApiId: '',
     tgApiHash: '',
     tgPhone: '',
@@ -165,13 +170,12 @@ function app(){
     },
 
     async addChannel(){
-      const name = prompt('Channel name (display):');
-      if(!name) return;
-      const cid = prompt('Channel ID or username:');
-      if(!cid) return;
       try {
-        await this.api('/api/v1/admin/storage/channels',{method:'POST',body:JSON.stringify({name:name.trim(),channel_id:cid.trim(),strategy:this.config?.storage?.strategy||'round_robin',scratch_dir:this.config?.storage?.scratch_dir||'/data/tmp'})});
+        await this.api('/api/v1/admin/storage/channels',{method:'POST',body:JSON.stringify({name:this.newChannelName.trim(),channel_id:this.newChannelId.trim(),strategy:this.newChannelStrategy,scratch_dir:this.newChannelScratch.trim()||'/data/tmp'})});
         this.toast('Channel added');
+        this.showAddChannel = false;
+        this.newChannelName = '';
+        this.newChannelId = '';
         await this.refreshChannels();
       } catch(e){ this.toast(e.message,true); }
     },

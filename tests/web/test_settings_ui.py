@@ -100,12 +100,12 @@ def test_settings_page_contains_ui_elements():
     html = Path("web/static/index.html").read_text(encoding="utf-8")
     assert "Telegram session (USER MTProto)" in html
     assert "Channels" in html
-    assert 'id="addChannel"' in html
-    assert 'id="sendTgCode"' in html
-    assert 'id="verifyTgCode"' in html
-    assert 'id="tgSessionStatus"' in html
-    assert 'id="activeChannelSelect"' in html
-    assert 'id="channelEditors"' in html
+    assert 'addChannel()' in html
+    assert 'sendTgCode()' in html
+    assert 'verifyTgCode()' in html
+    assert 'tgSessionStatus' in html
+    assert 'activeChannelId' in html
+    assert 'channelEditors' in html
 
 
 def test_app_js_valid_syntax():

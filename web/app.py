@@ -505,6 +505,26 @@ async def _trusted_host_middleware(request: Request, call_next):
 
 
 @app.middleware("http")
+async def _audit_log_middleware(request: Request, call_next):
+    start = time.time()
+    path = request.url.path
+    method = request.method
+    # Skip noisy health checks and static assets.
+    if path not in {"/api/health", "/__health"} and not path.startswith("/static/"):
+        client = request.client.host if request.client else "-"
+        _log(f"{method} {path} from {client}", "http")
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        _log(f"{method} {path} -> EXCEPTION: {type(exc).__name__}: {exc}", "http")
+        raise
+    elapsed = (time.time() - start) * 1000
+    if path not in {"/api/health", "/__health"} and not path.startswith("/static/"):
+        _log(f"{method} {path} -> {response.status_code} ({elapsed:.0f}ms)", "http")
+    return response
+
+
+@app.middleware("http")
 async def security_middleware(request: Request, call_next):
     binary_upload = (request.method == "PUT" and
                      re.fullmatch(r"/api/v1/buckets/[A-Za-z0-9.-]+/content", request.url.path))
@@ -705,8 +725,10 @@ def get_config(_: None = Depends(require_auth)):
 @app.put("/api/config", tags=["Configuration"], response_model=OKResponse, summary="Validate and save configuration")
 def put_config(request: Request, payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
     _same_origin(request)
+    _log("settings save requested", "config")
     try:
         validate_and_write_config(payload)
+        _log("settings saved successfully", "config")
     except ValueError as exc:
         raise HTTPException(400, _scrub_text(str(exc))) from exc
     except Exception as exc:
@@ -726,6 +748,7 @@ def list_api_keys(_: None = Depends(require_auth)):
 @app.post("/api/v1/admin/keys", tags=["API keys"], status_code=201, summary="Issue a scoped API key (secret returned once)")
 def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"issue api key: name={payload.name} scopes={payload.scopes}", "api-keys")
     conn = db_connect()
     try:
         try:
@@ -740,6 +763,7 @@ def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends
 @app.delete("/api/v1/admin/keys/{identifier}", tags=["API keys"], summary="Revoke an API key immediately")
 def revoke_api_key(identifier: str, request: Request, _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"revoke api key: id={identifier}", "api-keys")
     conn = db_connect()
     try:
         if not ApiKeyStore(conn).revoke(identifier):
@@ -752,6 +776,7 @@ def revoke_api_key(identifier: str, request: Request, _: None = Depends(require_
 @app.post("/api/v1/admin/keys/{identifier}/rotate", tags=["API keys"], summary="Rotate an API key; secret returned once")
 def rotate_api_key(identifier: str, request: Request, _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"rotate api key: id={identifier}", "api-keys")
     conn = db_connect()
     try:
         try:
@@ -1198,6 +1223,7 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             summary="Revoke the stored Telegram session")
 def delete_telegram_session(request: Request, _: None = Depends(require_auth)):
     _same_origin(request)
+    _log("revoke telegram session", "storage")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
@@ -1240,6 +1266,7 @@ class TelegramChannelCreate(BaseModel):
 def create_telegram_channel(payload: TelegramChannelCreate, request: Request,
                            _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"create channel: name={payload.name} channel_id={payload.channel_id}", "storage")
     if not payload.name or not payload.channel_id:
         raise HTTPException(400, "name and channel_id are required")
     strategy = (payload.strategy or "round_robin").strip().lower()
@@ -1269,6 +1296,7 @@ def create_telegram_channel(payload: TelegramChannelCreate, request: Request,
 def delete_telegram_channel(channel_id: int, request: Request,
                            _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"delete channel: id={channel_id}", "storage")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
@@ -1286,6 +1314,7 @@ def delete_telegram_channel(channel_id: int, request: Request,
 def activate_telegram_channel(channel_id: int, request: Request,
                              _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"activate channel: id={channel_id}", "storage")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text

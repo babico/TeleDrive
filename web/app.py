@@ -138,6 +138,12 @@ def _reload_service_settings() -> None:
     os.environ["TELEDRIVE_LOCK_DIR"] = settings.lock_dir
     os.environ["TELEDRIVE_S3_MASTER_KEY_FILE"] = settings.s3_master_key_file
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
+
+
+def _log(msg: str, source: str = "web") -> None:
+    """Append a timestamped, source-tagged entry to LOG_BUFFER."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    LOG_BUFFER.append(f"[{ts}] [{source}] {msg}")
 PROMPT_RE = re.compile(r"Please enter the (code|password) for account '([^']+)':", re.I)
 _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:password|passwd|pwd|token|access_token|secret|api_key|apikey)=)[^&#\s]+"
@@ -401,9 +407,7 @@ async def upload_job_scheduler_loop() -> None:
             raise
         except Exception as exc:
             # Do not log source paths, credentials or Telegram tokens.
-            LOG_BUFFER.append(
-                "[web] durable upload job scheduler: " + type(exc).__name__
-            )
+            _log("durable upload job scheduler: " + type(exc).__name__, "scheduler")
             await asyncio.sleep(20)
         finally:
             if conn is not None:
@@ -422,7 +426,7 @@ async def lifecycle_scheduler_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOG_BUFFER.append("[web] lifecycle scheduler: " + type(exc).__name__)
+            _log("lifecycle scheduler: " + type(exc).__name__, "scheduler")
         finally:
             if connection is not None:
                 connection.close()
@@ -450,12 +454,12 @@ async def lifespan(_: FastAPI):
     try:
         await mtproto_storage_runtime.start()
     except Exception as exc:
-        LOG_BUFFER.append(_scrub_text(f"[web] user session warning: {exc}"))
+        _log(_scrub_text(f"user session warning: {exc}"), "storage")
     try:
         conn = db_connect()
         conn.close()
     except Exception as exc:
-        LOG_BUFFER.append(_scrub_text(f"[web] startup database warning: {exc}"))
+        _log(_scrub_text(f"startup database warning: {exc}"), "startup")
     upload_job_scheduler_task = asyncio.create_task(upload_job_scheduler_loop())
     lifecycle_scheduler_task = asyncio.create_task(lifecycle_scheduler_loop())
     yield
@@ -971,6 +975,7 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
                                  request: Request,
                                  _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"request-code: api_id={payload.api_id} phone={payload.phone} channel={payload.channel}", "telegram-session")
     if payload.api_id <= 0 or not payload.api_hash or not payload.phone:
         raise HTTPException(400, "api_id, api_hash and phone are required")
     import secrets as _secrets
@@ -1050,6 +1055,7 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                                 request: Request,
                                 _: None = Depends(require_auth)):
     _same_origin(request)
+    _log(f"verify-code: token={payload.token[:8]}... code={payload.code}", "telegram-session")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text

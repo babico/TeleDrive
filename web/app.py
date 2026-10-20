@@ -1215,12 +1215,13 @@ def create_telegram_channel(payload: TelegramChannelCreate, request: Request,
         result = conn.connection.execute(_text(
             "INSERT INTO telegram_channels (name, channel_id, strategy, "
             "scratch_dir, is_active, created_at, updated_at) "
-            "VALUES (:name, :channel_id, :strategy, :scratch_dir, 0, :now, :now)"
+            "VALUES (:name, :channel_id, :strategy, :scratch_dir, 0, :now, :now) "
+            "RETURNING id"
         ), {"name": payload.name, "channel_id": payload.channel_id,
             "strategy": strategy, "scratch_dir": payload.scratch_dir or "/data/tmp",
             "now": now})
         conn.connection.commit()
-        new_id = result.lastrowid
+        new_id = result.scalar()
     finally:
         conn.close()
     return {"id": new_id, "name": payload.name, "channel_id": payload.channel_id}

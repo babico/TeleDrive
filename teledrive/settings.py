@@ -94,6 +94,15 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
     state = _section(cfg, "state")
 
     paths = _section(cfg, "paths")
+
+    def _cfg_or_env(key, env_name, default=None):
+        value = web.get(key)
+        if value is None or value == "":
+            value = os.environ.get(env_name, "")
+        if value == "":
+            return default
+        return value
+
     extra_packages = state.get("db_extra_packages", ())
     if not extra_packages:
         packages = ()

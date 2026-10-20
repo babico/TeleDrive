@@ -24,3 +24,4 @@ uploads/
 
 # Reusable Docker fault-injection local reports (redacted local reports)
 .docker-fault-evidence/
+docker-compose.override.yml

@@ -6,6 +6,10 @@ import copy
 import sys
 import tempfile
 import os
+import gzip
+import shutil
+import logging
+from logging.handlers import RotatingFileHandler
 import re
 import time
 from collections import deque
@@ -140,10 +144,54 @@ def _reload_service_settings() -> None:
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
 
 
+class RotatingCompressedFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that gzip-compresses rotated files."""
+
+    def rotation_filename(self, default_name: str) -> str:
+        return default_name + ".gz"
+
+    def rotate(self, source: str, dest: str) -> None:
+        with open(source, "rb") as f_in:
+            with gzip.open(dest, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+        os.remove(source)
+
+
+def _extract_user(request: Request) -> str:
+    """Extract the authenticated user identity from the request (best-effort)."""
+    # Basic auth
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("basic "):
+        try:
+            import base64 as _b64
+            decoded = _b64.b64decode(auth[6:]).decode("utf-8", "replace")
+            username = decoded.split(":", 1)[0]
+            if username:
+                return username
+        except Exception:
+            pass
+    # Bearer token (API key) — just note it's a bearer
+    if auth.lower().startswith("bearer "):
+        return "bearer-token"
+    return "anonymous"
+
+
 def _log(msg: str, source: str = "web") -> None:
     """Append a timestamped, source-tagged entry to LOG_BUFFER."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     LOG_BUFFER.append(f"[{ts}] [{source}] {msg}")
+    try:
+        import logging as _logging
+        record = _logging.LogRecord(
+            name="teledrive", level=_logging.INFO, pathname="", lineno=0,
+            msg=msg, args=(), exc_info=None
+        )
+        record.source = source
+        record.created = time.time()
+        if _FILE_LOG_HANDLER is not None:
+            _FILE_LOG_HANDLER.emit(record)
+    except Exception:
+        pass
 PROMPT_RE = re.compile(r"Please enter the (code|password) for account '([^']+)':", re.I)
 _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:password|passwd|pwd|token|access_token|secret|api_key|apikey)=)[^&#\s]+"
@@ -152,6 +200,7 @@ _QUERY_SECRET_RE = re.compile(
 security = HTTPBasic(auto_error=False)
 bearer_auth = HTTPBearer(auto_error=False)
 AUTH_FAILURES: dict[str, deque[float]] = {}
+_FILE_LOG_HANDLER = None
 TELEGRAM_SESSION_PENDING: dict[str, dict[str, Any]] = {}
 
 
@@ -439,6 +488,32 @@ async def lifespan(_: FastAPI):
     os.umask(0o077)
     ensure_config()
     _reload_service_settings()
+    # Set up rotating compressed log file.
+    try:
+        cfg = read_raw_config()
+        log_path = (cfg.get("logging") or {}).get("log_path", "/data/teledrive.log")
+        log_dir = os.path.dirname(log_path) or "/data"
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = RotatingCompressedFileHandler(
+            log_path, maxBytes=10 * 1024 * 1024, backupCount=5,
+            encoding="utf-8", delay=True
+        )
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(source)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        class _SourceFilter(logging.Filter):
+            def filter(self, record):
+                if not hasattr(record, "source"):
+                    record.source = "app"
+                return True
+        file_handler.addFilter(_SourceFilter())
+        global _FILE_LOG_HANDLER
+        _FILE_LOG_HANDLER = file_handler
+        logging.getLogger("teledrive").addHandler(file_handler)
+        logging.getLogger("teledrive").setLevel(logging.INFO)
+    except Exception as exc:
+        _log(f"could not set up file logging: {exc}", "startup")
     transport_mode()  # Enforce Telethon USER mode at startup; Bot mode no longer exists.
     if not WEB_PASSWORD and not ALLOW_INSECURE:
         raise RuntimeError(
@@ -512,7 +587,8 @@ async def _audit_log_middleware(request: Request, call_next):
     # Skip noisy health checks and static assets.
     if path not in {"/api/health", "/__health"} and not path.startswith("/static/"):
         client = request.client.host if request.client else "-"
-        _log(f"{method} {path} from {client}", "http")
+        user = _extract_user(request)
+        _log(f"{method} {path} from {client} user={user}", "http")
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -1211,6 +1287,7 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     except Exception:
         pass
 
+    _log(f"session verified and saved: account={account} user_id={me.id} channel={channel}", "telegram-session")
     return {
         "ok": True,
         "account": account,
@@ -1509,6 +1586,7 @@ def create_storage_upload_job(
     _: None = Depends(require_auth),
 ):
     _same_origin(request)
+    _log(f"queue job: bucket={payload.bucket} key={payload.object_key} source={payload.source_path}", "jobs")
     root = _storage_job_root()
     conn = db_connect()
     try:
@@ -1597,6 +1675,7 @@ async def run_next_storage_upload_job(
     request: Request, _: None = Depends(require_auth),
 ):
     _same_origin(request)
+    _log(f"queue job: bucket={payload.bucket} key={payload.object_key} source={payload.source_path}", "jobs")
     root = _storage_job_root()
     conn = db_connect()
     try:

@@ -1446,7 +1446,16 @@ def get_active_channel(_: None = Depends(require_auth)):
 @app.get("/api/logs", tags=["System"], summary="Read recent redacted activity logs")
 def logs(limit: int = 1000, _: None = Depends(require_auth)):
     combined = list(LOG_BUFFER)[-limit:]
-    return {"lines": combined}
+    entries = []
+    for line in combined:
+        # Parse "[ts] [user] [source] msg" format.
+        m = re.match(r"^\[([^\]]+)\] \[([^\]]+)\] \[([^\]]+)\] (.*)$", line)
+        if m:
+            entries.append({"ts": m.group(1), "user": m.group(2),
+                           "source": m.group(3), "message": m.group(4)})
+        else:
+            entries.append({"ts": "", "user": "", "source": "", "message": line})
+    return {"lines": combined, "entries": entries}
 
 
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],

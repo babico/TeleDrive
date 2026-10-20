@@ -54,7 +54,7 @@ function app(){
     createdS3: null,
 
     // Logs
-    logBox: '',
+    logEntries: [],
     logFilter: '',
     logLimit: 1000,
 
@@ -284,9 +284,9 @@ function app(){
         const limit = this.logLimit || 1000;
         const filter = (this.logFilter||'').trim().toLowerCase();
         const x = await this.api('/api/logs?limit='+limit);
-        let lines = x.lines||[];
-        if(filter) lines = lines.filter(l => l.toLowerCase().includes(filter));
-        this.logBox = lines.join('\n');
+        let entries = x.entries||[];
+        if(filter) entries = entries.filter(e => (e.ts+' '+e.user+' '+e.source+' '+e.message).toLowerCase().includes(filter));
+        this.logEntries = entries;
       } catch(e){ this.toast(e.message,true); }
     }
   }

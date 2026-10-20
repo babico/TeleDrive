@@ -318,7 +318,15 @@ tailwind.config = {
       <div class="field" style="flex:1"><label>Lines</label><select x-model="logLimit" class="input" @change="loadLogs()"><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="1500">1500</option></select></div>
       <button class="btn btn-sm" @click="loadLogs()">Refresh</button>
     </div>
-    <pre x-text="logBox" class="logs mt-3"></pre>
+    <div class="scroll mt-3">
+      <table><thead><tr><th>Time</th><th>User</th><th>Source</th><th>Message</th></tr></thead>
+      <tbody><template x-for="e in logEntries" :key="e.ts+e.message"><tr>
+        <td class="text-xs text-gray-400 whitespace-nowrap" x-text="e.ts"></td>
+        <td class="text-xs" x-text="e.user"></td>
+        <td class="text-xs text-gray-400" x-text="e.source"></td>
+        <td class="text-xs" x-text="e.message"></td>
+      </tr></template></tbody></table>
+    </div>
   </div>
 </section>
 

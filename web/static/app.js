@@ -138,8 +138,7 @@ function app(){
         this.currentUser = r.user.username;
         this.currentRole = r.user.role;
         this.loginError = '';
-        this.page = 'dashboard';
-        await this.loadSettings();
+        window.location.href = '/';
         await this.refreshChannels();
         await this.refreshTgSessionStatus();
         await this.refreshDashboard();

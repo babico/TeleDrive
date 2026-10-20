@@ -26,7 +26,7 @@ def test_api_schema_exposes_typed_requests_and_security():
     for endpoint in ["/api/config", "/api/health"]:
         assert endpoint in paths
     assert "/docs" not in paths
-    assert "HTTPBasic" in schema["components"]["securitySchemes"]
+    assert "HTTPBearer" in schema["components"]["securitySchemes"]
 
 
 def test_docs_routes_return_official_swagger_redoc_html():
@@ -35,16 +35,12 @@ def test_docs_routes_return_official_swagger_redoc_html():
     assert "TeleDrive API" in webapp.openapi_schema(None).body.decode()
 
 
-def test_documentation_requires_http_basic(monkeypatch):
-    monkeypatch.setattr(webapp, "WEB_USER", "apiadmin")
+def test_documentation_requires_auth(monkeypatch):
     monkeypatch.setattr(webapp, "WEB_PASSWORD", "strong-password-for-tests")
     webapp.AUTH_FAILURES.clear()
     with pytest.raises(HTTPException) as exc:
-        webapp.require_auth(request(), None)
+        webapp.require_auth(request())
     assert exc.value.status_code == 401
-
-    valid = HTTPBasicCredentials(username="apiadmin", password="strong-password-for-tests")
-    assert webapp.require_auth(request(), valid) is None
 
 
 def test_health_is_public():

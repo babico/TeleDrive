@@ -64,6 +64,25 @@ def unified(tmp_path, monkeypatch):
     web.CONFIG_PATH = config_path
     monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
     monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path/"scratch"))
+    # Redirect hardcoded /data and /uploads paths in ensure_config
+    import pathlib as _pl
+    orig_secure_mkdir = web._secure_mkdir
+    def patched_secure_mkdir(path):
+        ps = str(path)
+        if ps.startswith("/data") or ps.startswith("/uploads"):
+            ps = str(tmp_path / ps.lstrip("/"))
+            path = _pl.Path(ps)
+        return orig_secure_mkdir(path)
+    monkeypatch.setattr(web, "_secure_mkdir", patched_secure_mkdir)
+    orig_path_mkdir = _pl.Path.mkdir
+    def patched_path_mkdir(self, *a, **k):
+        s = str(self)
+        if s.startswith("/data") or s.startswith("/uploads"):
+            target = tmp_path / s.lstrip("/")
+            target.mkdir(*a, **k)
+            return
+        return orig_path_mkdir(self, *a, **k)
+    monkeypatch.setattr(_pl.Path, "mkdir", patched_path_mkdir)
     monkeypatch.setattr(web, "REST_MAX_UPLOAD_BYTES", 4*1024*1024)
     root=tmp_path/"uploads"
     root.mkdir()
@@ -75,10 +94,29 @@ def unified(tmp_path, monkeypatch):
         db.close()
     web_client=TestClient(app,base_url="http://localhost:8080")
     s3_client=TestClient(app,base_url="http://localhost:9000")
+    # Create default admin user directly (bypass lifespan)
+    import hashlib as _hl, secrets as _sec, time as _t
+    _db = connect()
     try:
-        result=web_client.post("/api/v1/admin/keys",
-            auth=("testadmin","long-secure-test-password"),
+        _db.connection.execute(__import__("sqlalchemy").text(
+            "INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at) "
+            "VALUES (:u, :ph, 'admin', 1, :now, :now)"
+        ), {"u": "admin", "ph": web._hash_password("admin"), "now": int(_t.time())})
+        _db.connection.commit()
+    except Exception:
+        pass
+    finally:
+        _db.close()
+    try:
+        # Login with default admin
+        login_r = web_client.post("/api/auth/login",
             headers={"X-TeleDrive-CSRF":"1"},
+            json={"username":"admin","password":"admin"})
+        assert login_r.status_code==200, login_r.text
+        admin_token = login_r.json()["token"]
+        admin_auth = {"Authorization":"Bearer "+admin_token}
+        result=web_client.post("/api/v1/admin/keys",
+            headers={**admin_auth,"X-TeleDrive-CSRF":"1"},
             json={"name":"unified-rest","scopes":[
                 "buckets:read","buckets:manage","objects:read",
                 "objects:write","objects:delete",

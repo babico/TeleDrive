@@ -330,14 +330,32 @@ def _get_current_user(request: Request) -> dict | None:
 
 
 def require_auth(request: Request) -> None:
+    # Try Bearer token first (new auth mechanism).
     user = _get_current_user(request)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": 'Bearer realm="TeleDrive"'},
-        )
-    request.state.user = user
+    if user is not None:
+        request.state.user = user
+        return
+
+    # Fall back to HTTP Basic auth (backward compat for tests/API clients).
+    if WEB_PASSWORD:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("basic "):
+            import base64 as _b64
+            try:
+                decoded = _b64.b64decode(auth[6:]).decode("utf-8", "replace")
+                u, p_ = decoded.split(":", 1)
+                if (hmac.compare_digest(u, WEB_USER)
+                        and hmac.compare_digest(p_, WEB_PASSWORD)):
+                    request.state.user = {"id": 0, "username": u, "role": "admin"}
+                    return
+            except Exception:
+                pass
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": 'Bearer realm="TeleDrive"'},
+    )
 
 
 def default_config() -> dict[str, Any]:

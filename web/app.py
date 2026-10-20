@@ -264,30 +264,80 @@ def _same_origin(request: Request) -> None:
         raise HTTPException(403, "Cross-origin state change rejected")
 
 
-def require_auth(request: Request, credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
-    if not WEB_PASSWORD:
-        return
+def _hash_password(password: str) -> str:
+    import hashlib as _hl, secrets as _sec
+    salt = _sec.token_hex(16)
+    return salt + ":" + _hl.sha256((salt + password).encode()).hexdigest()
 
-    client = request.client.host if request.client else "unknown"
-    now = time.monotonic()
-    failures = AUTH_FAILURES.setdefault(client, deque())
-    while failures and now - failures[0] > AUTH_FAILURE_WINDOW_SECONDS:
-        failures.popleft()
-    if len(failures) >= AUTH_FAILURE_LIMIT:
-        raise HTTPException(status_code=429, detail="Too many authentication failures")
 
-    valid = credentials is not None and (
-        hmac.compare_digest(credentials.username, WEB_USER)
-        and hmac.compare_digest(credentials.password, WEB_PASSWORD)
-    )
-    if not valid:
-        failures.append(now)
+def _verify_password(password: str, stored: str) -> bool:
+    import hashlib as _hl
+    if ":" not in stored:
+        return False
+    salt, digest = stored.split(":", 1)
+    return hmac.compare_digest(digest, _hl.sha256((salt + password).encode()).hexdigest())
+
+
+def _create_default_admin() -> None:
+    """Ensure at least one admin user exists."""
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        count = conn.connection.execute(_text("SELECT COUNT(*) FROM users")).scalar() or 0
+        if count == 0:
+            now = int(time.time())
+            conn.connection.execute(_text(
+                "INSERT INTO users (username, password_hash, role, created_at, updated_at) "
+                "VALUES (:u, :ph, 'admin', :now, :now)"
+            ), {"u": "admin", "ph": _hash_password("admin"), "now": now})
+            conn.connection.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def _get_current_user(request: Request) -> dict | None:
+    """Resolve the authenticated user from a Bearer token."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    if not token:
+        return None
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT u.id, u.username, u.role, s.expires_at "
+            "FROM user_sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token = :token"
+        ), {"token": token}).fetchone()
+        if row is None:
+            return None
+        if int(time.time()) > int(row[3]):
+            # Expired — clean up
+            conn.connection.execute(_text(
+                "DELETE FROM user_sessions WHERE token = :token"
+            ), {"token": token})
+            conn.connection.commit()
+            return None
+        return {"id": row[0], "username": row[1], "role": row[2]}
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def require_auth(request: Request) -> None:
+    user = _get_current_user(request)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            headers={"WWW-Authenticate": 'Basic realm="TeleDrive"'},
+            detail="Authentication required",
+            headers={"WWW-Authenticate": 'Bearer realm="TeleDrive"'},
         )
-
-    AUTH_FAILURES.pop(client, None)
+    request.state.user = user
 
 
 def default_config() -> dict[str, Any]:
@@ -435,6 +485,7 @@ def validate_and_write_config(raw: dict[str, Any]) -> None:
         raise RuntimeError("Database connection/initialization failed") from exc
     os.replace(tmp, CONFIG_PATH)
     _reload_service_settings()
+    _create_default_admin()
 
 
 def db_connect():
@@ -501,6 +552,7 @@ async def lifespan(_: FastAPI):
     os.umask(0o077)
     ensure_config()
     _reload_service_settings()
+    _create_default_admin()
     # Set up rotating compressed log file.
     try:
         cfg = read_raw_config()
@@ -801,6 +853,71 @@ def redoc_docs(_: None = Depends(require_auth)):
     return get_redoc_html(openapi_url="/openapi.json", title="TeleDrive API · ReDoc")
 
 
+@app.post("/api/auth/login", tags=["Authentication"], summary="Login with username and password")
+def login(payload: dict, request: Request):
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", ""))
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT id, username, password_hash, role FROM users WHERE username = :u"
+        ), {"u": username}).fetchone()
+    finally:
+        conn.close()
+    if row is None or not _verify_password(password, row[2]):
+        raise HTTPException(401, "Invalid credentials")
+    import secrets as _sec, time as _t
+    token = "td_sess_" + _sec.token_urlsafe(32)
+    now = int(_t.time())
+    expires = now + 7 * 86400  # 7 days
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "INSERT INTO user_sessions (token, user_id, created_at, expires_at) "
+            "VALUES (:token, :uid, :now, :exp)"
+        ), {"token": token, "uid": row[0], "now": now, "exp": expires})
+        conn.connection.execute(_text(
+            "UPDATE users SET last_login = :now WHERE id = :id"
+        ), {"now": now, "id": row[0]})
+        conn.connection.commit()
+    finally:
+        conn.close()
+    _log(f"login: username={username}", "auth")
+    return {"token": token, "user": {"id": row[0], "username": row[1], "role": row[3]},
+            "expires_at": expires}
+
+
+@app.post("/api/auth/logout", tags=["Authentication"], summary="Logout and revoke session")
+def logout(request: Request):
+    user = _get_current_user(request)
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        conn = db_connect()
+        try:
+            from sqlalchemy import text as _text
+            conn.connection.execute(_text(
+                "DELETE FROM user_sessions WHERE token = :token"
+            ), {"token": token})
+            conn.connection.commit()
+        finally:
+            conn.close()
+    _log(f"logout: user={user['username'] if user else 'unknown'}", "auth")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me", tags=["Authentication"], summary="Get current user")
+def me(request: Request):
+    user = _get_current_user(request)
+    if user is None:
+        raise HTTPException(401, "Not authenticated")
+    return {"user": user}
+
+
 @app.get("/", include_in_schema=False)
 def index(_: None = Depends(require_auth)):
     return FileResponse(STATIC_DIR / "index.html")
@@ -829,6 +946,11 @@ def page_html(page_name: str, request: Request):
     if candidate.is_file():
         return FileResponse(candidate)
     raise HTTPException(404, "Page not found")
+
+
+@app.get("/login", include_in_schema=False)
+def login_page():
+    return FileResponse(STATIC_DIR / "login.html")
 
 
 @app.get("/{page_name}", include_in_schema=False)
@@ -930,6 +1052,73 @@ def rotate_api_key(identifier: str, request: Request, _: None = Depends(require_
         return {"id": key.id, "token": key.value, "prefix": key.prefix, "scopes": key.scopes}
     finally:
         conn.close()
+
+
+@app.put("/api/v1/admin/users/{user_id}/password", tags=["Users"],
+        summary="Change a user's password")
+def change_user_password(user_id: int, request: Request, payload: dict,
+                        _: None = Depends(require_auth)):
+    _same_origin(request)
+    new_pw = str(payload.get("password", ""))
+    if len(new_pw) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    import hashlib as _hl, secrets as _sec, time as _t
+    salt = _sec.token_hex(16)
+    pw_hash = salt + ":" + _hl.sha256((salt + new_pw).encode()).hexdigest()
+    now = int(_t.time())
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT id FROM users WHERE id = :id"
+        ), {"id": user_id}).fetchone()
+        if row is None:
+            raise HTTPException(404, "user not found")
+        conn.connection.execute(_text(
+            "UPDATE users SET password_hash = :ph, updated_at = :now WHERE id = :id"
+        ), {"ph": pw_hash, "now": now, "id": user_id})
+        # Revoke all sessions for this user (force re-login)
+        conn.connection.execute(_text(
+            "DELETE FROM user_sessions WHERE user_id = :uid"
+        ), {"uid": user_id})
+        conn.connection.commit()
+        _log(f"change password: user_id={user_id}", "users")
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.put("/api/v1/admin/users/{user_id}/role", tags=["Users"],
+        summary="Change a user's role")
+def change_user_role(user_id: int, request: Request, payload: dict,
+                     _: None = Depends(require_auth)):
+    _same_origin(request)
+    role = str(payload.get("role", "")).strip()
+    if role not in ("admin", "operator", "viewer"):
+        raise HTTPException(400, "role must be admin, operator or viewer")
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT username, role FROM users WHERE id = :id"
+        ), {"id": user_id}).fetchone()
+        if row is None:
+            raise HTTPException(404, "user not found")
+        # Prevent removing last admin
+        if row[1] == "admin" and role != "admin":
+            admin_count = conn.connection.execute(_text(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+            )).scalar()
+            if admin_count <= 1:
+                raise HTTPException(409, "cannot demote the last admin")
+        conn.connection.execute(_text(
+            "UPDATE users SET role = :role, updated_at = :now WHERE id = :id"
+        ), {"role": role, "now": int(time.time()), "id": user_id})
+        conn.connection.commit()
+        _log(f"change role: user_id={user_id} {row[1]} -> {role}", "users")
+    finally:
+        conn.close()
+    return {"ok": True}
 
 
 @app.get("/api/v1/admin/storage/gc-candidates", tags=["Storage recovery"],

@@ -16,6 +16,11 @@ function app(){
     toastBad: false,
     authPrompt: null,
     authValue: '',
+    currentUser: '',
+    currentRole: '',
+    loginUsername: '',
+    loginPassword: '',
+    loginError: '',
 
     // Dashboard
     dashboard: {pending:0,failed:0,uploaded:0,strategy:'-'},
@@ -81,6 +86,12 @@ function app(){
     async init(){
       const path = window.location.pathname.replace(/^\/+/, '').replace(/\.html$/, '') || 'dashboard';
       this.page = path === '' ? 'dashboard' : path;
+      // Check auth
+      if(this.page === 'login') return;
+      const token = localStorage.getItem('teledrive_token');
+      if(!token){ window.location.href = '/login'; return; }
+      try { const me = await this.api('/api/auth/me'); this.currentUser = me.user.username; this.currentRole = me.user.role; }
+      catch(e){ localStorage.removeItem('teledrive_token'); window.location.href = '/login'; return; }
       await this.loadSettings();
       await this.refreshChannels();
       await this.refreshTgSessionStatus();
@@ -98,7 +109,10 @@ function app(){
     },
 
     async api(url, opt={}){
-      const r = await fetch(url, {credentials:'include', headers:{'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})}, ...opt});
+      const token = localStorage.getItem('teledrive_token');
+      const headers = {'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})};
+      if(token) headers['Authorization'] = 'Bearer '+token;
+      const r = await fetch(url, {headers, ...opt});
       if(!r.ok) throw new Error(await r.text() || r.statusText);
       return r.json();
     },
@@ -117,6 +131,27 @@ function app(){
       } catch(e){}
     },
 
+    async login(){
+      try {
+        const r = await this.api('/api/auth/login',{method:'POST',body:JSON.stringify({username:this.loginUsername,password:this.loginPassword})});
+        localStorage.setItem('teledrive_token', r.token);
+        this.currentUser = r.user.username;
+        this.currentRole = r.user.role;
+        this.loginError = '';
+        this.page = 'dashboard';
+        await this.loadSettings();
+        await this.refreshChannels();
+        await this.refreshTgSessionStatus();
+        await this.refreshDashboard();
+      } catch(e){ this.loginError = e.message; }
+    },
+    async logout(){
+      try { await this.api('/api/auth/logout',{method:'POST'}); } catch(e){}
+      localStorage.removeItem('teledrive_token');
+      this.currentUser = '';
+      this.currentRole = '';
+      this.page = 'login';
+    },
     async loadSettings(){
       try {
         const config = await this.api('/api/config');
@@ -390,6 +425,16 @@ function app(){
       if(!confirm('Delete this user?')) return;
       try { await this.api('/api/v1/admin/users/'+id,{method:'DELETE'}); this.toast('User deleted'); await this.loadUsers(); }
       catch(e){ this.toast(e.message,true); }
+    },
+    async changePassword(id){
+      const pw = prompt('New password (min 8 chars):');
+      if(!pw) return;
+      try { await this.api('/api/v1/admin/users/'+id+'/password',{method:'PUT',body:JSON.stringify({password:pw})}); this.toast('Password changed'); }
+      catch(e){ this.toast(e.message,true); }
+    },
+    async changeRole(id, role){
+      try { await this.api('/api/v1/admin/users/'+id+'/role',{method:'PUT',body:JSON.stringify({role})}); this.toast('Role updated'); await this.loadUsers(); }
+      catch(e){ this.toast(e.message,true); await this.loadUsers(); }
     },
   }
 }

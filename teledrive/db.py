@@ -111,6 +111,14 @@ users = Table(
     Column("last_login", BigInteger),
 )
 
+user_sessions = Table(
+    "user_sessions", metadata,
+    Column("token", String(128), primary_key=True),
+    Column("user_id", Integer, nullable=False),
+    Column("created_at", BigInteger, nullable=False),
+    Column("expires_at", BigInteger, nullable=False),
+)
+
 
 class DBRow:
     def __init__(self, row: Row[Any]):

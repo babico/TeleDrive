@@ -88,8 +88,10 @@ tailwind.config = {
 <header class="h-14 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
   <div class="text-sm text-gray-400">Dashboard</div>
   <div class="flex items-center gap-3">
-    <span class="text-sm text-gray-300" x-text="currentUser||'admin'"></span>
+    <span class="text-sm text-gray-300" x-text="currentUser||''"></span>
+    <span class="text-xs text-gray-500" x-text="currentRole"></span>
     <div class="w-8 h-8 rounded-full bg-brand-700 flex items-center justify-center text-xs font-bold" x-text="(currentUser||'A').charAt(0).toUpperCase()"></div>
+    <button class="btn btn-sm btn-ghost" @click="logout()">Logout</button>
   </div>
 </header>
 

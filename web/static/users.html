@@ -120,10 +120,16 @@ tailwind.config = {
       <table><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Last login</th><th>Actions</th></tr></thead>
       <tbody><template x-for="u in users" :key="u.id"><tr>
         <td x-text="u.username"></td>
-        <td><span class="badge badge-blue" x-text="u.role"></span></td>
+        <td>
+          <select class="input text-xs" style="width:auto;padding:2px 6px" :value="u.role" @change="changeRole(u.id, $event.target.value)" x-show="u.username!=='admin'">
+            <option value="admin">admin</option><option value="operator">operator</option><option value="viewer">viewer</option>
+          </select>
+          <span x-show="u.username==='admin'" class="badge badge-blue" x-text="u.role"></span>
+        </td>
         <td x-text="fmtTs(u.created_at)"></td>
         <td x-text="u.last_login?fmtTs(u.last_login):'-'"></td>
         <td><div class="flex gap-2">
+          <button class="btn btn-sm" @click="changePassword(u.id)">Password</button>
           <button class="btn btn-danger btn-sm" @click="deleteUser(u.id)" x-show="u.username!=='admin'">Delete</button>
         </div></td>
       </tr></template></tbody></table>

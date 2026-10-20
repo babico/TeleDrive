@@ -105,7 +105,7 @@ def test_settings_page_contains_ui_elements():
     assert 'verifyTgCode()' in html
     assert 'tgSessionStatus' in html
     assert 'activeChannelId' in html
-    assert 'channelEditors' in html
+    assert 'showAddChannel' in html
 
 
 def test_app_js_valid_syntax():

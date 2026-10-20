@@ -1318,6 +1318,12 @@ def get_active_channel(_: None = Depends(require_auth)):
     finally:
         conn.close()
 
+@app.get("/api/logs", tags=["System"], summary="Read recent redacted activity logs")
+def logs(limit: int = 500, _: None = Depends(require_auth)):
+    combined = list(LOG_BUFFER)[-limit:]
+    return {"lines": combined}
+
+
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],
          summary="Read storage jobs, stale leases and protected-media metrics")
 def storage_operations_health(_: None = Depends(require_auth)):

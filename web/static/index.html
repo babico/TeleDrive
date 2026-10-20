@@ -78,7 +78,7 @@ tailwind.config = {
     </div>
     <nav class="flex gap-1">
       <template x-for="tab in tabs" :key="tab.id">
-        <button class="tab" :class="page===tab.id?'active':''" @click="page=tab.id" x-text="tab.label"></button>
+        <button class="tab" :class="page===tab.id?'active':''" @click="page=tab.id; if(tab.id==='logs') loadLogs()" x-text="tab.label"></button>
       </template>
     </nav>
   </div>
@@ -313,7 +313,7 @@ tailwind.config = {
 <section x-show="page==='logs'" class="space-y-4">
   <div class="card">
     <h3>Logs</h3>
-    <pre id="logBox" class="logs"></pre>
+    <pre x-text="logBox" class="logs"></pre>
   </div>
 </section>
 

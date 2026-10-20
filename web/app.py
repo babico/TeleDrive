@@ -146,6 +146,7 @@ _QUERY_SECRET_RE = re.compile(
 security = HTTPBasic(auto_error=False)
 bearer_auth = HTTPBearer(auto_error=False)
 AUTH_FAILURES: dict[str, deque[float]] = {}
+TELEGRAM_SESSION_PENDING: dict[str, dict[str, Any]] = {}
 
 
 def _secure_mkdir(path: Path) -> None:
@@ -925,6 +926,198 @@ def restore_published_version(
     finally:
         conn.close()
 
+
+
+# --- Telegram session management (WebUI-driven) -----------------------------
+
+@app.get("/api/v1/admin/storage/telegram-session", tags=["Storage jobs"],
+         summary="Read the active Telegram USER session status")
+def get_telegram_session(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import select
+        row = conn.connection.execute(
+            __import__("sqlalchemy").text(
+                "SELECT id, api_id, phone, account, channel, strategy, "
+                "created_at, updated_at FROM telegram_sessions "
+                "ORDER BY id DESC LIMIT 1"
+            )
+        ).fetchone()
+        if row is None:
+            return {"configured": False, "session": None}
+        return {
+            "configured": True,
+            "session": {
+                "id": row[0], "api_id": row[1], "phone": row[2],
+                "account": row[3], "channel": row[4], "strategy": row[5],
+                "created_at": row[6], "updated_at": row[7],
+            },
+        }
+    finally:
+        conn.close()
+
+
+class TelegramSessionRequestCode(BaseModel):
+    api_id: int
+    api_hash: str
+    phone: str
+    channel: str | None = None
+    strategy: str | None = None
+
+
+@app.post("/api/v1/admin/storage/telegram-session/request-code",
+          tags=["Storage jobs"], summary="Send a Telegram login code to the phone")
+def request_telegram_session_code(payload: TelegramSessionRequestCode,
+                                 request: Request,
+                                 _: None = Depends(require_auth)):
+    _same_origin(request)
+    if payload.api_id <= 0 or not payload.api_hash or not payload.phone:
+        raise HTTPException(400, "api_id, api_hash and phone are required")
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(16)
+    # Store pending state; the verify step will complete sign-in.
+    TELEGRAM_SESSION_PENDING[token] = {
+        "api_id": payload.api_id,
+        "api_hash": payload.api_hash,
+        "phone": payload.phone,
+        "channel": payload.channel,
+        "strategy": payload.strategy or "round_robin",
+        "created_at": int(time.time()),
+    }
+    # Send the code via Telethon (synchronously).
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        import asyncio
+
+        async def _send():
+            client = TelegramClient(StringSession(), payload.api_id, payload.api_hash,
+                                    receive_updates=False, flood_sleep_threshold=0)
+            await client.connect()
+            result = await client.send_code_request(payload.phone)
+            phone_code_hash = result.phone_code_hash
+            await client.disconnect()
+            return phone_code_hash
+
+        phone_code_hash = asyncio.run(_send())
+        TELEGRAM_SESSION_PENDING[token]["phone_code_hash"] = phone_code_hash
+    except Exception as exc:
+        TELEGRAM_SESSION_PENDING.pop(token, None)
+        raise HTTPException(400, _scrub_text(str(exc)))
+    return {"token": token, "phone": payload.phone,
+            "expires_in": 300}
+
+
+class TelegramSessionVerifyCode(BaseModel):
+    token: str
+    code: str
+    password: str | None = None
+
+
+@app.post("/api/v1/admin/storage/telegram-session/verify-code",
+          tags=["Storage jobs"], summary="Verify the code and save the session")
+def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
+                                request: Request,
+                                _: None = Depends(require_auth)):
+    _same_origin(request)
+    pending = TELEGRAM_SESSION_PENDING.get(payload.token)
+    if not pending:
+        raise HTTPException(404, "No pending code request (expired or invalid token)")
+    if int(time.time()) - pending["created_at"] > 300:
+        TELEGRAM_SESSION_PENDING.pop(payload.token, None)
+        raise HTTPException(410, "Code request expired; request a new one")
+    if not payload.code:
+        raise HTTPException(400, "code is required")
+    api_id = pending["api_id"]
+    api_hash = pending["api_hash"]
+    phone = pending["phone"]
+    phone_code_hash = pending.get("phone_code_hash")
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        import asyncio
+
+        async def _verify():
+            client = TelegramClient(StringSession(), api_id, api_hash,
+                                    receive_updates=False, flood_sleep_threshold=0)
+            await client.connect()
+            try:
+                await client.sign_in(phone, code=payload.code,
+                                     phone_code_hash=phone_code_hash,
+                                     password=payload.password or None)
+            except Exception:
+                # Fall back to password-less / code-only sign-in.
+                await client.sign_in(phone, code=payload.code,
+                                     phone_code_hash=phone_code_hash)
+            if not await client.is_user_authorized():
+                raise RuntimeError("Sign-in did not authorize the user")
+            me = await client.get_me()
+            if me is None or getattr(me, "bot", False):
+                raise RuntimeError("Use a real Telegram USER session, not a bot token")
+            session_string = client.session.save()
+            await client.disconnect()
+            return session_string, me
+
+        session_string, me = asyncio.run(_verify())
+    except Exception as exc:
+        raise HTTPException(400, _scrub_text(str(exc)))
+    finally:
+        TELEGRAM_SESSION_PENDING.pop(payload.token, None)
+
+    # Resolve the channel (optional).
+    channel = pending.get("channel")
+    account = getattr(me, "username", None) or f"user-{me.id}"
+    strategy = pending.get("strategy") or "round_robin"
+    now = int(time.time())
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        # Remove any previous session for this account.
+        conn.connection.execute(_text(
+            "DELETE FROM telegram_sessions WHERE account = :account"
+        ), {"account": account})
+        conn.connection.execute(_text(
+            "INSERT INTO telegram_sessions (api_id, api_hash, phone, "
+            "session_string, account, channel, strategy, created_at, updated_at) "
+            "VALUES (:api_id, :api_hash, :phone, :session_string, :account, "
+            ":channel, :strategy, :now, :now)"
+        ), {
+            "api_id": api_id, "api_hash": api_hash, "phone": phone,
+            "session_string": session_string, "account": account,
+            "channel": channel, "strategy": strategy, "now": now,
+        })
+        conn.connection.commit()
+    finally:
+        conn.close()
+
+    # Also write the session file so the existing file-based runtime works.
+    session_file = f"/data/sessions/{account}.session"
+    try:
+        _secure_mkdir(Path("/data/sessions"))
+        _secure_write(Path(session_file), session_string + "\n")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "account": account,
+        "user_id": me.id,
+        "session_file": session_file,
+    }
+
+
+@app.delete("/api/v1/admin/storage/telegram-session", tags=["Storage jobs"],
+            summary="Revoke the stored Telegram session")
+def delete_telegram_session(request: Request, _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text("DELETE FROM telegram_sessions"))
+        conn.connection.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
 
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],
          summary="Read storage jobs, stale leases and protected-media metrics")

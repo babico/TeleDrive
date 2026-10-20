@@ -369,3 +369,55 @@ $('#copyS3Credentials').onclick=async()=>{
 };
 
 refreshDashboard();setInterval(refreshDashboard,3000);
+
+// --- Telegram session management (UI-driven) -------------------------------
+let tgSessionToken = null;
+async function refreshTgSessionStatus(){
+  try{
+    const r = await api('/api/v1/admin/storage/telegram-session');
+    const el = $('#tgSessionStatus');
+    if(r.configured && r.session){
+      el.textContent = 'Authorized: ' + r.session.account + ' (api_id ' + r.session.api_id + '), channel ' + (r.session.channel||'-');
+    } else {
+      el.textContent = 'No session configured.';
+    }
+  } catch(e){ toast(e.message,true) }
+}
+
+$('#sendTgCode').onclick = async () => {
+  try {
+    const body = {
+      api_id: Number($('#tgApiId').value||0),
+      api_hash: $('#tgApiHash').value.trim(),
+      phone: $('#tgPhone').value.trim(),
+      channel: $('#tgChannel').value.trim() || null,
+      strategy: $('#storageStrategy').value
+    };
+    const r = await api('/api/v1/admin/storage/telegram-session/request-code', {method:'POST', body: JSON.stringify(body)});
+    tgSessionToken = r.token;
+    $('#tgCodeSection').style.display = 'block';
+    toast('Code sent to Telegram app');
+  } catch(e){ toast(e.message,true) }
+};
+
+$('#verifyTgCode').onclick = async () => {
+  try {
+    const body = {
+      token: tgSessionToken,
+      code: $('#tgCode').value.trim(),
+      password: $('#tgPassword').value || null
+    };
+    const r = await api('/api/v1/admin/storage/telegram-session/verify-code', {method:'POST', body: JSON.stringify(body)});
+    toast('Session saved: ' + r.account);
+    tgSessionToken = null;
+    $('#tgCodeSection').style.display = 'none';
+    $('#tgCode').value = '';
+    $('#tgPassword').value = '';
+    await refreshTgSessionStatus();
+    await loadSettings();
+  } catch(e){ toast(e.message,true) }
+};
+
+// Load session status when settings page is shown
+const _origLoadSettings = loadSettings;
+loadSettings = async function(){ await _origLoadSettings(); await refreshTgSessionStatus(); };

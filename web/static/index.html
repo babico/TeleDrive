@@ -55,14 +55,25 @@ label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.input,s
 </div>
 
 <div class="card">
-<h3>Telegram (legacy uploader)</h3>
+<h3>Telegram session (USER MTProto)</h3>
+<p class="muted">Create or replace the authorized Telegram USER session from the UI. Credentials and the session are stored in the database; no CLI or config file editing needed.</p>
 <div class="form-grid">
-<div><label>Strategy</label><select id="strategy"><option>single</option><option>round_robin</option><option>failover</option><option>parallel</option></select></div>
-<div><label>Default API ID</label><input class="input" id="apiId" type="number"></div>
-<div><label>Default API hash</label><input class="input" id="apiHash"></div>
-<div><label>Default target</label><input class="input" id="tgTarget"></div>
+<div><label>API ID</label><input class="input" id="tgApiId" type="number"></div>
+<div><label>API hash</label><input class="input" id="tgApiHash"></div>
+<div><label>Phone (with country code)</label><input class="input" id="tgPhone" placeholder="+90..."></div>
+<div><label>Channel (ID or username)</label><input class="input" id="tgChannel" placeholder="TeleDriveStorage"></div>
 </div>
-<div class="section"><div class="row"><h3 style="margin:0">Accounts</h3><button class="btn compact" id="addAccount">Add account</button></div><div id="accountEditors"></div></div>
+<div class="section row">
+<button class="btn primary compact" id="sendTgCode">Send code</button>
+<span id="tgSessionStatus" class="muted"></span>
+</div>
+<div class="section" id="tgCodeSection" style="display:none">
+<div class="form-grid">
+<div><label>Code (from Telegram app)</label><input class="input" id="tgCode"></div>
+<div><label>2FA password (optional)</label><input class="input" id="tgPassword" type="password"></div>
+</div>
+<div class="section"><button class="btn primary compact" id="verifyTgCode">Verify & save session</button></div>
+</div>
 </div>
 
 <div class="card section"><h3>Upload</h3><div class="form-grid">

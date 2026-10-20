@@ -53,6 +53,20 @@ leases = Table(
     Column("last_update_ts", BigInteger, nullable=False),
 )
 
+telegram_sessions = Table(
+    "telegram_sessions", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("api_id", BigInteger, nullable=False),
+    Column("api_hash", String(128), nullable=False),
+    Column("phone", String(64)),
+    Column("session_string", Text, nullable=False),
+    Column("account", String(128), nullable=False, server_default="mtproto-user"),
+    Column("channel", String(255)),
+    Column("strategy", String(32), server_default="round_robin"),
+    Column("created_at", BigInteger, nullable=False),
+    Column("updated_at", BigInteger, nullable=False),
+)
+
 
 class DBRow:
     def __init__(self, row: Row[Any]):

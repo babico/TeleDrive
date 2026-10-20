@@ -1220,8 +1220,8 @@ def create_telegram_channel(payload: TelegramChannelCreate, request: Request,
         ), {"name": payload.name, "channel_id": payload.channel_id,
             "strategy": strategy, "scratch_dir": payload.scratch_dir or "/data/tmp",
             "now": now})
-        conn.connection.commit()
         new_id = result.scalar()
+        conn.connection.commit()
     finally:
         conn.close()
     return {"id": new_id, "name": payload.name, "channel_id": payload.channel_id}

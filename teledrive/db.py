@@ -427,24 +427,12 @@ class Database:
         self.connection.execute(delete(files))
 
 
-def _build_engine(url: str) -> Engine:
-    """Create a new engine and run idempotent schema setup/migrations."""
-    connect_args: dict[str, Any] = {}
+# Arbitrary stable key for the PostgreSQL schema-setup advisory lock.
+_SCHEMA_LOCK_KEY = 715273001
 
-    if url.startswith("sqlite:"):
-        connect_args["timeout"] = 30
-        if url != "sqlite:///:memory:":
-            db_path = url[len("sqlite:///"):]
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
-    except (NoSuchModuleError, ModuleNotFoundError) as exc:
-        raise RuntimeError(
-            "Database dialect/driver is not installed. Install the SQLAlchemy dialect/DBAPI "
-            "required by the configured database_url."
-        ) from exc
-
+def _setup_schema(engine: Engine) -> None:
+    """create_all plus dialect-aware migrations for older databases."""
     metadata.create_all(engine)
 
     # Dialect-aware migrations for older TeleDrive databases.
@@ -474,7 +462,44 @@ def _build_engine(url: str) -> Engine:
         rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
         with engine.begin() as conn:
             conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
+
+
+def _build_engine(url: str) -> Engine:
+    """Create a new engine and run idempotent schema setup/migrations."""
+    connect_args: dict[str, Any] = {}
+
+    if url.startswith("sqlite:"):
+        connect_args["timeout"] = 30
+        if url != "sqlite:///:memory:":
+            db_path = url[len("sqlite:///"):]
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
+    except (NoSuchModuleError, ModuleNotFoundError) as exc:
+        raise RuntimeError(
+            "Database dialect/driver is not installed. Install the SQLAlchemy dialect/DBAPI "
+            "required for the configured database_url."
+        ) from exc
+
+    # Two app instances sharing one PostgreSQL database can start
+    # concurrently; create_all's checkfirst race then fails with a
+    # duplicate-table UniqueViolation (observed in the Docker
+    # fault-injection CI). A session-level advisory lock serializes
+    # schema work across every worker using this database.
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as guard:
+            guard.exec_driver_sql(
+                f"SELECT pg_advisory_lock({_SCHEMA_LOCK_KEY})")
+            try:
+                _setup_schema(engine)
+            finally:
+                guard.exec_driver_sql(
+                    f"SELECT pg_advisory_unlock({_SCHEMA_LOCK_KEY})")
+    else:
+        _setup_schema(engine)
     return engine
+
 
 
 # Bounded LRU cache of shared engines. Production uses exactly one database

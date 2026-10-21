@@ -89,7 +89,9 @@ jobs:
           ready=0
           for i in $(seq 1 45); do
             if curl -fsS -u ci:ci-only-not-a-real-secret \
-              http://127.0.0.1:18080/api/dashboard >/tmp/dashboard.json \
+              http://127.0.0.1:18080/api/v1/admin/storage/health >/tmp/health.json \
+              && curl -fsS -u ci:ci-only-not-a-real-secret \
+              http://127.0.0.1:18080/api/v1/admin/storage/telegram-sessions >/tmp/sessions.json \
               && curl -fsS http://127.0.0.1:19000/__health >/tmp/s3-health.json; then
               ready=1
               break
@@ -99,8 +101,10 @@ jobs:
           if [ "$ready" -ne 1 ]; then docker logs "$cid" | tail -60; exit 1; fi
           python - <<'PY'
           import json
-          data = json.load(open("/tmp/dashboard.json", encoding="utf-8"))
-          assert "queue" in data and "accounts" in data and "database_url" in data
+          data = json.load(open("/tmp/health.json", encoding="utf-8"))
+          assert "job_states" in data and "alerts" in data
+          sessions = json.load(open("/tmp/sessions.json", encoding="utf-8"))
+          assert "sessions" in sessions and "count" in sessions
           assert json.load(open("/tmp/s3-health.json", encoding="utf-8")) == {"ok": True}
           PY
           curl -fsS -u ci:ci-only-not-a-real-secret \

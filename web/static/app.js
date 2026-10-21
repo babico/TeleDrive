@@ -140,9 +140,7 @@ function app(){
     async logout(){
       try { await this.api('/api/auth/logout',{method:'POST'}); } catch(e){}
       localStorage.removeItem('teledrive_token');
-      this.currentUser = '';
-      this.currentRole = '';
-      this.page = 'login';
+      window.location.replace('/login');
     },
     async loadSettings(){
       try {

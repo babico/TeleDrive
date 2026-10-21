@@ -148,7 +148,11 @@ def test_single_process_listener_separation_and_health(unified):
     assert gateway.get("/__health").json()=={"ok":True}
     assert ui.get("/__health").status_code==404
     assert gateway.get("/api/health").status_code!=200
-    assert ui.get("/api/config").status_code==401
+    # Fresh client without session cookie should be unauthorized.
+    from fastapi.testclient import TestClient
+    fresh = TestClient(app, base_url="http://localhost:8080")
+    assert fresh.get("/api/config").status_code==401
+    fresh.close()
     assert gateway.get("/").status_code in (400,403)
     with pytest.raises(ValueError):
         UnifiedApplication(web_port=8080,s3_port=8080)

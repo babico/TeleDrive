@@ -174,6 +174,7 @@ tailwind.config = {
       <button class="btn btn-primary" @click="sendTgCode()">Send code</button>
       <span class="muted" x-text="tgSessionStatus"></span>
     </div>
+    <div class="text-sm text-red-400 mt-2 font-mono" x-show="tgSessionError" x-text="tgSessionError" x-cloak></div>
     <div class="mt-3 space-y-3" x-show="tgCodeVisible">
       <div class="field"><label>Code (from Telegram app)</label><input x-model="tgCode" class="input"></div>
       <div class="field"><label>2FA password (optional)</label><input x-model="tgPassword" class="input" type="password"></div>

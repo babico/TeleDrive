@@ -845,3 +845,31 @@ def test_flood_wait_status_lifecycle(authenv):
     viewer = _bearer(client, "viewuser", "viewer-password-1")
     assert client.get("/api/v1/admin/storage/telegram-session/floodwait",
                       headers=viewer).status_code == 200
+
+
+def test_telegram_error_response_maps_and_logs(authenv):
+    from telethon.errors import PhoneCodeInvalidError
+    from fastapi import HTTPException
+
+    exc = PhoneCodeInvalidError(request=None)
+    try:
+        raise web._telegram_error_response(exc, "verify-code")
+    except HTTPException as e:
+        assert e.status_code == 400
+        assert "code is invalid" in str(e.detail).lower()
+        assert "PhoneCodeInvalidError" in str(e.detail)
+
+    # The failure reason must land in the log buffer (visible on the logs
+    # page right next to the -> 400 http line).
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    r = client.get("/api/v1/logs?limit=50", headers=admin)
+    joined = " ".join(e.get("message", "") for e in r.json()["entries"])
+    assert "verify-code FAILED: PhoneCodeInvalidError" in joined
+
+    # Unknown errors fall back to the scrubbed text and are still logged.
+    try:
+        raise web._telegram_error_response(RuntimeError("boom http://x:secret@h/"), "request-code")
+    except HTTPException as e:
+        assert "RuntimeError" in str(e.detail)
+        assert "secret" not in str(e.detail)

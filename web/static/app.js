@@ -49,6 +49,7 @@ function app(){
     tgApiHash: '',
     tgPhone: '',
     tgSessionStatus: 'Not checked',
+    tgSessionError: '',
     floodActive: false,
     floodLast: null,
     floodScope: '',
@@ -157,7 +158,15 @@ function app(){
       // (credentials:'include'); no token is kept in localStorage.
       const headers = {'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})};
       const r = await fetch(url, {credentials:'include', headers, ...opt});
-      if(!r.ok) throw new Error(await r.text() || r.statusText);
+      if(!r.ok){
+        let msg = r.statusText;
+        try {
+          const b = JSON.parse(await r.text());
+          if(typeof b.detail === 'string') msg = b.detail;
+          else if(b.detail && typeof b.detail === 'object' && b.detail.message) msg = b.detail.message;
+        } catch(e){}
+        throw new Error(msg);
+      }
       return r.json();
     },
 
@@ -332,6 +341,7 @@ function app(){
     },
 
     async sendTgCode(){
+      this.tgSessionError = '';
       try {
         const body = {
           api_id: Number(this.tgApiId||0),
@@ -345,12 +355,14 @@ function app(){
         this.tgCodeVisible = true;
         this.toast('Code sent to Telegram app');
       } catch(e){
+        this.tgSessionError = e.message;
         this.toast(e.message,true);
         await this.refreshFlood();
       }
     },
 
     async verifyTgCode(){
+      this.tgSessionError = '';
       try {
         const body = { token: this.tgSessionToken, code: this.tgCode.trim(), password: this.tgPassword||null };
         const r = await this.api('/api/v1/admin/storage/telegram-session/verify-code',{method:'POST',body:JSON.stringify(body)});
@@ -361,7 +373,10 @@ function app(){
         this.tgPassword = '';
         await this.refreshTgSessionStatus();
         await this.loadSettings();
-      } catch(e){ this.toast(e.message,true); }
+      } catch(e){
+        this.tgSessionError = e.message;
+        this.toast(e.message,true);
+      }
     },
 
     async runJob(){

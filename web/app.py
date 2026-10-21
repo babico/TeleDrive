@@ -1776,6 +1776,35 @@ class TelegramSessionRequestCode(BaseModel):
     strategy: str | None = None
 
 
+def _telegram_error_response(exc: Exception, action: str) -> HTTPException:
+    """Log the exact Telegram failure reason and map known errors to hints.
+
+    The http middleware only records the status code, so the *why* behind a
+    failed request-code/verify-code must be logged here, right before the
+    http entry that shows the -> 400 line.
+    """
+    from telethon import errors as tg_errors
+    name = type(exc).__name__
+    hints = (
+        (tg_errors.SessionPasswordNeededError,
+         "Two-factor authentication is required: fill the 2FA password "
+         "field and retry"),
+        (tg_errors.PhoneCodeExpiredError,
+         "The code has expired: request a new code"),
+        (tg_errors.PhoneCodeInvalidError,
+         "The code is invalid: check the code Telegram sent and retry"),
+        (tg_errors.PhoneCodeEmptyError,
+         "The code is empty: enter the code Telegram sent"),
+        (tg_errors.PhoneNumberUnoccupiedError,
+         "No Telegram account exists for this phone number"),
+    )
+    message = next((hint for cls, hint in hints if isinstance(exc, cls)), None)
+    if message is None:
+        message = _scrub_text(str(exc)) or name
+    _log(f"{action} FAILED: {name}: {message}", "telegram-session")
+    return HTTPException(400, f"{message} [{name}]")
+
+
 def _record_flood_wait(scope: str, seconds: int, detail: str = "") -> dict:
     """Persist a Telegram FloodWait and log the full countdown picture."""
     now = int(time.time())
@@ -1894,7 +1923,7 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
             **info,
         }) from exc
     except Exception as exc:
-        raise HTTPException(400, _scrub_text(str(exc)))
+        raise _telegram_error_response(exc, "request-code") from exc
 
     # Store pending state in DB (persistent across restarts).
     conn = db_connect()
@@ -2003,7 +2032,7 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
         # A wrong code must NOT consume the pending request: the user can
         # retry with the correct code. The token ages out after 5 minutes
         # and is consumed only on success (below).
-        raise HTTPException(400, _scrub_text(str(exc)))
+        raise _telegram_error_response(exc, "verify-code") from exc
     # Success: consume the pending token.
     c3 = db_connect()
     try:

@@ -243,6 +243,29 @@ Before considering stale multipart recovery or garbage collection, inspect the a
 
 **Physical Telegram garbage collection remains disabled** until independently verified owner/alias/version/retention/backup/fencing controls and approval exist. The [P2 safety section](docs/IMPLEMENTATION_STATUS.md#41-physical-telegram-garbage-collection-disabled) describes the incomplete safeguards.
 
+### Mount TeleDrive as a drive with rclone
+
+TeleDrive's S3 listener works with [rclone](https://rclone.org) out of the box, turning the container into a mountable drive on any desktop. Create S3 credentials on the WebUI **S3** page (or via `POST /api/v1/admin/s3-credentials`), then:
+
+```ini
+# rclone config
+[teledrive]
+type = s3
+provider = Other
+access_key_id = <your S3 access key>
+secret_access_key = <your S3 secret key>
+endpoint = http://<host>:9000
+region = us-east-1
+```
+
+```bash
+rclone lsd teledrive:                      # list buckets
+rclone copy big-backup.zip teledrive:backup-bucket
+rclone mount teledrive: ~/TeleDrive --vfs-cache-mode writes &   # FUSE mount
+```
+
+Keep the endpoint on a trusted network (see `TELEDRIVE_BIND_ADDRESS`); rclone sends the S3 secret only over the connection you configure, so prefer HTTPS or a VPN for remote hosts.
+
 ## 5. Local-file upload jobs
 
 The Docker mount `./uploads:/uploads:ro` gives the service read-only access to approved source files. Use the authenticated **durable job API** to publish files into the **same REST/S3 catalog**.

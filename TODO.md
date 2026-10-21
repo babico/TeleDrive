@@ -51,21 +51,21 @@
 
 ---
 
-## 2. Phase 0 — Technical debt & S3 compatibility (IN PROGRESS)
+## 2. Phase 0 — Technical debt & S3 compatibility (COMPLETE)
 
-- [ ] Split `web/s3.py::_handle` into per-verb-family handlers
+- [x] Split `web/s3.py::_handle` into per-verb-family handlers
       (`_S3RequestContext` + `_handle_form_upload`, `_handle_batch_delete`,
       `_handle_bucket_controls`, `_handle_bucket_route`, `_handle_multipart`,
       object read/write paths). Behavior-preserving; S3 tests are the net.
-- [ ] Cache the SQLAlchemy engine + parsed config per database URL
+- [x] Cache the SQLAlchemy engine + parsed config per database URL
       (`teledrive/db.py`): skip per-request YAML parse, `create_all` and
       dialect migrations; WAL checkpoint on shared-engine close.
-- [ ] `/api/logs` returns only structured `entries` (drop `lines` duplicate).
-- [ ] Canonical `/api/v1/auth/*`, `/api/v1/config`, `/api/v1/logs` endpoints
+- [x] `/api/logs` returns only structured `entries` (drop `lines` duplicate).
+- [x] Canonical `/api/v1/auth/*`, `/api/v1/config`, `/api/v1/logs` endpoints
       with legacy paths as permanent aliases.
-- [ ] Remove the Bearer token from `localStorage`; httpOnly cookie is the only
+- [x] Remove the Bearer token from `localStorage`; httpOnly cookie is the only
       browser session mechanism.
-- [ ] **S3 read-compatibility package** (P2-C style, fail-closed): valid
+- [x] **S3 read-compatibility package** (P2-C style, fail-closed): valid
       AWS-shaped read responses for GetBucketAcl/GetObjectAcl (private canned
       ACL), OwnershipControls (`BucketOwnerEnforced`), Policy (404),
       Replication (404), Website (404), Logging (empty), Notification (empty),
@@ -78,16 +78,17 @@
 
 ## 3. Phase 1 — Quick wins (small effort, disproportionate value)
 
-- [ ] **Download button in the S3 browser** — stream object bytes through an
+- [x] **Download button in the S3 browser** — stream object bytes through an
       authenticated UI route (engine + Range support already exist).
-- [ ] **Force first-login password change** — when the admin hash still
+- [x] **Force first-login password change** — when the admin hash still
       matches the shipped default, redirect every page to a change-password
       screen.
-- [ ] **rclone first-class docs** — README section with a 10-line config
+- [x] **rclone first-class docs** — README section with a 10-line config
       against the S3 listener (mount-as-drive on any desktop).
-- [ ] **Quota usage bars on the dashboard** — used vs quota data already
+- [x] **Quota usage bars on the dashboard** — used vs quota data already
       returned by `admin_list_buckets`.
-- [ ] **Copy presigned URL button** in the S3 browser.
+- [ ] **Copy presigned URL button** in the S3 browser (moved to Phase 3:
+      belongs with signed share links, which need an owned signing path).
 
 ## 4. Phase 2 — The file manager (WebUI usable without an S3 client)
 

@@ -13,6 +13,8 @@ function app(){
     dashboard: {pending:0,failed:0,uploaded:0,strategy:'-'},
     queueRows: [],
     historyRows: [],
+    bucketUsage: [],
+    mustChangePassword: false,
 
     // Settings
     config: null,
@@ -83,8 +85,15 @@ function app(){
         const me = await this.api('/api/v1/auth/me');
         this.currentUser = me.user.username;
         this.currentRole = me.user.role;
+        this.mustChangePassword = !!me.must_change_password;
       } catch(e){
         window.location.href = '/login';
+        return;
+      }
+      // While the default admin/admin credential is still in use, every
+      // page forces the change-password screen.
+      if(this.mustChangePassword && path !== '/users'){
+        window.location.replace('/users');
         return;
       }
       if(path === '/' || path === '/dashboard' || path === '/queue'){
@@ -141,6 +150,10 @@ function app(){
       try {
         const r = await this.api('/api/v1/admin/storage/jobs?limit=100');
         this.queueRows = (r.jobs||[]).map(j => ({...j, path: j.source_path, status: j.state}));
+      } catch(e){}
+      try {
+        const r = await this.api('/api/v1/admin/storage/buckets');
+        this.bucketUsage = r.buckets||[];
       } catch(e){}
     },
 
@@ -357,6 +370,10 @@ function app(){
       } catch(e){ this.toast(e.message,true); }
     },
     fmtBytes(b){ if(b==null) return '-'; if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; if(b<1073741824) return (b/1048576).toFixed(1)+' MB'; return (b/1073741824).toFixed(2)+' GB'; },
+    quotaPct(used, max){ if(!max) return 0; return Math.min(100, Math.round(100*used/max)); },
+    downloadObject(bucket, key){
+      window.open('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key), '_blank');
+    },
     async refreshBuckets(){
       try { const r = await this.api('/api/v1/admin/storage/buckets'); this.buckets = r.buckets||[]; }
       catch(e){ this.toast(e.message,true); }

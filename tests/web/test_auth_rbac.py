@@ -63,6 +63,11 @@ def authenv(tmp_path, monkeypatch):
     monkeypatch.setattr(web, "WEB_PASSWORD", "long-secure-test-password")
     monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
     monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
+    (tmp_path / "scratch").mkdir()
+    # Fake USER-MTProto transport for the object download path.
+    from tests.web.test_rest_transfer import FakeUserTransport
+    transport = FakeUserTransport()
+    monkeypatch.setattr(web, "storage_transport", lambda db: transport)
     # Redirect hardcoded /data and /uploads paths in ensure_config.
     import pathlib as _pl
     orig_secure_mkdir = web._secure_mkdir
@@ -92,7 +97,8 @@ def authenv(tmp_path, monkeypatch):
     _seed_user(connect, "disableduser", "disabled-password-1", "viewer",
                enabled=False)
     client = TestClient(web.app, base_url="http://localhost:8080")
-    return {"client": client, "connect": connect}
+    return {"client": client, "connect": connect, "transport": transport,
+            "tmp": tmp_path}
 
 
 def _login(client, username: str, password: str):
@@ -220,6 +226,50 @@ def test_canonical_v1_paths_work_alongside_legacy_aliases(authenv):
     # Legacy aliases still resolve.
     assert client.get("/api/auth/me").status_code == 200
     assert client.get("/api/logs?limit=5").status_code == 200
+
+
+def test_must_change_password_flag(authenv):
+    client = authenv["client"]
+    connect = authenv["connect"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    # Non-default password: no force-change flag.
+    r = client.get("/api/v1/auth/me", headers=admin)
+    assert r.status_code == 200
+    assert r.json()["must_change_password"] is False
+
+    # Reset the admin account to the shipped default credential.
+    db = connect()
+    try:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "UPDATE users SET password_hash = :ph WHERE username = 'admin'"
+        ), {"ph": web._hash_password("admin")})
+        db.connection.commit()
+    finally:
+        db.close()
+    web._invalidate_default_admin_cache()
+    r = client.get("/api/v1/auth/me", headers=admin)
+    assert r.json()["must_change_password"] is True
+
+    # Non-admin users are never flagged by the admin's default password.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    r = client.get("/api/v1/auth/me", headers=viewer)
+    assert r.json()["must_change_password"] is False
+
+    # Changing the password clears the flag (cache invalidation).
+    uid = _user_id(connect, "admin")
+    r = client.put(f"/api/v1/admin/users/{uid}/password",
+                   headers={**viewer, **CSRF}, json={"password": "whatever"})
+    assert r.status_code == 403  # only admins may change passwords
+    r = client.put(f"/api/v1/admin/users/{uid}/password",
+                   headers={**admin, **CSRF},
+                   json={"password": "admin-password-2"})
+    assert r.status_code == 200
+    # The password change revoked the old session; log in again.
+    admin = _bearer(client, "admin", "admin-password-2")
+    r = client.get("/api/v1/auth/me", headers=admin)
+    assert r.json()["must_change_password"] is False
 
 
 def test_logout_revokes_cookie_session(authenv):
@@ -510,3 +560,83 @@ def test_password_verify_legacy_and_garbage():
     assert not web._verify_password("other", legacy)
     assert not web._verify_password("x", "garbage-without-separator")
     assert not web._verify_password("x", "a$b$c$d")
+
+
+# ---------------------------------------------------------------- download
+
+def _publish_object(authenv, bucket: str, key: str, payload: bytes):
+    """Stage + publish an object through the real storage engine."""
+    import asyncio
+    import os
+    import tempfile
+    from pathlib import Path
+    from teledrive.storage.engine import TelegramObjectStorage
+    from teledrive.storage.catalog import BucketCatalog
+    from teledrive.storage.manifest import ManifestStore
+    from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
+
+    db = authenv["connect"]()
+    try:
+        manifests = ManifestStore(db)
+        catalog = BucketCatalog(manifests)
+        if bucket not in catalog.list_buckets():
+            catalog.create_bucket(bucket, int(time.time()))
+        fd, staged = tempfile.mkstemp(dir=authenv["tmp"] / "scratch")
+        os.write(fd, payload)
+        os.close(fd)
+        try:
+            engine = TelegramObjectStorage(
+                manifests, authenv["transport"],
+                chunk_size=RECOMMENDED_CHUNK_SIZE,
+                scratch_directory=authenv["tmp"] / "scratch")
+            result = asyncio.run(engine.put_file(bucket, key, Path(staged)))
+            catalog.publish(result.id, now=int(time.time()))
+        finally:
+            os.unlink(staged)
+    finally:
+        db.close()
+
+
+def test_admin_download_object_streams_bytes(authenv):
+    client = authenv["client"]
+    _publish_object(authenv, "dl-bucket", "reports/file.bin", b"hello-download")
+    admin = _bearer(client, "admin", "admin-password-1")
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+
+    r = client.get("/api/v1/admin/storage/buckets/dl-bucket/content",
+                   headers=admin,
+                   params={"key": "reports/file.bin"})
+    assert r.status_code == 200, r.text
+    assert r.content == b"hello-download"
+    assert r.headers["content-disposition"] == 'attachment; filename="file.bin"'
+    assert r.headers["content-length"] == str(len(b"hello-download"))
+
+    # Range requests are honored.
+    r = client.get("/api/v1/admin/storage/buckets/dl-bucket/content",
+                   headers={**admin, "range": "bytes=0-4"},
+                   params={"key": "reports/file.bin"})
+    assert r.status_code == 206
+    assert r.content == b"hello"
+
+    # Read-only roles may download; unauthenticated may not.
+    r = client.get("/api/v1/admin/storage/buckets/dl-bucket/content",
+                   headers=viewer, params={"key": "reports/file.bin"})
+    assert r.status_code == 200
+    client.cookies.clear()
+    r = client.get("/api/v1/admin/storage/buckets/dl-bucket/content",
+                   params={"key": "reports/file.bin"})
+    assert r.status_code == 401
+
+    # Missing bucket / object / traversal-safe filename.
+    r = client.get("/api/v1/admin/storage/buckets/nope/content",
+                   headers=admin, params={"key": "x"})
+    assert r.status_code == 404
+    r = client.get("/api/v1/admin/storage/buckets/dl-bucket/content",
+                   headers=admin, params={"key": "missing.bin"})
+    assert r.status_code == 404
+    _publish_object(authenv, "dl-bucket", "weird\"name;.bin", b"x")
+    r = client.get("/api/v1/admin/storage/buckets/dl-bucket/content",
+                   headers=admin, params={"key": "weird\"name;.bin"})
+    assert r.status_code == 200
+    suggested = r.headers["content-disposition"].split('filename="')[1].rstrip('"')
+    assert '"' not in suggested and ";" not in suggested

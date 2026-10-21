@@ -322,6 +322,36 @@ def _session_token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+_DEFAULT_ADMIN_PW_CACHE: dict = {"in_use": None}
+
+
+def _default_admin_password_in_use() -> bool:
+    """True while the shipped admin/admin credential still verifies.
+
+    The PBKDF2 comparison is cached per process; every password change
+    invalidates the cache via _invalidate_default_admin_cache().
+    """
+    if _DEFAULT_ADMIN_PW_CACHE["in_use"] is None:
+        try:
+            conn = db_connect()
+            try:
+                from sqlalchemy import text as _text
+                row = conn.connection.execute(_text(
+                    "SELECT password_hash FROM users WHERE username = 'admin'"
+                )).fetchone()
+            finally:
+                conn.close()
+            _DEFAULT_ADMIN_PW_CACHE["in_use"] = bool(
+                row is not None and _verify_password("admin", row[0]))
+        except Exception:
+            _DEFAULT_ADMIN_PW_CACHE["in_use"] = False
+    return _DEFAULT_ADMIN_PW_CACHE["in_use"]
+
+
+def _invalidate_default_admin_cache() -> None:
+    _DEFAULT_ADMIN_PW_CACHE["in_use"] = None
+
+
 def _auth_throttle_check(key: str) -> None:
     """Reject authentication attempts after repeated failures (brute-force guard)."""
     now = time.time()
@@ -1164,7 +1194,13 @@ def me(request: Request):
     user = _get_current_user(request)
     if user is None:
         raise HTTPException(401, "Not authenticated")
-    return {"user": user}
+    return {
+        "user": user,
+        # The WebUI forces a password change screen while the default
+        # admin/admin credential is still in use.
+        "must_change_password": (user["username"] == "admin"
+                                 and _default_admin_password_in_use()),
+    }
 
 
 def _serve_static_page(page_name: str, request: Request):
@@ -1305,6 +1341,7 @@ def change_user_password(user_id: int, request: Request, payload: dict,
             "DELETE FROM user_sessions WHERE user_id = :uid"
         ), {"uid": user_id})
         conn.connection.commit()
+        _invalidate_default_admin_cache()
         _log(f"change password: user_id={user_id}", "users")
     finally:
         conn.close()
@@ -2188,6 +2225,61 @@ def admin_delete_object(bucket: str, request: Request,
         return {"ok": True, "unlinked": deleted}
     finally:
         conn.close()
+
+
+@app.get("/api/v1/admin/storage/buckets/{bucket}/content",
+         tags=["Object catalog"],
+         summary="Download object bytes through the WebUI session (Range supported)")
+async def admin_download_object(bucket: str, request: Request,
+                                key: str = Query(..., min_length=1, max_length=1024),
+                                _: None = Depends(require_auth)):
+    """Stream verified object bytes for the S3 browser's download button.
+
+    Session-authenticated twin of the API-key-scoped
+    GET /api/v1/buckets/{bucket}/content; any authenticated role may read.
+    """
+    conn = db_connect()
+    try:
+        manifests = ManifestStore(conn)
+        catalog = BucketCatalog(manifests)
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        try:
+            item = catalog.get(bucket, key).item
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Object not found") from exc
+        start, end, partial = _byte_range(request.headers.get("range"), item.size)
+        transport = storage_transport(conn)
+        root = Path(STORAGE_SCRATCH_DIR)
+        _secure_mkdir(root)
+        engine = TelegramObjectStorage(
+            manifests, transport, chunk_size=RECOMMENDED_CHUNK_SIZE,
+            scratch_directory=root,
+        )
+    except BaseException:
+        conn.close()
+        raise
+
+    async def stream():
+        try:
+            async for piece in engine.iter_bytes(item.id, start=start, end=end):
+                yield piece
+        finally:
+            conn.close()
+
+    # Only the final path segment becomes the suggested filename; strip
+    # everything that could break the header or traverse paths.
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "_", key.rsplit("/", 1)[-1]) or "download"
+    headers = {
+        "ETag": '"' + item.sha256 + '"',
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start),
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
+    return StreamingResponse(stream(), status_code=206 if partial else 200,
+                             media_type="application/octet-stream", headers=headers)
 
 
 class BucketQuotaRequest(BaseModel):

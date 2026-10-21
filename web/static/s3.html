@@ -126,7 +126,7 @@ tailwind.config = {
         <tbody><template x-for="o in bucketObjects" :key="o.id"><tr>
           <td x-text="o.key"></td><td x-text="fmtBytes(o.size)"></td><td class="text-xs text-gray-500" x-text="(o.sha256||'').substring(0,12)+'…'"></td>
           <td x-text="fmtTs(o.created_at)"></td>
-          <td><button class="btn btn-danger btn-sm" @click="deleteObject(currentBucket,o.key)">Delete</button></td>
+          <td class="whitespace-nowrap"><button class="btn btn-sm" @click="downloadObject(currentBucket,o.key)">Download</button> <button class="btn btn-danger btn-sm" @click="deleteObject(currentBucket,o.key)">Delete</button></td>
         </tr></template></tbody></table>
       </div>
     </div>

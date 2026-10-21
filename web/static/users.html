@@ -90,6 +90,10 @@ tailwind.config = {
 </header>
 
 <main class="flex-1 overflow-y-auto px-6 py-6">
+  <div class="card border-red-700" x-show="mustChangePassword" x-cloak>
+    <h3 class="text-red-400">Default admin password still in use</h3>
+    <p class="muted">Every page redirects here until the shipped admin/admin credential is changed. Use the Password button on the <strong>admin</strong> row below.</p>
+  </div>
   <div class="card">
     <h3>User management</h3>
     <p class="muted">Manage WebUI users, roles and permissions. Roles: admin (full access), operator (storage/jobs/logs), viewer (read-only).</p>

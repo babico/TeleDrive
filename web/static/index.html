@@ -105,6 +105,27 @@ tailwind.config = {
       <button class="btn" @click="refreshDashboard()">Refresh</button>
     </div>
   </div>
+  <div class="card" x-show="bucketUsage.length">
+    <h3>Storage usage</h3>
+    <div class="space-y-3 mt-3">
+      <template x-for="b in bucketUsage" :key="b.name">
+        <div>
+          <div class="flex justify-between text-sm">
+            <span x-text="b.name"></span>
+            <span class="muted" x-text="fmtBytes(b.total_size) + (b.quota && b.quota.max_size_bytes ? ' / ' + fmtBytes(b.quota.max_size_bytes) : '')"></span>
+          </div>
+          <div class="w-full bg-gray-800 rounded-full h-2 mt-1">
+            <div class="h-2 rounded-full" :class="quotaPct(b.total_size, b.quota && b.quota.max_size_bytes) >= 90 ? 'bg-red-500' : 'bg-brand-600'"
+                 :style="'width:' + quotaPct(b.total_size, b.quota && b.quota.max_size_bytes) + '%'"></div>
+          </div>
+          <div class="flex justify-between text-xs muted mt-0.5">
+            <span x-text="b.object_count + ' objects'"></span>
+            <span x-show="b.quota && b.quota.max_objects" x-text="b.quota.max_objects + ' max'"></span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
 </section>
 </main>
 </div>

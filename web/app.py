@@ -2957,6 +2957,119 @@ def admin_set_quota(bucket: str, payload: BucketQuotaRequest, request: Request,
         conn.close()
     return {"ok": True}
 
+def _prom_escape(value: str) -> str:
+    return (str(value).replace("\\", "\\\\")
+            .replace('"', '\\"').replace("\n", "\\n"))
+
+
+@app.get("/api/v1/metrics", tags=["Observability"],
+         summary="Prometheus metrics: jobs, quotas, Telegram sessions, floods")
+def prometheus_metrics(_: None = Depends(require_auth)):
+    """Text exposition format 0.0.4; scrape with HTTP auth like any API route."""
+    from sqlalchemy import text as _text, func, select
+
+    lines: list[str] = [
+        "# HELP teledrive_up Service is running and answering.",
+        "# TYPE teledrive_up gauge",
+        "teledrive_up 1",
+    ]
+    conn = db_connect()
+    try:
+        try:
+            counts = conn.connection.execute(
+                select(storage_job_rows.c.state, func.count())
+                .group_by(storage_job_rows.c.state)).all()
+        except Exception:
+            counts = []
+        if counts:
+            lines += ["# HELP teledrive_storage_jobs Upload jobs by state.",
+                      "# TYPE teledrive_storage_jobs gauge"]
+            for state, count in counts:
+                lines.append('teledrive_storage_jobs{state="%s"} %d'
+                             % (_prom_escape(state), int(count)))
+
+        quotas = conn.connection.execute(_text(
+            "SELECT bucket, max_size_bytes, max_objects FROM bucket_quotas"
+        )).fetchall()
+        if quotas:
+            lines += ["# HELP teledrive_quota_limit_bytes Bucket size quota.",
+                      "# TYPE teledrive_quota_limit_bytes gauge",
+                      "# HELP teledrive_quota_limit_objects Bucket object-count quota.",
+                      "# TYPE teledrive_quota_limit_objects gauge",
+                      "# HELP teledrive_quota_used_bytes Current bucket size.",
+                      "# TYPE teledrive_quota_used_bytes gauge",
+                      "# HELP teledrive_quota_used_objects Current bucket objects.",
+                      "# TYPE teledrive_quota_used_objects gauge"]
+        for bucket, max_size, max_objects in quotas:
+            label = 'bucket="%s"' % _prom_escape(bucket)
+            if max_size is not None:
+                lines.append("teledrive_quota_limit_bytes{%s} %d"
+                             % (label, int(max_size)))
+            if max_objects is not None:
+                lines.append("teledrive_quota_limit_objects{%s} %d"
+                             % (label, int(max_objects)))
+            try:
+                used_count, used_size = _bucket_current_usage(
+                    conn, str(bucket))
+                lines.append("teledrive_quota_used_bytes{%s} %d"
+                             % (label, used_size))
+                lines.append("teledrive_quota_used_objects{%s} %d"
+                             % (label, used_count))
+            except Exception:
+                pass  # catalog tables live in another database
+
+        sessions = conn.connection.execute(_text(
+            "SELECT account, authorized FROM telegram_sessions")).fetchall()
+        if sessions:
+            lines += [
+                "# HELP teledrive_telegram_session_authorized "
+                "1 = authorized, 0 = expired/revoked.",
+                "# TYPE teledrive_telegram_session_authorized gauge",
+            ]
+        for account, authorized in sessions:
+            label = 'account="%s"' % _prom_escape(account)
+            if authorized is not None:
+                lines.append("teledrive_telegram_session_authorized{%s} %d"
+                             % (label, int(authorized)))
+
+        # Rate-guard tables live in the storage catalog; degrade quietly
+        # when this deployment's web database does not carry them.
+        try:
+            floods = conn.connection.execute(_text(
+                "SELECT account, COALESCE(SUM(observations), 0) FROM "
+                "storage_mtproto_flood_observations GROUP BY account")).fetchall()
+            if floods:
+                lines += ["# HELP teledrive_flood_observations_total "
+                          "Observed Telegram flood-waits per account.",
+                          "# TYPE teledrive_flood_observations_total counter"]
+                for account, obs in floods:
+                    lines.append('teledrive_flood_observations_total'
+                                 '{account="%s"} %d'
+                                 % (_prom_escape(account), int(obs)))
+        except Exception:
+            pass
+        now_ms = int(time.time() * 1000)
+        try:
+            cooldowns = conn.connection.execute(_text(
+                "SELECT account, MAX(cooldown_until_ms) FROM "
+                "storage_mtproto_chat_cooldowns GROUP BY account")).fetchall()
+            if cooldowns:
+                lines += ["# HELP teledrive_flood_cooldown_remaining_seconds "
+                          "Active shared flood cooldown per account.",
+                          "# TYPE teledrive_flood_cooldown_remaining_seconds gauge"]
+                for account, until in cooldowns:
+                    lines.append('teledrive_flood_cooldown_remaining_seconds'
+                                 '{account="%s"} %d'
+                                 % (_prom_escape(account),
+                                    max(0, (int(until or 0) - now_ms) // 1000)))
+        except Exception:
+            pass
+    finally:
+        conn.close()
+    return Response(content="\n".join(lines) + "\n",
+                    media_type="text/plain; charset=utf-8")
+
+
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],
          summary="Read storage jobs, stale leases and protected-media metrics")
 def storage_operations_health(_: None = Depends(require_auth)):

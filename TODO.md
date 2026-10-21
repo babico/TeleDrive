@@ -110,7 +110,10 @@
       count and optional password; rate-limited public route.
 - [ ] Usage & health analytics: per-bucket/channel usage over time, daily
       upload volume, FloodWait-risk indicator, quota history charts.
-- [ ] Prometheus `/metrics` endpoint (job states, quota usage, floods).
+- [x] Prometheus `/metrics` endpoint (done: `GET /api/v1/metrics`,
+      text exposition format — job states, bucket quotas+usage, Telegram
+      session health, flood observations and live cooldowns; scrape with
+      the same HTTP auth as any API route).
 - [ ] WebSocket live logs and live job progress (replace polling).
 - [ ] Two-person approval for destructive actions (owner gate #4).
 - [ ] UploadPartCopy (S3 P2-E): server-side part copy for efficient

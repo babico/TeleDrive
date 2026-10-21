@@ -1063,3 +1063,62 @@ def test_telegram_session_health_check(authenv):
     r = client.get("/api/v1/logs?limit=50", headers=admin)
     joined = " ".join(e.get("message", "") for e in r.json()["entries"])
     assert "user-4004 UNAUTHORIZED" in joined
+
+
+def test_prometheus_metrics(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    db = authenv["connect"]()
+    try:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "CREATE TABLE storage_upload_jobs (id VARCHAR(36) PRIMARY KEY, "
+            "bucket VARCHAR(63), object_key TEXT, source_path TEXT, "
+            "source_size BIGINT, source_device BIGINT, source_inode BIGINT, "
+            "source_mtime_ns BIGINT, expected_generation BIGINT, "
+            "expected_head_id VARCHAR(36), state VARCHAR(16), "
+            "object_id VARCHAR(36), attempts INTEGER, lease_token VARCHAR(80), "
+            "lease_until BIGINT)"))
+        db.connection.execute(_text(
+            "INSERT INTO storage_upload_jobs (id, bucket, object_key, "
+            "source_path, source_size, source_device, source_inode, "
+            "source_mtime_ns, expected_generation, state, attempts) VALUES "
+            "('j1','b','k','p',1,0,0,0,1,'queued',0),"
+            "('j2','b','k2','p2',1,0,0,0,1,'queued',0),"
+            "('j3','b','k3','p3',1,0,0,0,1,'failed',0)"))
+        db.connection.commit()
+    finally:
+        db.close()
+
+    r = client.get("/api/v1/metrics", headers=admin)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    body = r.text
+    assert "teledrive_up 1" in body
+    assert "# TYPE teledrive_storage_jobs gauge" in body
+    assert 'teledrive_storage_jobs{state="queued"} 2' in body
+    assert 'teledrive_storage_jobs{state="failed"} 1' in body
+
+    # Anonymous access is rejected (fail-closed); drop the login
+    # cookie the bearer helper left on this client first.
+    client.cookies.clear()
+    assert client.get("/api/v1/metrics").status_code == 401
+
+    # Viewer role may scrape.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.get("/api/v1/metrics", headers=viewer).status_code == 200
+
+    # Sessions appear with their health verdict; label values are escaped.
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, 'weird"account')
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "UPDATE telegram_sessions SET authorized = 1 "
+            "WHERE account = 'weird\"account'"))
+        db.connection.commit()
+    finally:
+        db.close()
+    body = client.get("/api/v1/metrics", headers=admin).text
+    assert 'teledrive_telegram_session_authorized{account="weird\\"account"}' in body

@@ -192,7 +192,55 @@ come from simply authorizing more accounts.
 - [ ] **Authorize physical GC** only after ALL gates pass; `deletion_permitted`
       stays False; no Telegram media has been deleted.
 
-## 10. Release decision rules
+## 10. UI/UX & infrastructure overhaul — user feedback round (2026-10-21)
+
+### Done
+- [x] Docker: migrated from rootless to the system daemon (down without
+      sudo, up with sudo), PUID/PGID=1000 so the uid owns ./config and
+      ./data (cap_drop:ALL removes CAP_DAC_OVERRIDE — root cannot read
+      a 600 file it does not own).
+- [x] Docker: joined the machine-local `local-bridge` network via the
+      gitignored docker-compose.override.yml (redis reachable,
+      PING → +PONG verified from inside the container). The override
+      file is intentionally NOT in git — machine-specific.
+- [x] docker-compose.yml audited and rewritten: every key justified in
+      one line, NEW stop_grace_period: 30s (Telethon disconnect + WAL
+      checkpoint need more than the default 10s).
+
+### Open — ordered by priority
+- [ ] S3 request logging bug: S3-port traffic (even failed browser/S3
+      client connection attempts) never reaches the logs page. The S3
+      ASGI app has no logging middleware — add one that mirrors the web
+      http log format (redacted, throttled).
+- [ ] Route/page restructure with nested paths: /settings/general,
+      /settings/telegram (today's /storage, renamed Telegram),
+      /s3/credentials, /s3/buckets. Old paths (/settings, /storage, /s3)
+      redirect for compatibility. Nav gains sub-menus everywhere.
+- [ ] S3 SSL from scratch, two deployment modes:
+      a) direct TLS on the S3 listener (env-provided cert/key, or
+         auto-generated self-signed for LAN use), verified with
+         openssl/curl before deploy;
+      b) behind a reverse proxy: proxy terminates TLS, service stays
+         plain HTTP — handle X-Forwarded-* / Host preservation for
+         SigV4 verification and correct https endpoint URLs in the UI.
+- [ ] Checkboxes do not match the dark theme — style them
+      (accent-color + dark scheme) consistently on every page.
+- [ ] S3 + API permission UI modernization: replace the current
+      permission-granting controls; add viewing existing S3 credential
+      SECRETS and editing access keys.
+- [ ] S3 sub-menu: bucket browser moves under the S3 menu
+      (/s3/buckets), detailed and verified end to end.
+- [ ] API management page: link the API docs references (OpenAPI
+      /docs, /redoc, S3 compat matrix).
+- [ ] Dashboard enrichment: more detail (per-account usage, quota
+      bars, job throughput, session health at a glance).
+- [ ] CI overhaul: fresh naming scheme, one consistent convention,
+      renumbered workflows (meta tests updated accordingly).
+- [ ] Menu-wide consistency: list add/delete flows must work the same
+      way on every page (same confirm patterns, same buttons, same
+      feedback), not per-page variations.
+
+## 11. Release decision rules
 
 - [ ] Any new release candidate requires all mandatory checks green on that
       exact SHA; previous green commits cannot be reused as proof.

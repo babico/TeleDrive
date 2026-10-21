@@ -18,9 +18,9 @@ tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600
   .card{background:#111827;border:1px solid #1f2937;border-radius:16px;padding:32px}
 </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen flex items-center justify-center" x-data="app()" x-init="initLogin()">
+<body class="bg-gray-950 text-gray-100 min-h-screen flex items-center justify-center">
 
-<div class="w-full max-w-sm">
+<div class="w-full max-w-sm" x-data="app()">
   <div class="text-center mb-8">
     <div class="w-14 h-14 rounded-2xl bg-brand-600 flex items-center justify-center font-bold text-2xl mx-auto mb-4">T</div>
     <h1 class="text-2xl font-bold">TeleDrive</h1>
@@ -37,19 +37,9 @@ tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600
     </div>
     <button class="btn w-full justify-center" @click="login()">Sign in</button>
     <p x-show="loginError" class="text-red-400 text-sm mt-3 text-center" x-text="loginError"></p>
-    <p class="text-xs text-gray-500 mt-4 text-center">Default: admin / admin (change after first login)</p>
+    <p class="text-xs text-gray-500 mt-4 text-center">Default: admin / admin</p>
   </div>
 </div>
 
 <script src="/static/app.js"></script>
-<script>
-function initLogin(){
-  // Check if already logged in (via cookie or token)
-  const token = localStorage.getItem('teledrive_token');
-  const headers = token ? {'Authorization':'Bearer '+token} : {};
-  fetch('/api/auth/me', {credentials:'include', headers}).then(r=>{
-    if(r.ok) window.location.href = '/';
-  }).catch(()=>{});
-}
-</script>
 </body></html>

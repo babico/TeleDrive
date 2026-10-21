@@ -1,28 +1,15 @@
 function app(){
   return {
     // State
-    page: 'dashboard',
-    tabs: [
-      {id:'dashboard',label:'Dashboard'},
-      {id:'queue',label:'Queue'},
-      {id:'history',label:'History'},
-      {id:'storage',label:'Storage'},
-      {id:'settings',label:'Settings'},
-      {id:'api-management',label:'API Management'},
-      {id:'s3',label:'S3'},
-      {id:'logs',label:'Logs'},{id:'users',label:'Users'}
-    ],
     toastMsg: '',
     toastBad: false,
-    authPrompt: null,
-    authValue: '',
     currentUser: '',
     currentRole: '',
     loginUsername: '',
     loginPassword: '',
     loginError: '',
 
-    // Dashboard
+    // Dashboard / queue / history
     dashboard: {pending:0,failed:0,uploaded:0,strategy:'-'},
     queueRows: [],
     historyRows: [],
@@ -66,6 +53,11 @@ function app(){
     // Logs
     logEntries: [],
     logLive: false,
+    _logTimer: null,
+    logFilter: '',
+    logLimit: 1000,
+
+    // Buckets
     buckets: [],
     currentBucket: null,
     bucketObjects: [],
@@ -74,31 +66,45 @@ function app(){
     quotaEditBucket: null,
     quotaMaxSize: '',
     quotaMaxObjects: '',
-    _logTimer: null,
+
+    // Users
     users: [],
     showNewUser: false,
     newUser: {username:'', password:'', role:'viewer'},
-    logLive: false,
-    _logTimer: null,
-    logFilter: '',
-    logLimit: 1000,
+
+    // Role helpers
+    get isAdmin(){ return this.currentRole === 'admin'; },
+    get canWrite(){ return this.currentRole === 'admin' || this.currentRole === 'operator'; },
 
     async init(){
-      const path = window.location.pathname.replace(/^\/+/, '').replace(/\.html$/, '') || 'dashboard';
-      this.page = path === '' ? 'dashboard' : path;
-      // Check auth
-      if(this.page === 'login') return;
-      const token = localStorage.getItem('teledrive_token');
-      try { const me = await this.api('/api/auth/me'); this.currentUser = me.user.username; this.currentRole = me.user.role; if(!token && me.user) localStorage.setItem('teledrive_token', 'cookie'); }
-      catch(e){ localStorage.removeItem('teledrive_token'); window.location.href = '/login'; return; }
-      await this.loadSettings();
-      await this.refreshChannels();
-      await this.refreshTgSessionStatus();
-      await this.loadUsers();
-      await this.refreshBuckets();
-      await this.refreshDashboard();
-      setInterval(()=>this.refreshDashboard(), 30000);
-      this.$watch('page', (v) => { if(v !== 'logs' && this.logLive) this.toggleLogLive(); });
+      const path = window.location.pathname.replace(/\/+$/, '') || '/';
+      if(path === '/login') return;
+      try {
+        const me = await this.api('/api/auth/me');
+        this.currentUser = me.user.username;
+        this.currentRole = me.user.role;
+      } catch(e){
+        localStorage.removeItem('teledrive_token');
+        window.location.href = '/login';
+        return;
+      }
+      if(path === '/' || path === '/dashboard' || path === '/queue'){
+        await this.refreshDashboard();
+        setInterval(()=>this.refreshDashboard(), 30000);
+      } else if(path === '/storage' || path === '/settings'){
+        await this.loadSettings();
+      } else if(path === '/s3'){
+        await this.refreshBuckets();
+        await this.refreshS3Keys();
+      } else if(path === '/users'){
+        await this.loadUsers();
+      } else if(path === '/logs'){
+        await this.loadLogs();
+      } else if(path === '/api-management'){
+        await this.refreshKeys();
+      } else if(path === '/history'){
+        await this.refreshHistory();
+      }
     },
 
     toast(msg, bad=false){
@@ -117,17 +123,41 @@ function app(){
     },
 
     fmtTs(v){ if(!v) return '-'; return new Date(v*1000).toLocaleString(); },
-    esc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); },
 
     async refreshDashboard(){
       try {
         const r = await this.api('/api/v1/admin/storage/health');
-        this.dashboard = {pending: r.pending||0, failed: r.failed||0, uploaded: r.uploaded||0, strategy: r.strategy||'-'};
+        const s = r.job_states||{};
+        this.dashboard = {
+          pending: (s.queued||0)+(s.running||0)+(s.staged||0)+(s.publishing||0),
+          failed: s.failed||0,
+          uploaded: s.done||s.completed||0,
+          strategy: this.dashboard.strategy
+        };
+      } catch(e){}
+      try {
+        const a = await this.api('/api/v1/admin/storage/active-channel');
+        this.dashboard.strategy = (a.active && a.active.strategy) || '-';
       } catch(e){}
       try {
         const r = await this.api('/api/v1/admin/storage/jobs?limit=100');
-        this.queueRows = r.jobs || [];
+        this.queueRows = (r.jobs||[]).map(j => ({...j, path: j.source_path, status: j.state}));
       } catch(e){}
+    },
+
+    async refreshHistory(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/jobs?limit=100');
+        const terminal = ['done','completed','failed','cancelled'];
+        this.historyRows = (r.jobs||[])
+          .filter(j => terminal.includes(j.state))
+          .map(j => ({
+            path: j.source_path,
+            tg_account: j.account||'-',
+            tg_message_id: j.object_id||'-',
+            uploaded_ts: j.updated_at
+          }));
+      } catch(e){ this.toast(e.message,true); }
     },
 
     async login(){
@@ -189,7 +219,6 @@ function app(){
         delete c.state.db_path;
         await this.api('/api/config',{method:'PUT',body:JSON.stringify(c)});
         this.toast('Settings saved');
-        await this.refreshDashboard();
       } catch(e){ this.toast(e.message,true); }
     },
 
@@ -269,14 +298,6 @@ function app(){
     async runJob(){
       try { await this.api('/api/v1/admin/storage/jobs/run-next',{method:'POST'}); this.toast('Job triggered'); await this.refreshDashboard(); }
       catch(e){ this.toast(e.message,true); }
-    },
-
-    async submitAuth(){
-      if(!this.authPrompt) return;
-      try {
-        await this.api('/api/auth',{method:'POST',body:JSON.stringify({account:this.authPrompt.account,kind:this.authPrompt.kind,value:this.authValue})});
-        this.authValue=''; this.toast('Auth value submitted');
-      } catch(e){ this.toast(e.message,true); }
     },
 
     async refreshKeys(){

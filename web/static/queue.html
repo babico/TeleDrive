@@ -55,16 +55,11 @@ tailwind.config = {
   h4{font-size:13px;font-weight:600;color:#9ca3af;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.05em}
 </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()" x-init="init()">
-
-<div id="authPrompt" class="prompt hidden fixed top-4 left-1/2 -translate-x-1/2 w-full max-w-lg bg-amber-900/80 border border-amber-700 p-4 rounded-xl z-40" :class="authPrompt?'show':''" x-show="authPrompt">
-  <b x-text="authPrompt?authPrompt.kind+' for '+authPrompt.account:''"></b>
-  <div class="row mt-2"><input x-model="authValue" class="input" autocomplete="one-time-code" placeholder="Enter code or password"><button class="btn btn-primary btn-sm" @click="submitAuth()">Submit</button></div>
-</div>
+<body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()">
 
 <div id="toast" class="toast" :class="toastBad?'bad':'good'" x-show="toastMsg" x-text="toastMsg" x-transition></div>
 
-<div class="flex h-screen overflow-hidden">
+<div class="flex h-screen overflow-hidden" x-cloak>
 <aside class="w-56 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
   <div class="px-4 py-4 border-b border-gray-800 flex items-center gap-2">
     <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-sm">T</div>
@@ -88,8 +83,10 @@ tailwind.config = {
 <header class="h-14 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
   <div class="text-sm text-gray-400">Queue</div>
   <div class="flex items-center gap-3">
-    <span class="text-sm text-gray-300" x-text="currentUser||'admin'"></span>
+    <span class="text-sm text-gray-300" x-text="currentUser||''"></span>
+    <span class="text-xs text-gray-500" x-text="currentRole"></span>
     <div class="w-8 h-8 rounded-full bg-brand-700 flex items-center justify-center text-xs font-bold" x-text="(currentUser||'A').charAt(0).toUpperCase()"></div>
+    <button class="btn btn-sm btn-ghost" @click="logout()">Logout</button>
   </div>
 </header>
 

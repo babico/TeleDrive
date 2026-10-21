@@ -55,16 +55,11 @@ tailwind.config = {
   h4{font-size:13px;font-weight:600;color:#9ca3af;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.05em}
 </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()" x-init="init()">
-
-<div id="authPrompt" class="prompt hidden fixed top-4 left-1/2 -translate-x-1/2 w-full max-w-lg bg-amber-900/80 border border-amber-700 p-4 rounded-xl z-40" :class="authPrompt?'show':''" x-show="authPrompt">
-  <b x-text="authPrompt?authPrompt.kind+' for '+authPrompt.account:''"></b>
-  <div class="row mt-2"><input x-model="authValue" class="input" autocomplete="one-time-code" placeholder="Enter code or password"><button class="btn btn-primary btn-sm" @click="submitAuth()">Submit</button></div>
-</div>
+<body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()">
 
 <div id="toast" class="toast" :class="toastBad?'bad':'good'" x-show="toastMsg" x-text="toastMsg" x-transition></div>
 
-<div class="flex h-screen overflow-hidden">
+<div class="flex h-screen overflow-hidden" x-cloak>
 <aside class="w-56 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
   <div class="px-4 py-4 border-b border-gray-800 flex items-center gap-2">
     <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-sm">T</div>
@@ -88,8 +83,10 @@ tailwind.config = {
 <header class="h-14 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
   <div class="text-sm text-gray-400">Storage</div>
   <div class="flex items-center gap-3">
-    <span class="text-sm text-gray-300" x-text="currentUser||'admin'"></span>
+    <span class="text-sm text-gray-300" x-text="currentUser||''"></span>
+    <span class="text-xs text-gray-500" x-text="currentRole"></span>
     <div class="w-8 h-8 rounded-full bg-brand-700 flex items-center justify-center text-xs font-bold" x-text="(currentUser||'A').charAt(0).toUpperCase()"></div>
+    <button class="btn btn-sm btn-ghost" @click="logout()">Logout</button>
   </div>
 </header>
 
@@ -97,9 +94,9 @@ tailwind.config = {
 <section class="space-y-4">
 <div class="card">
     <h3>Channels</h3>
-    <p class="muted">Birden fazla kanal ekle. Aktif kanal seç; yazma işlemleri aktif kanala gider.</p>
+    <p class="muted">Add multiple channels. Pick the active channel; write operations go to the active channel.</p>
     <div class="row mt-3">
-      <button class="btn btn-primary btn-sm" @click="showAddChannel=!showAddChannel">Add channel</button>
+      <button class="btn btn-primary btn-sm" x-show="canWrite" @click="showAddChannel=!showAddChannel">Add channel</button>
       <span class="muted" x-text="activeChannelLabel"></span>
     </div>
     <div class="mt-3 space-y-2" x-show="showAddChannel">
@@ -122,18 +119,19 @@ tailwind.config = {
           <div><strong x-text="ch.name"></strong> <span class="muted" x-text="ch.channel_id"></span>
             <span x-show="ch.is_active" class="badge badge-green ml-2">active</span></div>
           <div class="flex gap-2">
-            <button x-show="!ch.is_active" class="btn btn-sm" @click="activateChannel(ch.id)">Activate</button>
-            <button class="btn btn-danger btn-sm" @click="deleteChannel(ch.id)">Remove</button>
+            <button x-show="canWrite && !ch.is_active" class="btn btn-sm" @click="activateChannel(ch.id)">Activate</button>
+            <button x-show="canWrite" class="btn btn-danger btn-sm" @click="deleteChannel(ch.id)">Remove</button>
           </div>
         </div>
       </template>
     </div>
   </div>
 
+  <template x-if="config">
   <div class="card">
     <h3>Active channel settings</h3>
     <div class="field"><label>Active channel</label>
-      <select x-model="activeChannelId" class="input" @change="activateChannel(activeChannelId)">
+      <select x-model="activeChannelId" class="input" :disabled="!canWrite" @change="activateChannel(activeChannelId)">
         <template x-for="ch in channels" :key="ch.id">
           <option :value="ch.id" x-text="ch.name + ' (' + ch.channel_id + ')'"></option>
         </template>
@@ -147,10 +145,11 @@ tailwind.config = {
     </div>
     <div class="field"><label>Scratch directory</label><input x-model="config.storage.scratch_dir" class="input"></div>
   </div>
+  </template>
 
   <div class="card">
     <h3>Telegram session (USER MTProto)</h3>
-    <p class="muted">API credential ve session. DB'ye kaydedilir; config dosyası gerekmez.</p>
+    <p class="muted">API credentials and session. Stored in the database; no config file needed.</p>
     <div class="field"><label>API ID</label><input x-model="tgApiId" class="input" type="number"></div>
     <div class="field"><label>API hash</label><input x-model="tgApiHash" class="input"></div>
     <div class="field"><label>Phone (with country code)</label><input x-model="tgPhone" class="input" placeholder="+90..."></div>

@@ -7,7 +7,10 @@
 <script src="/static/vendor/tailwindcss.js"></script>
 <script defer src="/static/vendor/alpine.min.js"></script>
 <script>
-tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600:'#4f46e5',700:'#4338ca' } } } } }
+tailwind.config = {
+  darkMode: 'class',
+  theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' } } } }
+}
 </script>
 <style>
   [x-cloak]{display:none!important}
@@ -20,7 +23,7 @@ tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen flex items-center justify-center">
 
-<div class="w-full max-w-sm" x-data="app()">
+<div class="w-full max-w-sm" x-data="app()" x-cloak>
   <div class="text-center mb-8">
     <div class="w-14 h-14 rounded-2xl bg-brand-600 flex items-center justify-center font-bold text-2xl mx-auto mb-4">T</div>
     <h1 class="text-2xl font-bold">TeleDrive</h1>
@@ -37,7 +40,6 @@ tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600
     </div>
     <button class="btn w-full justify-center" @click="login()">Sign in</button>
     <p x-show="loginError" class="text-red-400 text-sm mt-3 text-center" x-text="loginError"></p>
-    <p class="text-xs text-gray-500 mt-4 text-center">Default: admin / admin</p>
   </div>
 </div>
 

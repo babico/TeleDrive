@@ -875,7 +875,7 @@ def test_telegram_error_response_maps_and_logs(authenv):
         assert "secret" not in str(e.detail)
 
 
-def test_pending_session_string_migration_and_legacy_row(authenv):
+def test_pending_session_string_migration_and_legacy_row(authenv, tmp_path):
     """The login-flow fix: pending rows must carry the requesting session.
 
     1) Old rows without session_string get a clean 410 instead of a
@@ -918,8 +918,10 @@ def test_pending_session_string_migration_and_legacy_row(authenv):
     # Dialect-aware migration: an old-schema database gains the column.
     import sqlalchemy as sa
     import teledrive.db as tdb
-    with sa.create_engine(
-            f"sqlite:////tmp/opencode/old_schema_test.db").connect() as oc:
+    db_file = tmp_path / "old_schema.db"
+    url = f"sqlite:///{db_file}"
+    eng0 = sa.create_engine(url)
+    with eng0.connect() as oc:
         oc.exec_driver_sql(
             "CREATE TABLE telegram_session_pending (token VARCHAR(64) "
             "PRIMARY KEY, api_id BIGINT NOT NULL, api_hash VARCHAR(128) "
@@ -927,7 +929,8 @@ def test_pending_session_string_migration_and_legacy_row(authenv):
             "VARCHAR(255), channel VARCHAR(255), strategy VARCHAR(32) "
             "DEFAULT 'round_robin', created_at BIGINT NOT NULL)")
         oc.commit()
-    eng = tdb._build_engine("sqlite:////tmp/opencode/old_schema_test.db")
+    eng0.dispose()
+    eng = tdb._build_engine(url)
     cols = {c["name"] for c in sa.inspect(eng).get_columns(
         "telegram_session_pending")}
     eng.dispose()

@@ -1,6 +1,6 @@
 # S3 API Specifications and Compatibility Matrix
 
-> **Scope:** TeleDrive's S3-compatible listener over the shared SQL catalog and USER MTProto engine with historical same-channel Bot-media reads only, **not** AWS S3. **Last reviewed:** 2026-10-15 against the development default branch. **Target:** P2 Advanced S3 planning; this document does not assert production certification or update the released v1.0.7 binary.
+> **Scope:** TeleDrive's S3-compatible listener over the shared SQL catalog and USER MTProto engine with historical same-channel Bot-media reads only, **not** AWS S3. **Last reviewed:** 2026-10-21 against the development default branch. **Target:** P2 Advanced S3 planning; this document does not assert production certification or update the released v1.0.7 binary.
 >
 > **Canonical operation inventory:** [AWS S3 REST API, 2006-03-01, operation list](https://docs.aws.amazon.com/AmazonS3/latest/API/API_Operations_Amazon_Simple_Storage_Service.html). This matrix enumerates **all 116 operations** on that AWS S3 service-reference page as reviewed. AWS S3 Control, S3 Tables, S3 on Outposts, S3 Files and future additions are **separate services**, not silently included in this list. This is a protocol/API coverage inventory, not a claim to implement every possible request parameter, header, mode or AWS service.
 
@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 11 supported, 27 partial, 78 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 11 supported, 42 partial, 63 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -28,7 +28,7 @@
 | Signature variants | Query presigns with expiry **1–604,800 seconds**, limited methods and stricter checksum-bound PUT/multipart POST rules. SigV2, STS/session tokens and aws-chunked streaming are not implemented. | [SigV4 code](../teledrive/s3/sigv4.py), [presigned tests](../tests/s3/test_s3_presigned.py), [multipart presigns](../tests/s3/test_s3_presigned_complete.py) |
 | Browser POST | Restricted SigV4 policy forms; checksum-pinned, maximum **20 MiB form** and policy expiry within **15 minutes**; not arbitrary AWS POST policy clauses. | [POST policy](../teledrive/s3/post_policy.py), [POST tests](../tests/s3/test_s3_post_policy.py) |
 | Addressing/regions | Path-style endpoint is the documented client default; limited configured virtual-host addressing exists. Bucket location reports us-east-1-compatible empty constraint. ListBuckets supports paginated bucket inventory scoped to this private us-east-1 region, with immutable SQL CreationDate. No AWS multi-region, Access Point ARN or directory-bucket routing. | [gateway](../web/s3.py), [virtual-host tests](../tests/s3/test_s3_vhost.py), [location tests](../tests/s3/test_s3_bucket_location.py) |
-| Object payloads | PUT/GET/HEAD with immutable manifest, Telegram USER MTProto chunks (historic Bot chunks can be read by original message ID in the same user-authorized channel), SHA-256 integrity and byte-range GET. Default REST/S3 single-transfer upload ceiling is **2 GiB**, configurable via TELEDRIVE_REST_MAX_UPLOAD_BYTES; actual deploy/Telegram limits apply. | [gateway](../web/s3.py), [storage tests](../tests/storage/test_storage_engine.py) |
+| Object payloads | PUT/GET/HEAD with immutable manifest, Telegram USER MTProto chunks (historic Bot chunks can be read by original message ID in the same user-authorized channel), SHA-256 integrity and byte-range GET. Default REST/S3 single-transfer upload ceiling is **2 GiB**, configurable via `web.rest_max_upload_bytes` in `config/config.yaml`; actual deploy/Telegram limits apply. | [gateway](../web/s3.py), [storage tests](../tests/storage/test_storage_engine.py) |
 | ETag | TeleDrive single PUT returns a SHA-256-derived ETag; multipart has its own ETag representation. **Never assume AWS single-part MD5 ETag equality.** | [gateway](../web/s3.py), [multipart](../teledrive/s3/multipart.py), [contract tests](../tests/s3/test_s3_contract.py) |
 | Checksums on upload | Integrity validation for signed SHA-256, SHA-1, Content-MD5, CRC32, CRC32C and CRC64NVME on implemented PUT/UploadPart paths. When `x-amz-checksum-mode: ENABLED` is supplied for an object GET/HEAD, return the actual immutable full-object SHA-256 checksum; GetObjectAttributes can expose the same digest as `ChecksumSHA256` with `FULL_OBJECT` semantics. **Not** a guarantee of all SDK trailer/checksum algorithms or AWS multipart composite checksums. | [checksum helper](../teledrive/s3/checksums.py), [additional checksum tests](../tests/s3/test_s3_additional_checksums.py) |
 | Read preconditions | Selected If-Match, If-None-Match, If-Modified-Since and If-Unmodified-Since for GET/HEAD; byte ranges supported. | [conditions](../teledrive/s3/conditions.py), [tests](../tests/s3/test_s3_conditions.py) |
@@ -92,6 +92,21 @@ The following operations have a routed implementation. Every qualification in th
 | [GetBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycleConfiguration.html) | 🟡 Partial | Read a private bucket's bounded, prefix-scoped AbortIncompleteMultipartUpload-only rules; no AWS expiration/transition support. |
 | [PutBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycleConfiguration.html) | 🟡 Partial | Signed strict XML; only Disabled/Enabled incomplete multipart abort rules with DaysAfterInitiation 1..3650 and Prefix. |
 | [DeleteBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketLifecycle.html) | 🟡 Partial | Removes SQL configuration; it never deletes an object or Telegram media. |
+| [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | 🟡 Partial | Read-only private canned ACL (caller FULL_CONTROL); every ACL configuration attempt fails closed. |
+| [GetObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAcl.html) | 🟡 Partial | Read-only private canned ACL for an existing current object; no VersionId selector, no ACL writes. |
+| [GetBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketOwnershipControls.html) | 🟡 Partial | Always `BucketOwnerEnforced`; ownership configuration fails closed. |
+| [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | 🟡 Partial | Always 404 `NoSuchBucketPolicy`; policy writes fail closed. |
+| [GetBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketReplication.html) | 🟡 Partial | Always 404 not-configured; replication writes fail closed. |
+| [GetBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html) | 🟡 Partial | Always 404 `NoSuchWebsiteConfiguration`; website writes fail closed. |
+| [GetBucketNotification](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotification.html) | 🟡 Partial | Always empty `NotificationConfiguration`; notification writes fail closed. |
+| [GetBucketNotificationConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotificationConfiguration.html) | 🟡 Partial | Same empty read-only contract as GetBucketNotification. |
+| [GetBucketLogging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLogging.html) | 🟡 Partial | Always empty `BucketLoggingStatus`; logging writes fail closed. |
+| [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
+| [GetObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLockConfiguration.html) | 🟡 Partial | Always 404 `ObjectLockConfigurationNotFoundError`; lock configuration fails closed. |
+| [GetObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectRetention.html) | 🟡 Partial | Always 404 not configured on existing objects; retention writes fail closed. |
+| [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | 🟡 Partial | Always 404 not configured on existing objects; legal-hold writes fail closed. |
+| [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | Always `Payer=BucketOwner`; request-payer writes fail closed. |
+| [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | Always `Suspended`; accelerate writes fail closed. |
 
 ## 4. Unsupported AWS S3 actions grouped for the roadmap
 
@@ -104,14 +119,10 @@ Keep private-by-default security. Define either a tested private-only compatibil
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
 | [DeletePublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeletePublicAccessBlock.html) | ❌ Unsupported | P2-C |
-| [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | ❌ Unsupported | P2-C |
 | [PutBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAcl.html) | ❌ Unsupported | P2-C |
-| [GetObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAcl.html) | ❌ Unsupported | P2-C |
 | [PutObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectAcl.html) | ❌ Unsupported | P2-C |
-| [GetBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
 | [PutBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
 | [DeleteBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
-| [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | ❌ Unsupported | P2-C |
 | [PutBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketPolicy.html) | ❌ Unsupported | P2-C |
 | [DeleteBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketPolicy.html) | ❌ Unsupported | P2-C |
 
@@ -121,14 +132,10 @@ Implement actual encryption/key lifecycle and enforce per-version retention and 
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | ❌ Unsupported | P2-B |
 | [PutBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html) | ❌ Unsupported | P2-B |
 | [DeleteBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketEncryption.html) | ❌ Unsupported | P2-B |
-| [GetObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLockConfiguration.html) | ❌ Unsupported | P2-B |
 | [PutObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLockConfiguration.html) | ❌ Unsupported | P2-B |
-| [GetObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectRetention.html) | ❌ Unsupported | P2-B |
 | [PutObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectRetention.html) | ❌ Unsupported | P2-B |
-| [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | ❌ Unsupported | P2-B |
 | [PutObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLegalHold.html) | ❌ Unsupported | P2-B |
 
 ### P2-D — Lifecycle, expiration, transitions, replication and restore
@@ -139,7 +146,6 @@ Model rules and durable workers without promising AWS transitions that Telegram 
 | --- | --- | --- |
 | [GetBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycle.html) | ❌ Unsupported | P2-D |
 | [PutBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycle.html) | ❌ Unsupported | P2-D |
-| [GetBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketReplication.html) | ❌ Unsupported | P2-D |
 | [PutBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketReplication.html) | ❌ Unsupported | P2-D |
 | [DeleteBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketReplication.html) | ❌ Unsupported | P2-D |
 | [RestoreObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RestoreObject.html) | ❌ Unsupported | P2-D |
@@ -158,14 +164,10 @@ Specify whether private-only hosting permits website mode; use transactional out
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [GetBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html) | ❌ Unsupported | P2-F |
 | [PutBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketWebsite.html) | ❌ Unsupported | P2-F |
 | [DeleteBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketWebsite.html) | ❌ Unsupported | P2-F |
-| [GetBucketNotification](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotification.html) | ❌ Unsupported | P2-F |
-| [GetBucketNotificationConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotificationConfiguration.html) | ❌ Unsupported | P2-F |
 | [PutBucketNotification](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketNotification.html) | ❌ Unsupported | P2-F |
 | [PutBucketNotificationConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketNotificationConfiguration.html) | ❌ Unsupported | P2-F |
-| [GetBucketLogging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLogging.html) | ❌ Unsupported | P2-F |
 | [PutBucketLogging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLogging.html) | ❌ Unsupported | P2-F |
 
 ### P3-G — Analytics, inventory, metrics and tier policies
@@ -212,9 +214,7 @@ Mostly depends on AWS account services (Express sessions, directory buckets, S3 
 | [ListObjectAnnotations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectAnnotations.html) | ❌ Unsupported | P3-H |
 | [GetBucketAbac](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAbac.html) | ❌ Unsupported | P3-H |
 | [PutBucketAbac](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAbac.html) | ❌ Unsupported | P3-H |
-| [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | ❌ Unsupported | P3-H |
 | [PutBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketRequestPayment.html) | ❌ Unsupported | P3-H |
-| [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | ❌ Unsupported | P3-H |
 | [PutBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAccelerateConfiguration.html) | ❌ Unsupported | P3-H |
 | [GetObjectTorrent](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTorrent.html) | ❌ Unsupported | P3-H |
 | [CreateSession](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateSession.html) | ❌ Unsupported | P3-H |

@@ -38,6 +38,14 @@ PERMISSIONS = frozenset({
     "s3:GetBucketPublicAccessBlock", "s3:PutBucketPublicAccessBlock",
     "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
     "s3:GetBucketPolicyStatus",
+    # Read-only AWS compatibility probes (no configuration permissions).
+    "s3:GetBucketAcl", "s3:GetObjectAcl",
+    "s3:GetOwnershipControls", "s3:GetBucketPolicy",
+    "s3:GetBucketReplication", "s3:GetBucketWebsite",
+    "s3:GetBucketNotification", "s3:GetBucketLogging",
+    "s3:GetBucketRequestPayment", "s3:GetAccelerateConfiguration",
+    "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration",
+    "s3:GetObjectRetention", "s3:GetObjectLegalHold",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
 

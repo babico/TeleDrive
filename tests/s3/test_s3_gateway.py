@@ -168,9 +168,15 @@ def test_unsigned_payload_and_unsupported_operations_fail_closed(service):
     listed = signed(service, "GET", "/backup-bucket?uploads")
     assert listed.status_code == 200
     assert b"ListMultipartUploadsResult" in listed.content
+    # GetBucketPolicy is a read-only compatibility probe: an AWS-shaped
+    # 404 (no policy exists), never bucket data.
     unsupported = signed(service, "GET", "/backup-bucket?policy")
-    assert unsupported.status_code == 501
-    assert b"NotImplemented" in unsupported.content
+    assert unsupported.status_code == 404
+    assert b"NoSuchBucketPolicy" in unsupported.content
+    # Configuration attempts on optional features still fail closed.
+    blocked = signed(service, "PUT", "/backup-bucket?policy")
+    assert blocked.status_code == 501
+    assert b"NotImplemented" in blocked.content
 
 
 def test_catalog_pagination_with_signed_s3_queries(service):

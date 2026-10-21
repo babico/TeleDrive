@@ -196,8 +196,8 @@
     },
     {
       "name": "GetBucketAcl",
-      "status": "unsupported",
-      "workstream": "P2-C"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketAcl",
@@ -206,8 +206,8 @@
     },
     {
       "name": "GetObjectAcl",
-      "status": "unsupported",
-      "workstream": "P2-C"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectAcl",
@@ -216,8 +216,8 @@
     },
     {
       "name": "GetBucketOwnershipControls",
-      "status": "unsupported",
-      "workstream": "P2-C"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketOwnershipControls",
@@ -231,8 +231,8 @@
     },
     {
       "name": "GetBucketPolicy",
-      "status": "unsupported",
-      "workstream": "P2-C"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketPolicy",
@@ -251,8 +251,8 @@
     },
     {
       "name": "GetBucketEncryption",
-      "status": "unsupported",
-      "workstream": "P2-B"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketEncryption",
@@ -266,8 +266,8 @@
     },
     {
       "name": "GetObjectLockConfiguration",
-      "status": "unsupported",
-      "workstream": "P2-B"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectLockConfiguration",
@@ -276,8 +276,8 @@
     },
     {
       "name": "GetObjectRetention",
-      "status": "unsupported",
-      "workstream": "P2-B"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectRetention",
@@ -286,8 +286,8 @@
     },
     {
       "name": "GetObjectLegalHold",
-      "status": "unsupported",
-      "workstream": "P2-B"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectLegalHold",
@@ -306,8 +306,8 @@
     },
     {
       "name": "GetBucketReplication",
-      "status": "unsupported",
-      "workstream": "P2-D"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketReplication",
@@ -331,8 +331,8 @@
     },
     {
       "name": "GetBucketWebsite",
-      "status": "unsupported",
-      "workstream": "P2-F"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketWebsite",
@@ -346,13 +346,13 @@
     },
     {
       "name": "GetBucketNotification",
-      "status": "unsupported",
-      "workstream": "P2-F"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketNotificationConfiguration",
-      "status": "unsupported",
-      "workstream": "P2-F"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketNotification",
@@ -366,8 +366,8 @@
     },
     {
       "name": "GetBucketLogging",
-      "status": "unsupported",
-      "workstream": "P2-F"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketLogging",
@@ -531,8 +531,8 @@
     },
     {
       "name": "GetBucketRequestPayment",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketRequestPayment",
@@ -541,8 +541,8 @@
     },
     {
       "name": "GetBucketAccelerateConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketAccelerateConfiguration",

@@ -16,6 +16,7 @@ import re
 import tempfile
 import time
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
@@ -26,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 
+from teledrive.db import Database
 from teledrive.s3.credentials import S3CredentialStore, load_master_key
 from teledrive.s3.route_guard import validate_s3_query, S3QueryError
 from teledrive.s3.bucket_listing import list_buckets_xml, BucketListingError
@@ -35,7 +37,8 @@ from teledrive.s3.post_policy import parse_form, verify_post_policy, FORM_LIMIT
 from teledrive.s3.multipart import MultipartStore, MultipartError, MAX_PARTS
 from teledrive.s3.batch_delete import BatchDeleteError, MAX_XML_BYTES, parse_batch, verify_body
 from teledrive.s3.conditions import http_last_modified, read_precondition
-from teledrive.s3.write_conditions import check_write_precondition, WritePreconditionError
+from teledrive.s3.write_conditions import (check_write_precondition,
+    WritePreconditionError, ExpectedHead)
 from teledrive.s3.tagging import ObjectTagStore, BucketTagStore, TaggingError, validate_tags
 from teledrive.s3.cors import (BucketCORSStore, CORSError, MAX_CORS_XML_BYTES,
     parse_cors_xml, cors_xml, matching_rule, response_cors_headers)
@@ -515,6 +518,1418 @@ def _virtual_host_bucket(request: Request) -> str | None:
     return bucket
 
 
+# --- AWS read-compatibility for optional, unconfigured features -----------
+#
+# Real-world clients (s3fs, Cyberduck, Terraform, MinIO tools) probe these
+# optional AWS features at startup. TeleDrive answers with valid AWS-shaped
+# READ responses for the enforced private-only model; every configuration
+# attempt fails closed with 501 before any SQL or Telegram side effect.
+
+_COMPAT_BUCKET_READS: dict[str, str] = {
+    "acl": "s3:GetBucketAcl",
+    "ownershipControls": "s3:GetOwnershipControls",
+    "policy": "s3:GetBucketPolicy",
+    "replication": "s3:GetBucketReplication",
+    "website": "s3:GetBucketWebsite",
+    "logging": "s3:GetBucketLogging",
+    "notification": "s3:GetBucketNotification",
+    "notificationConfiguration": "s3:GetBucketNotification",
+    "requestPayment": "s3:GetBucketRequestPayment",
+    "accelerate": "s3:GetAccelerateConfiguration",
+    "encryption": "s3:GetEncryptionConfiguration",
+    "object-lock": "s3:GetBucketObjectLockConfiguration",
+}
+
+_COMPAT_OBJECT_READS: dict[str, str] = {
+    "acl": "s3:GetObjectAcl",
+    "retention": "s3:GetObjectRetention",
+    "legal-hold": "s3:GetObjectLegalHold",
+}
+
+
+def _canned_private_acl_xml(owner: str) -> bytes:
+    """Private canned ACL: the caller holds FULL_CONTROL, nobody else."""
+    root = ET.Element("AccessControlPolicy", xmlns=NAMESPACE)
+    owner_node = ET.SubElement(root, "Owner")
+    ET.SubElement(owner_node, "ID").text = owner
+    ET.SubElement(owner_node, "DisplayName").text = "teledrive"
+    acl_node = ET.SubElement(root, "AccessControlList")
+    grant = ET.SubElement(acl_node, "Grant")
+    grantee = ET.SubElement(grant, "Grantee", {
+        "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+        "xsi:type": "CanonicalUser",
+    })
+    ET.SubElement(grantee, "ID").text = owner
+    ET.SubElement(grantee, "DisplayName").text = "teledrive"
+    ET.SubElement(grant, "Permission").text = "FULL_CONTROL"
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _xml_ok(root) -> Response:
+    return Response(ET.tostring(root, encoding="utf-8", xml_declaration=True),
+                    media_type="application/xml")
+
+
+def _compat_bucket_read_response(selector: str, owner: str) -> Response:
+    """AWS-shaped read response for an optional, unconfigured bucket feature."""
+    if selector == "acl":
+        return Response(_canned_private_acl_xml(owner), media_type="application/xml")
+    if selector == "ownershipControls":
+        root = ET.Element("OwnershipControls", xmlns=NAMESPACE)
+        rule = ET.SubElement(root, "Rule")
+        ET.SubElement(rule, "ObjectOwnership").text = "BucketOwnerEnforced"
+        return _xml_ok(root)
+    if selector == "requestPayment":
+        root = ET.Element("RequestPaymentConfiguration", xmlns=NAMESPACE)
+        ET.SubElement(root, "Payer").text = "BucketOwner"
+        return _xml_ok(root)
+    if selector == "accelerate":
+        root = ET.Element("AccelerateConfiguration", xmlns=NAMESPACE)
+        ET.SubElement(root, "TransferAcceleratedStatus").text = "Suspended"
+        return _xml_ok(root)
+    if selector in ("notification", "notificationConfiguration"):
+        return _xml_ok(ET.Element("NotificationConfiguration", xmlns=NAMESPACE))
+    if selector == "logging":
+        return _xml_ok(ET.Element("BucketLoggingStatus", xmlns=NAMESPACE))
+    if selector == "policy":
+        return _error("NoSuchBucketPolicy", "The bucket policy does not exist", 404)
+    if selector == "replication":
+        return _error("ReplicationConfigurationNotFoundError",
+                      "The specified bucket does not have a replication "
+                      "configuration", 404)
+    if selector == "website":
+        return _error("NoSuchWebsiteConfiguration",
+                      "The specified bucket does not have a website "
+                      "configuration", 404)
+    if selector == "encryption":
+        return _error("ServerSideEncryptionConfigurationNotFoundError",
+                      "The server side encryption configuration was not "
+                      "found", 404)
+    if selector == "object-lock":
+        return _error("ObjectLockConfigurationNotFoundError",
+                      "Object Lock configuration does not exist for this "
+                      "bucket", 404)
+    raise AssertionError(f"unknown compat selector: {selector}")
+
+
+def _compat_object_read_response(selector: str, owner: str) -> Response:
+    """AWS-shaped read response for optional object features."""
+    if selector == "acl":
+        return Response(_canned_private_acl_xml(owner), media_type="application/xml")
+    # Object Lock (retention/legal-hold) is never configured in TeleDrive.
+    return _error("NoSuchObjectLockConfiguration",
+                  "The specified object does not have a ObjectLock "
+                  "configuration", 404)
+
+
+@dataclass
+class _S3RequestContext:
+    """Shared per-request state for the extracted S3 verb-family handlers.
+
+    ``_handle`` computes routing flags, authentication and the shared
+    stores once, then delegates to a focused handler with this context.
+    Handlers raise the same exceptions and return the same responses as
+    the original inline code; ``_handle`` maps exceptions to S3 errors.
+    """
+    request: Request
+    db: Database
+    store: S3CredentialStore
+    master: bytes
+    bucket: str
+    key: str
+    owner: str = ""
+    catalog: BucketCatalog | None = None
+    inline_tags: list[tuple[str, str]] | None = None
+    checksum_mode: str | None = None
+    retain: bool = False
+    # Routing flags, computed by _handle before delegation:
+    multi_delete: bool = False
+    mpu_bucket_list: bool = False
+    mpu_start: bool = False
+    mpu_id: str | None = None
+    mpu_part: bool = False
+    mpu_complete: bool = False
+    mpu_abort: bool = False
+    mpu_list: bool = False
+    is_version_read: bool = False
+    is_version_delete: bool = False
+    is_version_listing: bool = False
+    is_object_attributes: bool = False
+    is_object_tagging: bool = False
+    is_version_tagging: bool = False
+    is_bucket_tagging: bool = False
+    is_bucket_cors: bool = False
+    is_bucket_versioning: bool = False
+    is_public_access_block: bool = False
+    is_bucket_lifecycle: bool = False
+    is_bucket_policy_status: bool = False
+
+
+async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
+    """Browser POST policy upload (form-encoded payload, no SigV4 header)."""
+    request, bucket, db, store = ctx.request, ctx.bucket, ctx.db, ctx.store
+    if request.headers.get("authorization"):
+        raise SigV4Error("AccessDenied", "Ambiguous form and header authentication")
+    _reject_unimplemented_write_options(request)
+    max_upload = _webapp.REST_MAX_UPLOAD_BYTES
+    form_limit = min(FORM_LIMIT, max_upload)
+    if form_limit < 1:
+        return _error("EntityTooLarge", "Form upload size is disabled", 413)
+    form_bytes = bytearray()
+    async for block in request.stream():
+        form_bytes.extend(block)
+        if len(form_bytes) > form_limit:
+            return _error("EntityTooLarge", "Browser upload form too large", 413)
+    post_fields, payload = parse_form(
+        request.headers.get("content-type", ""), bytes(form_bytes),
+    )
+    post_key = verify_post_policy(
+        post_fields, payload, bucket, store.resolve, max_bytes=form_limit,
+    )
+    # Signed form fields are validated using the same bounded
+    # metadata contract as ordinary S3 PUT. Browser-controlled MIME,
+    # cache rules and x-amz-meta-* values must not be silently
+    # accepted without durable storage.
+    post_headers = {
+        name.lower(): value for name, value in post_fields.items()
+        if name.lower() in STANDARD_HEADERS
+        or name.startswith("x-amz-meta-")
+    }
+    post_metadata = parse_object_metadata(
+        post_headers, set(post_headers),
+    )
+    # Tagging is a separate S3 capability, not included in generic
+    # PutObject credentials. Enforce BOTH privileges before sending
+    # even a single byte, then publish tags in the HEAD transaction.
+    form_tags = None
+    if "x-amz-tagging" in post_fields:
+        credential_access = post_fields["x-amz-credential"].split("/", 1)[0]
+        if store.resolve(credential_access, "s3:PutObjectTagging") is None:
+            raise SigV4Error("AccessDenied", "PutObjectTagging permission required")
+        form_tags = _parse_initial_tags(post_fields["x-amz-tagging"])
+    post_catalog = BucketCatalog(ManifestStore(db))
+    if bucket not in post_catalog.list_buckets():
+        return _error("NoSuchBucket", "Upload bucket does not exist", 404)
+    directory = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(directory)
+    fd, temp_name = tempfile.mkstemp(prefix="s3-form-", dir=directory)
+    staged = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as dest:
+            dest.write(payload)
+            dest.flush()
+            os.fsync(dest.fileno())
+        transport = storage_transport(db)
+        await transport.verify_target()
+        quota_error = _quota_guard(db, bucket, post_key, len(payload))
+        if quota_error is not None:
+            return quota_error
+        obj = await TelegramObjectStorage(
+            post_catalog.manifests, transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE,
+            scratch_directory=directory,
+        ).put_file(bucket, post_key, staged)
+        ObjectMetadataStore(post_catalog).attach_uncommitted(
+            obj.id, post_metadata,
+        )
+        if form_tags is not None:
+            ObjectTagStore(post_catalog).attach_uncommitted(
+                obj.id, form_tags,
+            )
+        post_catalog.publish(obj.id, now=int(time.time()))
+        etag = '"' + obj.sha256 + '"'
+        response_headers = {"ETag": etag, "x-amz-version-id": obj.id}
+        # A redirect is an explicit signed browser instruction. The
+        # gateway never contacts the target and does not disclose
+        # credentials or original payload in the callback parameters.
+        redirect = post_fields.get("success_action_redirect")
+        if redirect is not None:
+            parsed_redirect = urlsplit(redirect)  # verified HTTPS URL
+            parameters = urlencode({
+                "bucket": bucket, "key": post_key, "etag": etag,
+            })
+            redirect_query = (parsed_redirect.query + "&" + parameters
+                              if parsed_redirect.query else parameters)
+            location = urlunsplit((
+                parsed_redirect.scheme, parsed_redirect.netloc,
+                parsed_redirect.path, redirect_query, "",
+            ))
+            return Response(status_code=303, headers={
+                **response_headers, "Location": location,
+            })
+        # The requested response status is itself an exact signed
+        # policy condition; no unsigned status override is accepted.
+        status = int(post_fields.get("success_action_status", "204"))
+        if status == 201:
+            # Quote untrusted key text before placing it in Location.
+            # The XML serializer escapes the same key in the body.
+            location = (str(request.base_url).rstrip("/")
+                        + "/" + quote(bucket, safe="")
+                        + "/" + quote(post_key, safe="/"))
+            response_headers["Location"] = location
+            return Response(_xml("PostResponse", [
+                ("Location", location), ("Bucket", bucket),
+                ("Key", post_key), ("ETag", etag),
+            ]), media_type="application/xml", status_code=201,
+                headers=response_headers)
+        return Response(status_code=status, headers=response_headers)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
+    """POST ?delete: multi-object delete with a DeleteObjects XML body."""
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+    if request.headers.get("x-amz-mfa") or request.headers.get(
+        "x-amz-bypass-governance-retention"
+    ):
+        return _error("NotImplemented", "Retention/MFA Delete unsupported", 501)
+    body = bytearray()
+    async for block in request.stream():
+        body.extend(block)
+        if len(body) > MAX_XML_BYTES:
+            raise BatchDeleteError("MalformedXML", "DeleteObjects XML exceeds 1 MiB")
+    payload = bytes(body)
+    verify_body(payload, request.headers)
+    batch = parse_batch(payload)
+    result = ET.Element("DeleteResult", xmlns=NAMESPACE)
+    for key_to_delete in batch.keys:
+        try:
+            marker = catalog.delete_marker(bucket, key_to_delete)
+        except ValueError:
+            problem = ET.SubElement(result, "Error")
+            ET.SubElement(problem, "Key").text = key_to_delete
+            ET.SubElement(problem, "Code").text = "InvalidObjectName"
+            ET.SubElement(problem, "Message").text = "Invalid object name"
+            continue
+        if not batch.quiet:
+            deleted = ET.SubElement(result, "Deleted")
+            ET.SubElement(deleted, "Key").text = key_to_delete
+            ET.SubElement(deleted, "VersionId").text = marker
+            ET.SubElement(deleted, "DeleteMarker").text = "true"
+            ET.SubElement(deleted, "DeleteMarkerVersionId").text = marker
+    return Response(ET.tostring(result, encoding="utf-8", xml_declaration=True),
+                    media_type="application/xml", status_code=200)
+
+
+async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
+    """Bucket control subresources: policy status, lifecycle, public access
+    block, versioning, CORS and tagging. Returns None when the request does
+    not select any control subresource."""
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    if ctx.is_bucket_policy_status:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        # Public grants and bucket policies cannot be enabled through
+        # this private-only gateway. This is NOT a bucket policy engine.
+        return Response(_xml("PolicyStatus", [("IsPublic", "false")]),
+                        media_type="application/xml")
+    if ctx.is_bucket_lifecycle:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket not found", 404)
+        rules = BucketLifecycleStore(catalog)
+        if request.method == "GET":
+            value = rules.get(bucket)
+            if value is None:
+                return _error("NoSuchLifecycleConfiguration", "No lifecycle configuration", 404)
+            return Response(lifecycle_xml(value), media_type="application/xml")
+        if request.method == "PUT":
+            data = bytearray()
+            async for block in request.stream():
+                data.extend(block)
+                if len(data) > MAX_LIFECYCLE_XML:
+                    raise LifecycleError("MalformedXML", "Lifecycle XML exceeds 32 KiB")
+            _verify_bucket_control_payload(request, bytes(data))
+            rules.replace(bucket, parse_lifecycle_xml(bytes(data)))
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise LifecycleError("InvalidRequest", "DeleteBucketLifecycle cannot have body")
+            rules.replace(bucket, None)
+            return Response(status_code=204)
+        return _error("NotImplemented", "Unsupported lifecycle method", 501)
+    if ctx.is_public_access_block:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        if request.method == "GET":
+            return Response(public_access_xml(), media_type="application/xml")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_PUBLIC_ACCESS_XML_BYTES:
+                    raise PublicAccessError("MalformedXML",
+                                            "Public access XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            parse_public_access_xml(bytes(payload))
+            return Response(status_code=200)
+        return _error("NotImplemented", "Unsupported public access method", 501)
+    if ctx.is_bucket_versioning:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        if request.method == "GET":
+            return Response(versioning_xml(), media_type="application/xml")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_VERSIONING_XML_BYTES:
+                    raise VersioningError("MalformedXML",
+                                          "Versioning XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            parse_versioning_xml(bytes(payload))
+            return Response(status_code=200)
+        return _error("NotImplemented", "Unsupported bucket versioning method", 501)
+    if ctx.is_bucket_cors:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        cors_store = BucketCORSStore(catalog)
+        if request.method == "GET":
+            rules = cors_store.get(bucket)
+            if rules is None:
+                return _error("NoSuchCORSConfiguration", "No CORS configuration", 404)
+            return Response(cors_xml(rules), media_type="application/xml")
+        if request.method == "PUT":
+            body = bytearray()
+            async for block in request.stream():
+                body.extend(block)
+                if len(body) > MAX_CORS_XML_BYTES:
+                    raise CORSError("MalformedXML", "CORS XML exceeds 64 KiB")
+            _verify_upload_sha256(
+                request, hashlib.sha256(body).digest(),
+                crc64nvme_value=crc64nvme(body),
+            )
+            md5_header = request.headers.get("content-md5")
+            if md5_header and not hmac.compare_digest(
+                md5_header,
+                base64.b64encode(hashlib.md5(body, usedforsecurity=False).digest()).decode()
+            ):
+                raise CORSError("BadDigest", "Content-MD5 mismatch")
+            cors_store.replace(bucket, parse_cors_xml(bytes(body)))
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise CORSError("InvalidRequest", "DeleteBucketCors must not have a body")
+            cors_store.replace(bucket, [])
+            return Response(status_code=204)
+        return _error("NotImplemented", "Unsupported bucket CORS operation", 501)
+    if ctx.is_bucket_tagging:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        tagstore = BucketTagStore(catalog)
+        if request.method == "GET":
+            values = tagstore.get(bucket)
+            if not values:
+                return _error("NoSuchTagSet", "No bucket tag set exists", 404)
+            return Response(_tag_xml(values), media_type="application/xml")
+        if request.method == "PUT":
+            tagstore.replace(bucket, await _tag_request_tags(request, bucket=True))
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise TaggingError("InvalidRequest", "DeleteBucketTagging must have no body")
+            tagstore.replace(bucket, [])
+            return Response(status_code=204)
+        return _error("NotImplemented", "Unsupported bucket tagging method", 501)
+    return None
+
+
+def _list_bucket_versions(ctx: _S3RequestContext) -> Response:
+    """GET ?versions: ListObjectVersions response XML."""
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    if len(request.query_params.getlist("versions")) != 1 or (
+        request.query_params.get("versions") not in ("",)
+    ):
+        return _error("InvalidArgument", "Invalid versions selector", 400)
+    for marker in ("prefix", "max-keys", "key-marker", "version-id-marker"):
+        if len(request.query_params.getlist(marker)) > 1:
+            return _error("InvalidArgument", "Ambiguous version listing parameter", 400)
+    try:
+        maximum = int(request.query_params.get("max-keys", "1000"))
+        key_marker = request.query_params.get("key-marker", "")
+        version_marker = request.query_params.get("version-id-marker", "")
+        prefix = request.query_params.get("prefix", "")
+        entries, has_more = catalog.list_bucket_versions(
+            bucket, prefix=prefix, key_marker=key_marker,
+            version_marker=version_marker, limit=maximum,
+        )
+    except ValueError:
+        return _error("InvalidArgument", "Invalid version list cursor or limit", 400)
+    root = ET.Element("ListVersionsResult", xmlns=NAMESPACE)
+    for label, value in (
+        ("Name", bucket), ("Prefix", prefix),
+        ("KeyMarker", key_marker), ("VersionIdMarker", version_marker),
+        ("MaxKeys", maximum), ("IsTruncated", str(has_more).lower()),
+    ):
+        ET.SubElement(root, label).text = str(value)
+    if has_more and entries:
+        ET.SubElement(root, "NextKeyMarker").text = entries[-1]["key"]
+        ET.SubElement(root, "NextVersionIdMarker").text = entries[-1]["version_id"]
+    mpu = MultipartStore(catalog)
+    for entry in entries:
+        element = ET.SubElement(
+            root, "DeleteMarker" if entry["is_delete_marker"] else "Version"
+        )
+        fields = [
+            ("Key", entry["key"]), ("VersionId", entry["version_id"]),
+            ("IsLatest", str(entry["is_current"]).lower()),
+            ("LastModified", time.strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z",
+                time.gmtime(entry["committed_ns"] // 1_000_000_000),
+            )),
+        ]
+        if not entry["is_delete_marker"]:
+            fields += [
+                ("ETag", '"' + mpu.object_etag(
+                    entry["version_id"], entry["sha256"]
+                ) + '"'),
+                ("Size", entry["size"]), ("StorageClass", "STANDARD"),
+            ]
+        for label, value in fields:
+            ET.SubElement(element, label).text = str(value)
+    return Response(
+        ET.tostring(root, encoding="utf-8", xml_declaration=True),
+        media_type="application/xml",
+    )
+
+
+def _list_multipart_uploads(ctx: _S3RequestContext) -> Response:
+    """GET ?uploads: ListMultipartUploads response XML."""
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    owner = ctx.owner
+    query = request.query_params
+    prefix = query.get("prefix", "")
+    delimiter = query.get("delimiter", "")
+    encoding = query.get("encoding-type")
+    if encoding not in (None, "url"):
+        return _error("InvalidArgument", "Only encoding-type=url is supported", 400)
+    if len(prefix.encode("utf-8")) > 1024 or len(delimiter.encode("utf-8")) > 16:
+        return _error("InvalidArgument", "Multipart prefix/delimiter too long", 400)
+    try:
+        limit = int(query.get("max-uploads", "1000"))
+    except ValueError:
+        return _error("InvalidArgument", "Invalid max-uploads", 400)
+    if not 1 <= limit <= 1000:
+        return _error("InvalidArgument", "max-uploads must be 1..1000", 400)
+    marker_key = query.get("key-marker", "")
+    marker_id = query.get("upload-id-marker", "")
+    if marker_id and not marker_key:
+        return _error("InvalidArgument", "Upload-id marker requires key marker", 400)
+    multipart = MultipartStore(catalog)
+    if delimiter:
+        entries, more, next_marker = multipart.list_uploads_grouped(
+            bucket, owner, prefix=prefix, delimiter=delimiter,
+            after_key=marker_key, after_id=marker_id, limit=limit,
+        )
+    else:
+        records, more = multipart.list_uploads(
+            bucket, owner, prefix=prefix, after_key=marker_key,
+            after_id=marker_id, limit=limit,
+        )
+        entries = [("upload", record) for record in records]
+        next_marker = ((records[-1].object_key, records[-1].id)
+                       if records else ("", ""))
+
+    encode = (lambda value: quote(value, safe="/") if encoding == "url" else value)
+    root = ET.Element("ListMultipartUploadsResult", xmlns=NAMESPACE)
+    for label, val in (
+        ("Bucket", bucket), ("KeyMarker", encode(marker_key)),
+        ("UploadIdMarker", marker_id), ("Prefix", encode(prefix)),
+        ("MaxUploads", limit), ("IsTruncated", str(more).lower()),
+    ):
+        ET.SubElement(root, label).text = str(val)
+    if delimiter:
+        ET.SubElement(root, "Delimiter").text = encode(delimiter)
+    if encoding:
+        ET.SubElement(root, "EncodingType").text = encoding
+    if more:
+        ET.SubElement(root, "NextKeyMarker").text = encode(next_marker[0])
+        ET.SubElement(root, "NextUploadIdMarker").text = next_marker[1]
+    for kind, value in entries:
+        if kind == "prefix":
+            ET.SubElement(
+                ET.SubElement(root, "CommonPrefixes"), "Prefix"
+            ).text = encode(value)
+            continue
+        item = ET.SubElement(root, "Upload")
+        for label, contents in (
+            ("Key", encode(value.object_key)), ("UploadId", value.id),
+            ("StorageClass", "STANDARD"),
+            ("Initiated", time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                        time.gmtime(value.created_at))),
+        ):
+            ET.SubElement(item, label).text = str(contents)
+    return Response(ET.tostring(root, encoding="utf-8", xml_declaration=True),
+                    media_type="application/xml")
+
+
+def _list_objects(ctx: _S3RequestContext) -> Response:
+    """GET bucket: ListObjects V1/V2 response XML."""
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    master = ctx.master
+    list_type = request.query_params.get("list-type")
+    if list_type not in (None, "2"):
+        return _error("NotImplemented", "Only ListObjectsV1/V2 are supported", 501)
+    version_one = list_type is None
+    prefix = request.query_params.get("prefix", "")
+    delimiter = request.query_params.get("delimiter", "")
+    encoding_type = request.query_params.get("encoding-type")
+    if encoding_type not in (None, "url"):
+        return _error("InvalidArgument", "Unsupported list encoding-type", 400)
+    if len(prefix.encode("utf-8")) > 1024 or len(delimiter.encode("utf-8")) > 16:
+        return _error("InvalidArgument", "Prefix or delimiter is too large", 400)
+    if version_one:
+        if any(p in request.query_params for p in ("continuation-token", "start-after")):
+            return _error("InvalidArgument", "V2 cursor is not a V1 marker", 400)
+        after = request.query_params.get("marker", "")
+        # V1 NextMarker may denote a CommonPrefix. Skip every
+        # descendant of that prefix instead of returning it again.
+        skip_prefix = after if delimiter and after.endswith(delimiter) else ""
+        token = None
+    else:
+        if "marker" in request.query_params:
+            return _error("InvalidArgument", "V1 marker cannot be used with V2", 400)
+        token = request.query_params.get("continuation-token")
+        if token:
+            after, skip_prefix = _cursor_decode(token, master, bucket, prefix, delimiter)
+        else:
+            after = request.query_params.get("start-after", "")
+            skip_prefix = ""
+    try:
+        limit = int(request.query_params.get("max-keys", "1000"))
+    except ValueError:
+        return _error("InvalidArgument", "Invalid max-keys", 400)
+    if limit < 1 or limit > 1000:
+        return _error("InvalidArgument", "max-keys must be between 1 and 1000", 400)
+    keys, common, last, skipped, more = _page(
+        catalog, bucket, prefix, delimiter, after, limit, skip_prefix
+    )
+    next_token = (_cursor_encode(master, bucket, prefix, delimiter, last, skipped)
+                  if more and not version_one else None)
+    next_marker = (max([item.item.key for item in keys] + common)
+                   if more and version_one and (keys or common) else None)
+    tags = MultipartStore(catalog)
+    return Response(_list_xml(bucket, keys, common, prefix, limit,
+                              after if version_one or not token else "",
+                              delimiter, more, next_token,
+                              lambda obj: tags.object_etag(obj.id, obj.sha256),
+                              version_one=version_one, next_marker=next_marker,
+                              encoding_type=encoding_type),
+                    media_type="application/xml")
+
+
+async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
+    """Bucket-level requests: batch delete, control subresources, listings."""
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    if ctx.multi_delete:
+        return await _handle_batch_delete(ctx)
+    controls = await _handle_bucket_controls(ctx)
+    if controls is not None:
+        return controls
+    if request.method == "PUT":
+        catalog.create_bucket(bucket, int(time.time()))
+        return Response(status_code=200)
+    if request.method == "DELETE":
+        try:
+            catalog.delete_bucket(bucket)
+        except ValueError as exc:
+            raise MultipartError("BucketNotEmpty", str(exc), 409) from exc
+        return Response(status_code=204)
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    compat_selector = next(
+        (name for name in _COMPAT_BUCKET_READS
+         if name in request.query_params), None) if request.method == "GET" else None
+    if compat_selector is not None:
+        return _compat_bucket_read_response(compat_selector, ctx.owner)
+    if "location" in request.query_params:
+        if request.method != "GET":
+            return _error("MethodNotAllowed", "GetBucketLocation requires GET", 405)
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+        # AWS represents us-east-1 as an empty LocationConstraint.
+        root = ET.Element("LocationConstraint", xmlns=NAMESPACE)
+        return Response(
+            ET.tostring(root, encoding="utf-8", xml_declaration=True),
+            media_type="application/xml",
+        )
+    if ctx.is_version_listing:
+        return _list_bucket_versions(ctx)
+    if ctx.mpu_bucket_list:
+        return _list_multipart_uploads(ctx)
+    return _list_objects(ctx)
+
+
+
+async def _handle_multipart(ctx: _S3RequestContext) -> Response:
+    """Multipart upload operations on an object path (initiate, part,
+    complete, abort, list parts)."""
+    mpu = MultipartStore(ctx.catalog)
+    if ctx.mpu_start:
+        return await _mpu_initiate(ctx, mpu)
+    upload_id = ctx.mpu_id
+    if not upload_id:
+        raise MultipartError("NoSuchUpload", "Missing UploadId", 404)
+    if ctx.mpu_abort:
+        mpu.abort(upload_id, ctx.bucket, ctx.key, ctx.owner)
+        return Response(status_code=204)
+    if ctx.mpu_list:
+        return await _mpu_list_parts(ctx, mpu, upload_id)
+    if ctx.mpu_complete:
+        return await _mpu_complete(ctx, mpu, upload_id)
+    return await _mpu_upload_part(ctx, mpu, upload_id)
+
+
+async def _mpu_initiate(ctx: _S3RequestContext, mpu: MultipartStore) -> Response:
+    """POST ?uploads: CreateMultipartUpload (metadata-only initiate)."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    owner = ctx.owner
+    # Initiate is metadata-only. Reject any supplied body before
+    # allocating a durable multipart session, including if a
+    # leaked presigned URL is replayed with altered content.
+    async for block in request.stream():
+        if block:
+            raise MultipartError(
+                "InvalidRequest", "CreateMultipartUpload requires an empty body"
+            )
+    http_properties = parse_object_metadata(
+        request.headers, signed_header_names(request),
+    )
+    upload_id = mpu.initiate(
+        bucket, key, owner, http_metadata=http_properties,
+    )
+    return Response(_xml("InitiateMultipartUploadResult", [
+        ("Bucket", bucket), ("Key", key), ("UploadId", upload_id),
+    ]), media_type="application/xml", status_code=200)
+
+
+async def _mpu_list_parts(ctx: _S3RequestContext, mpu: MultipartStore,
+                          upload_id: str) -> Response:
+    """GET ?uploadId: ListParts response XML."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    owner = ctx.owner
+    try:
+        raw_marker = request.query_params.get("part-number-marker", "0")
+        raw_limit = request.query_params.get("max-parts", "1000")
+        if (re.fullmatch(r"[0-9]{1,5}", raw_marker) is None
+                or re.fullmatch(r"[0-9]{1,4}", raw_limit) is None):
+            raise ValueError("Invalid decimal")
+        marker = int(raw_marker)
+        limit = int(raw_limit)
+    except ValueError:
+        raise MultipartError("InvalidArgument", "Invalid ListParts pagination")
+    selected_parts, more = mpu.list_parts_page(
+        upload_id, bucket, key, owner, marker=marker, limit=limit,
+    )
+    result = ET.Element("ListPartsResult", xmlns=NAMESPACE)
+    for title, val in (
+        ("Bucket", bucket), ("Key", key), ("UploadId", upload_id),
+        ("PartNumberMarker", marker), ("MaxParts", limit),
+        ("StorageClass", "STANDARD"),
+        ("IsTruncated", str(more).lower()),
+    ):
+        ET.SubElement(result, title).text = str(val)
+    if more:
+        ET.SubElement(result, "NextPartNumberMarker").text = str(
+            selected_parts[-1].number
+        )
+    for part in selected_parts:
+        row = ET.SubElement(result, "Part")
+        ET.SubElement(row, "PartNumber").text = str(part.number)
+        ET.SubElement(row, "ETag").text = '"' + part.etag + '"'
+        ET.SubElement(row, "LastModified").text = time.strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(part.updated_at),
+        )
+        ET.SubElement(row, "Size").text = str(part.size)
+    return Response(ET.tostring(result, encoding="utf-8", xml_declaration=True),
+                    media_type="application/xml")
+
+
+async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
+                        upload_id: str) -> Response:
+    """POST ?uploadId: CompleteMultipartUpload assembly and publish."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    owner = ctx.owner
+    catalog = ctx.catalog
+    db = ctx.db
+    mpu.require(upload_id, bucket, key, owner, allow_completed=True)
+    expected_completion_head = check_write_precondition(
+        request, catalog, bucket, key,
+    )
+    content = bytearray()
+    async for block in request.stream():
+        content.extend(block)
+        if len(content) > 1024 * 1024:
+            raise MultipartError("MalformedXML", "Complete XML exceeds 1 MiB")
+    if hashlib.sha256(content).hexdigest() != request.headers.get("x-amz-content-sha256"):
+        raise MultipartError("XAmzContentSHA256Mismatch", "Completion XML checksum mismatch")
+    if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
+        raise MultipartError("MalformedXML", "XML entities are not accepted")
+    try:
+        document = SafeET.fromstring(content)
+        if document.tag.rsplit("}", 1)[-1] != "CompleteMultipartUpload":
+            raise ValueError("Wrong XML root")
+        selected = []
+        for element in document:
+            if element.tag.rsplit("}", 1)[-1] != "Part":
+                raise ValueError("Unexpected XML element")
+            number = element.findtext("{*}PartNumber")
+            etag = element.findtext("{*}ETag")
+            if not number or not number.isdigit() or not etag:
+                raise ValueError("Missing part number or ETag")
+            selected.append((int(number), etag.strip('"').lower()))
+    except (ValueError, ET.ParseError) as exc:
+        raise MultipartError("MalformedXML", "Invalid CompleteMultipartUpload XML") from exc
+    transport = storage_transport(db)
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    # Enforce bucket quota using the total selected part size
+    # before any assembly/publish work begins. Query the parts
+    # table directly: list_parts() enforces upload ownership and
+    # would reject the idempotent repeat of an already-completed
+    # upload.
+    from teledrive.s3.multipart import parts as _parts_table
+    selected_numbers = {number for number, _ in selected}
+    part_rows = db.connection.execute(
+        select(_parts_table.c.number, _parts_table.c.size).where(
+            _parts_table.c.upload_id == upload_id
+        )
+    ).all()
+    selected_size = sum(
+        size for number, size in part_rows
+        if number in selected_numbers
+    )
+    quota_error = _quota_guard(db, bucket, key, selected_size)
+    if quota_error is not None:
+        return quota_error
+    engine = TelegramObjectStorage(
+        catalog.manifests, transport,
+        chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+    )
+    finished = await mpu.complete(
+        upload_id, bucket, key, owner, selected, engine,
+        expected_generation=(
+            expected_completion_head.generation
+            if expected_completion_head else None
+        ),
+        expected_object_id=(
+            expected_completion_head.object_id
+            if expected_completion_head else None
+        ),
+    )
+    return Response(_xml("CompleteMultipartUploadResult", [
+        ("Bucket", bucket), ("Key", key), ("ETag", '"' + finished.etag + '"'),
+    ]), status_code=200, media_type="application/xml")
+
+
+async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
+                           upload_id: str) -> Response:
+    """PUT ?uploadId&partNumber: UploadPart staging and checksum verify."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    owner = ctx.owner
+    catalog = ctx.catalog
+    db = ctx.db
+    # UploadPart: checksum is verified before any Telegram send.
+    mpu.require(upload_id, bucket, key, owner)
+    try:
+        number = int(request.query_params.get("partNumber", ""))
+    except ValueError:
+        raise MultipartError("InvalidArgument", "Invalid part number")
+    if not 1 <= number <= MAX_PARTS:
+        raise MultipartError("InvalidArgument", "Invalid part number")
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    max_bytes = _webapp.REST_MAX_UPLOAD_BYTES
+    fd, name = tempfile.mkstemp(prefix="s3-part-", dir=scratch)
+    stage = Path(name)
+    try:
+        sha = hashlib.sha256()
+        md5 = hashlib.md5(usedforsecurity=False)
+        sha1 = hashlib.sha1(usedforsecurity=False)
+        crc = 0
+        crc32c_value = 0
+        crc64_value = 0
+        size = 0
+        with os.fdopen(fd, "wb") as output:
+            async for block in request.stream():
+                size += len(block)
+                if max_bytes < 1 or size > max_bytes:
+                    raise MultipartError("EntityTooLarge", "Part exceeds configured upload maximum", 413)
+                sha.update(block)
+                md5.update(block)
+                sha1.update(block)
+                crc = zlib.crc32(block, crc)
+                crc32c_value = crc32c(block, crc32c_value)
+                crc64_value = crc64nvme(block, crc64_value)
+                output.write(block)
+            output.flush()
+            os.fsync(output.fileno())
+        _verify_upload_sha256(
+            request, sha.digest(), md5_digest=md5.digest(),
+            sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
+        )
+        checksum_crc = request.headers.get("x-amz-checksum-crc32")
+        if checksum_crc and checksum_crc != base64.b64encode(
+            (crc & 0xffffffff).to_bytes(4, "big")
+        ).decode():
+            raise MultipartError("BadDigest", "CRC32 checksum mismatch")
+        declared_crc32c = request.headers.get("x-amz-checksum-crc32c")
+        if declared_crc32c is not None and not hmac.compare_digest(
+            declared_crc32c,
+            base64.b64encode(crc32c_value.to_bytes(4, "big")).decode("ascii"),
+        ):
+            raise MultipartError("BadDigest", "CRC32C checksum mismatch")
+        transport = storage_transport(db)
+        await transport.verify_target()
+        engine = TelegramObjectStorage(
+            catalog.manifests, transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+        )
+        staged = await engine.put_file(bucket, key, stage)
+        tag = md5.hexdigest()
+        mpu.record_part(upload_id, bucket, key, owner,
+                        number=number, object_id=staged.id, etag=tag)
+        return Response(status_code=200, headers={"ETag": '"' + tag + '"'})
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
+    """Object ?tagging: GET/PUT/DELETE object tags, optionally versioned."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    is_version_tagging = ctx.is_version_tagging
+    if is_version_tagging:
+        selected_id = request.query_params.get("versionId", "")
+        if not selected_id or len(selected_id) > 80:
+            return _error("InvalidArgument", "Invalid object VersionId", 400)
+        if not catalog.is_visible_version(bucket, key, selected_id):
+            return _error("NoSuchVersion", "Object version is not published", 404)
+        try:
+            version_item = catalog.manifests.get(selected_id)
+        except FileNotFoundError:
+            return _error("NoSuchVersion", "Object version is not ready", 404)
+        if version_item.bucket != bucket or version_item.key != key:
+            return _error("NoSuchVersion", "Version ownership mismatch", 404)
+        target_id = selected_id
+    else:
+        try:
+            target_id = catalog.get(bucket, key).item.id
+        except FileNotFoundError:
+            return _error("NoSuchKey", "Object does not exist", 404)
+    tags = ObjectTagStore(catalog)
+    if request.method == "GET":
+        return Response(_tag_xml(tags.get(target_id)),
+                        media_type="application/xml", status_code=200,
+                        headers={"x-amz-version-id": target_id})
+    if request.method == "PUT":
+        parsed = await _tag_request_tags(request)
+        if is_version_tagging:
+            tags.replace_published(bucket, key, target_id, parsed)
+        else:
+            tags.replace_current(bucket, key, parsed)
+        return Response(status_code=200, headers={"x-amz-version-id": target_id})
+    if request.method == "DELETE":
+        async for block in request.stream():
+            if block:
+                raise TaggingError("InvalidRequest", "DeleteObjectTagging must have no body")
+        if is_version_tagging:
+            tags.replace_published(bucket, key, target_id, [])
+        else:
+            tags.replace_current(bucket, key, [])
+        return Response(status_code=204, headers={"x-amz-version-id": target_id})
+    return _error("NotImplemented", "Unsupported object tagging method", 501)
+
+
+async def _handle_version_delete(ctx: _S3RequestContext) -> Response:
+    """DELETE ?versionId: remove one specific object version."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    db = ctx.db
+    catalog = ctx.catalog
+    if any(h in request.headers for h in ("if-match", "if-none-match")):
+        return _error("NotImplemented", "Conditional VersionId delete unsupported", 501)
+    version_id = request.query_params["versionId"]
+    if not version_id or len(version_id) > 80:
+        return _error("InvalidArgument", "Invalid version ID", 400)
+    is_marker = db.connection.execute(select(objects.c.status).where(
+        objects.c.id == version_id,
+        objects.c.bucket == bucket,
+        objects.c.object_key == key,
+    )).scalar_one_or_none() == "delete-marker"
+    if not catalog.delete_version(bucket, key, version_id):
+        return _error("NoSuchVersion", "Version does not exist", 404)
+    headers = {"x-amz-version-id": version_id}
+    if is_marker:
+        headers["x-amz-delete-marker"] = "true"
+    return Response(status_code=204, headers=headers)
+
+
+async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
+    """PUT with x-amz-copy-source: server-side CopyObject."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    store = ctx.store
+    owner = ctx.owner
+    inline_tags = ctx.inline_tags
+    # The source path must be signed. Otherwise a valid PUT signature
+    # could be replayed to copy a different private source object.
+    if "X-Amz-Algorithm" in request.query_params:
+        raise SigV4Error("NotImplemented", "Presigned CopyObject unsupported")
+    authorization = request.headers.get("authorization", "")
+    signed_headers = authorization.partition("SignedHeaders=")[2].split(",", 1)[0].split(";")
+    source_header = request.headers["x-amz-copy-source"]
+    if ("x-amz-copy-source" not in signed_headers
+            or store.resolve(owner, "s3:GetObject") is None):
+        raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
+    qualifiers = (
+        "x-amz-copy-source-if-match", "x-amz-copy-source-if-none-match",
+    )
+    for condition in qualifiers:
+        if request.headers.get(condition) is not None and condition not in signed_headers:
+            raise SigV4Error("AccessDenied", "Copy precondition must be signed")
+    unsupported_headers = (
+        "x-amz-copy-source-if-modified-since",
+        "x-amz-copy-source-if-unmodified-since",
+        "x-amz-copy-source-range",
+        "x-amz-server-side-encryption", "x-amz-storage-class",
+    )
+    if any(request.headers.get(name) is not None for name in unsupported_headers):
+        return _error("NotImplemented", "CopyObject option is unsupported", 501)
+    if (request.headers.get("x-amz-metadata-directive") is not None
+            and "x-amz-metadata-directive" not in signed_headers):
+        raise SigV4Error(
+            "AccessDenied", "Copy metadata directive must be signed"
+        )
+    metadata_directive = request.headers.get(
+        "x-amz-metadata-directive", "COPY"
+    )
+    if metadata_directive not in {"COPY", "REPLACE"}:
+        raise ObjectMetadataError("InvalidArgument", "Invalid metadata directive")
+    copy_properties = parse_object_metadata(
+        request.headers, signed_header_names(request),
+    )
+    if metadata_directive == "COPY" and copy_properties:
+        raise ObjectMetadataError(
+            "InvalidRequest", "Object metadata requires MetadataDirective=REPLACE"
+        )
+    tag_directive = request.headers.get("x-amz-tagging-directive", "COPY")
+    if tag_directive not in {"COPY", "REPLACE"}:
+        raise TaggingError("InvalidArgument", "Invalid CopyObject tagging directive")
+    if tag_directive == "COPY" and inline_tags is not None:
+        raise TaggingError("InvalidRequest", "x-amz-tagging requires TaggingDirective=REPLACE")
+    if (request.headers.get("x-amz-tagging-directive") is not None
+            and "x-amz-tagging-directive" not in signed_headers):
+        raise SigV4Error("AccessDenied", "Copy tagging directive must be signed")
+    # Copying nonempty source tags is a separate protected read/write
+    # operation; GetObject/PutObject alone must not bypass tag scopes.
+    if tag_directive == "REPLACE":
+        if store.resolve(owner, "s3:PutObjectTagging") is None:
+            raise SigV4Error("AccessDenied", "Copy tag replacement needs PutObjectTagging")
+
+    if (request.headers.get("x-amz-metadata-directive") is not None
+            and "x-amz-metadata-directive" not in signed_headers):
+        raise SigV4Error("AccessDenied", "Metadata directive must be signed")
+    # A signed CopySource may name a specific historical version.
+    # Never treat arbitrary query selectors or duplicate VersionIds as
+    # part of the object key; URI escapes are decoded only afterwards.
+    if source_header.startswith("//") or "://" in source_header:
+        return _error("InvalidArgument", "Copy source must be a local bucket/object path", 400)
+    original_header, divider, source_query = source_header.partition("?")
+    source_version_id = None
+    if divider:
+        try:
+            qualifiers = parse_qsl(
+                source_query, keep_blank_values=True, strict_parsing=True,
+                encoding="utf-8", errors="strict", max_num_fields=2,
+            )
+        except (UnicodeError, ValueError):
+            return _error("InvalidArgument", "Malformed CopySource version selector", 400)
+        if len(qualifiers) != 1 or qualifiers[0][0] != "versionId":
+            return _error("InvalidArgument", "Only a single source VersionId is supported", 400)
+        source_version_id = qualifiers[0][1]
+        if not source_version_id or len(source_version_id) > 80:
+            return _error("InvalidArgument", "Invalid CopySource version ID", 400)
+    original_path = unquote(
+        original_header[1:] if original_header.startswith("/") else original_header
+    )
+    src_bucket, slash, src_key = original_path.partition("/")
+    if not slash or not src_bucket or not src_key:
+        return _error("InvalidArgument", "Invalid CopySource bucket/object key", 400)
+    if src_bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "CopySource bucket does not exist", 404)
+    if source_version_id is not None:
+        if not catalog.is_visible_version(src_bucket, src_key, source_version_id):
+            return _error("NoSuchVersion", "CopySource version is not published", 404)
+        try:
+            source_item = catalog.manifests.get(source_version_id)
+        except FileNotFoundError:
+            return _error("NoSuchVersion", "CopySource version not readable", 404)
+        if source_item.bucket != src_bucket or source_item.key != src_key:
+            return _error("NoSuchVersion", "CopySource key mismatch", 404)
+    else:
+        try:
+            source_item = catalog.get(src_bucket, src_key).item
+        except FileNotFoundError:
+            return _error("NoSuchKey", "CopySource object does not exist", 404)
+    if tag_directive == "COPY" and ObjectTagStore(catalog).get(source_item.id):
+        if (store.resolve(owner, "s3:GetObjectTagging") is None
+                or store.resolve(owner, "s3:PutObjectTagging") is None):
+            raise SigV4Error("AccessDenied", "Copying source tags needs tag read/write scopes")
+    existing_tag = MultipartStore(catalog).object_etag(source_item.id, source_item.sha256)
+    if_match = request.headers.get("x-amz-copy-source-if-match")
+    if_none_match = request.headers.get("x-amz-copy-source-if-none-match")
+    quoted_tag = '"' + existing_tag + '"'
+    if (if_match is not None and if_match not in (quoted_tag, "*")
+            or if_none_match is not None and if_none_match in (quoted_tag, "*")):
+        return _error("PreconditionFailed", "CopySource ETag precondition failed", 412)
+    # CopyObject is a metadata-only operation and has no upload body.
+    # Consume streaming requests safely rather than trusting Content-Length.
+    async for block in request.stream():
+        if block:
+            return _error("InvalidRequest", "CopyObject request must have no body", 400)
+    try:
+        result = copy_object(
+            catalog, src_bucket, src_key, bucket, key,
+            expected_source_id=source_item.id,
+            source_version_id=source_version_id,
+            replacement_tags=(inline_tags or []) if tag_directive == "REPLACE" else None,
+            replacement_metadata=copy_properties if metadata_directive == "REPLACE" else None,
+        )
+    except CopyConflict:
+        return _error("OperationAborted", "Concurrent source/destination mutation", 409)
+    copied = ET.Element("CopyObjectResult", xmlns=NAMESPACE)
+    ET.SubElement(copied, "LastModified").text = time.strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()
+    )
+    ET.SubElement(copied, "ETag").text = '"' + result.etag + '"'
+    return Response(ET.tostring(copied, encoding="utf-8", xml_declaration=True),
+                    media_type="application/xml", status_code=200)
+
+
+async def _handle_object_delete(ctx: _S3RequestContext,
+                                expected_head: ExpectedHead | None) -> Response:
+    """DELETE object key (with optional conditional write preconditions)."""
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    try:
+        marker = catalog.delete_marker(
+            bucket, key,
+            expected_generation=expected_head.generation if expected_head else None,
+            expected_object_id=expected_head.object_id if expected_head else None,
+        )
+    except ValueError as exc:
+        if expected_head is not None:
+            raise WritePreconditionError(
+                "PreconditionFailed", "Object changed during conditional DELETE", 412
+            ) from exc
+        raise
+    return Response(status_code=204, headers={
+        "x-amz-delete-marker": "true", "x-amz-version-id": marker,
+    })
+
+
+async def _handle_object_put(ctx: _S3RequestContext,
+                             expected_head: ExpectedHead | None) -> Response:
+    """PUT object key: staged upload with checksums, metadata and tags."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    db = ctx.db
+    catalog = ctx.catalog
+    inline_tags = ctx.inline_tags
+    root = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(root)
+    max_bytes = _webapp.REST_MAX_UPLOAD_BYTES
+    transport = storage_transport(db)
+    await transport.verify_target()
+    fd, name = tempfile.mkstemp(prefix="s3-upload-", dir=root)
+    stage = Path(name)
+    digest = hashlib.sha256()
+    md5 = hashlib.md5(usedforsecurity=False)
+    sha1 = hashlib.sha1(usedforsecurity=False)
+    crc = 0
+    crc32c_value = 0
+    crc64_value = 0
+    length = 0
+    try:
+        with os.fdopen(fd, "wb") as dest:
+            async for block in request.stream():
+                length += len(block)
+                if max_bytes < 1 or length > max_bytes:
+                    return _error("EntityTooLarge", "Upload exceeds configured maximum", 413)
+                digest.update(block)
+                md5.update(block)
+                sha1.update(block)
+                crc = zlib.crc32(block, crc)
+                crc32c_value = crc32c(block, crc32c_value)
+                crc64_value = crc64nvme(block, crc64_value)
+                dest.write(block)
+            dest.flush()
+            os.fsync(dest.fileno())
+        _verify_upload_sha256(
+            request, digest.digest(), md5_digest=md5.digest(),
+            sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
+        )
+        # Enforce bucket quota (same TeleDrive-level policy as the
+        # REST upload path) before any Telegram upload work starts.
+        quota_error = _quota_guard(db, bucket, key, length)
+        if quota_error is not None:
+            return quota_error
+        checksum_crc = request.headers.get("x-amz-checksum-crc32")
+        if checksum_crc and checksum_crc != base64.b64encode((crc & 0xffffffff).to_bytes(4, "big")).decode():
+            return _error("BadDigest", "CRC32 checksum mismatch", 400)
+        declared_crc32c = request.headers.get("x-amz-checksum-crc32c")
+        if declared_crc32c is not None and not hmac.compare_digest(
+            declared_crc32c,
+            base64.b64encode(crc32c_value.to_bytes(4, "big")).decode("ascii"),
+        ):
+            return _error("BadDigest", "CRC32C checksum mismatch", 400)
+        engine = TelegramObjectStorage(
+            catalog.manifests, transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=root,
+        )
+        # Metadata, tags and the head pointer share one SQL
+        # transaction. A failed metadata write cannot publish a
+        # partially described object.
+        http_properties = parse_object_metadata(
+            request.headers, signed_header_names(request),
+        )
+        http_store = ObjectMetadataStore(catalog)
+        tag_store = ObjectTagStore(catalog) if inline_tags is not None else None
+        item = await engine.put_file(bucket, key, stage)
+        http_store.attach_uncommitted(item.id, http_properties)
+        if tag_store is not None:
+            tag_store.attach_uncommitted(item.id, inline_tags)
+        try:
+            catalog.publish(
+                item.id, now=int(time.time()),
+                expected_generation=expected_head.generation if expected_head else None,
+                expected_object_id=expected_head.object_id if expected_head else None,
+            )
+        except ValueError as exc:
+            if expected_head is not None:
+                raise WritePreconditionError(
+                    "PreconditionFailed", "Object changed during conditional PUT", 412
+                ) from exc
+            raise
+        return Response(status_code=200, headers={
+            "ETag": '"' + item.sha256 + '"',
+            "x-amz-version-id": item.id,
+        })
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+def _object_attributes(ctx: _S3RequestContext, item,
+                       item_etag: str) -> Response:
+    """GET ?attributes: GetObjectAttributes response XML."""
+    request = ctx.request
+    catalog = ctx.catalog
+    raw = request.headers.get("x-amz-object-attributes", "")
+    signed = signed_header_names(request)
+    if "x-amz-object-attributes" not in signed:
+        raise SigV4Error("AccessDenied", "Object attributes header must be signed")
+    if len(request.headers.getlist("x-amz-object-attributes")) != 1:
+        return _error("InvalidArgument", "Duplicate object attributes header", 400)
+    requested = raw.split(",")
+    if (not requested or any(not name for name in requested)
+            or len(set(requested)) != len(requested)):
+        return _error("InvalidArgument", "Invalid object attributes list", 400)
+    permitted = {"ETag", "ObjectSize", "Checksum", "StorageClass", "ObjectParts"}
+    if any(name not in permitted for name in requested):
+        return _error("NotImplemented", "Requested object attributes are unsupported", 501)
+
+    options = {}
+    for name, default, low, high in (
+        ("x-amz-max-parts", 1000, 1, 1000),
+        ("x-amz-part-number-marker", 0, 0, MAX_PARTS),
+    ):
+        values = request.headers.getlist(name)
+        if values:
+            if name not in signed:
+                raise SigV4Error("AccessDenied", "Object parts pagination must be signed")
+            if (len(values) != 1
+                    or re.fullmatch(r"[0-9]{1,5}", values[0]) is None
+                    or not low <= int(values[0]) <= high):
+                return _error("InvalidArgument", "Invalid object parts pagination", 400)
+            if "ObjectParts" not in requested:
+                return _error("InvalidArgument", "Part pagination requires ObjectParts", 400)
+            options[name] = int(values[0])
+        else:
+            options[name] = default
+    result = ET.Element("GetObjectAttributesOutput", xmlns=NAMESPACE)
+    if "ETag" in requested:
+        ET.SubElement(result, "ETag").text = '"' + item_etag + '"'
+    if "ObjectSize" in requested:
+        ET.SubElement(result, "ObjectSize").text = str(item.size)
+    if "Checksum" in requested:
+        checksum = ET.SubElement(result, "Checksum")
+        # Immutable object SHA-256 covers the full plaintext bytes,
+        # independent of multipart ETag and physical Telegram chunks.
+        ET.SubElement(checksum, "ChecksumSHA256").text = base64.b64encode(
+            bytes.fromhex(item.sha256)
+        ).decode("ascii")
+        ET.SubElement(checksum, "ChecksumType").text = "FULL_OBJECT"
+    if "StorageClass" in requested:
+        # TeleDrive exposes one immutable STANDARD-like tier; archived
+        # or replica-backed AWS storage classes do not exist here.
+        ET.SubElement(result, "StorageClass").text = "STANDARD"
+    if "ObjectParts" in requested:
+        layout = MultipartStore(catalog).object_parts_for_version(item.id, item.size)
+        # AWS omits ObjectParts for a plain single PUT. This must not
+        # fabricate logical parts out of Telegram's internal chunks.
+        if layout is not None:
+            marker = options["x-amz-part-number-marker"]
+            limit = options["x-amz-max-parts"]
+            remaining = [part for part in layout if part[0] > marker]
+            page = remaining[:limit]
+            listing = ET.SubElement(result, "ObjectParts")
+            for name, value in (
+                ("PartsCount", len(layout)),
+                ("PartNumberMarker", marker),
+                ("MaxParts", limit),
+                ("IsTruncated", str(len(remaining) > len(page)).lower()),
+            ):
+                ET.SubElement(listing, name).text = str(value)
+            if len(remaining) > len(page):
+                ET.SubElement(listing, "NextPartNumberMarker").text = str(page[-1][0])
+            for number, size, digest, _etag in page:
+                part_node = ET.SubElement(listing, "Part")
+                ET.SubElement(part_node, "PartNumber").text = str(number)
+                ET.SubElement(part_node, "Size").text = str(size)
+                ET.SubElement(part_node, "ChecksumSHA256").text = base64.b64encode(
+                    bytes.fromhex(digest)
+                ).decode("ascii")
+    return Response(
+        ET.tostring(result, encoding="utf-8", xml_declaration=True),
+        media_type="application/xml", status_code=200,
+        headers={
+            "x-amz-version-id": item.id,
+            "Last-Modified": http_last_modified(item.created_at),
+        },
+    )
+
+
+async def _handle_object_read(ctx: _S3RequestContext) -> Response:
+    """Object GET/HEAD: versioned reads, preconditions, ranges and
+    streaming downloads. Sets ctx.retain for streamed responses."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    db = ctx.db
+    catalog = ctx.catalog
+    checksum_mode = ctx.checksum_mode
+    if ctx.is_version_read:
+        version_id = request.query_params["versionId"]
+        if not version_id or len(version_id) > 80:
+            return _error("InvalidArgument", "Invalid version ID", 400)
+        if not catalog.is_visible_version(bucket, key, version_id):
+            return _error("NoSuchVersion", "Object version is not published", 404)
+        status_row = db.connection.execute(select(
+            objects.c.status, objects.c.created_at
+        ).where(objects.c.id == version_id)).one_or_none()
+        if status_row is not None and status_row[0] == "delete-marker":
+            response = _error(
+                "MethodNotAllowed", "Requested version is a delete marker", 405,
+            )
+            response.headers.update({
+                "x-amz-delete-marker": "true", "x-amz-version-id": version_id,
+                "Last-Modified": http_last_modified(int(status_row[1])),
+            })
+            return response
+        try:
+            item = catalog.manifests.get(version_id)
+        except FileNotFoundError:
+            return _error("NoSuchVersion", "Object version is not readable", 404)
+        if item.bucket != bucket or item.key != key:
+            return _error("NoSuchVersion", "Version ownership mismatch", 404)
+    else:
+        try:
+            item = catalog.get(bucket, key).item
+        except FileNotFoundError:
+            marker = catalog.current_marker(bucket, key)
+            if marker is not None:
+                result = _error("NoSuchKey", "Current version is a delete marker", 404)
+                result.headers["x-amz-delete-marker"] = "true"
+                result.headers["x-amz-version-id"] = marker
+                return result
+            return _error("NoSuchKey", "The specified key does not exist", 404)
+    item_etag = MultipartStore(catalog).object_etag(item.id, item.sha256)
+    if ctx.is_object_attributes:
+        return _object_attributes(ctx, item, item_etag)
+    http_properties = ObjectMetadataStore(catalog).get(item.id)
+    precondition = read_precondition(request, item_etag, item.created_at)
+    if precondition == 304:
+        return Response(status_code=304, headers={
+            "ETag": '"' + item_etag + '"',
+            "Last-Modified": http_last_modified(item.created_at),
+        })
+    if precondition == 412:
+        return _error("PreconditionFailed", "Object precondition failed", 412)
+    if request.method == "HEAD":
+        return Response(status_code=200, headers=_headers(
+            item, item_etag, http_properties,
+            checksum_mode=(checksum_mode == "ENABLED"),
+        ))
+    start, end, partial = _range(request.headers.get("range"), item.size)
+    transport = storage_transport(db)
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    engine = TelegramObjectStorage(
+        catalog.manifests, transport,
+        chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+    )
+
+    async def stream():
+        try:
+            async for piece in engine.iter_bytes(item.id, start=start, end=end):
+                yield piece
+        finally:
+            db.close()
+
+    ctx.retain = True
+    headers = _headers(item, item_etag, http_properties,
+                       checksum_mode=(checksum_mode == "ENABLED"))
+    headers["Content-Length"] = str(end - start)
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
+    return StreamingResponse(stream(), status_code=206 if partial else 200, headers=headers)
+
+
 async def _handle(request: Request):
     db = None
     retain = False
@@ -625,6 +2040,16 @@ async def _handle(request: Request):
         is_public_access_block = bool(bucket and not separator and "publicAccessBlock" in request.query_params)
         is_bucket_lifecycle = bool(bucket and not separator and "lifecycle" in request.query_params)
         is_bucket_policy_status = bool(bucket and not separator and "policyStatus" in request.query_params)
+        compat_bucket_read = None
+        if bucket and not separator and request.method == "GET":
+            compat_bucket_read = next(
+                (name for name in _COMPAT_BUCKET_READS
+                 if name in request.query_params), None)
+        compat_object_read = None
+        if separator and request.method == "GET":
+            compat_object_read = next(
+                (name for name in _COMPAT_OBJECT_READS
+                 if name in request.query_params), None)
         if is_bucket_lifecycle and (
             len(request.query_params.getlist("lifecycle")) != 1
             or request.query_params.get("lifecycle") != ""
@@ -652,7 +2077,11 @@ async def _handle(request: Request):
             return _error("NotImplemented", "Tagging with multipart selectors unsupported", 501)
         if is_bucket_tagging and "versionId" in request.query_params:
             return _error("NotImplemented", "Bucket tags cannot select object versions", 501)
-        if is_object_attributes:
+        if compat_bucket_read is not None:
+            action = _COMPAT_BUCKET_READS[compat_bucket_read]
+        elif compat_object_read is not None:
+            action = _COMPAT_OBJECT_READS[compat_object_read]
+        elif is_object_attributes:
             if request.method != "GET" or any(
                 p in request.query_params for p in ("uploadId", "uploads", "tagging")
             ):
@@ -732,124 +2161,38 @@ async def _handle(request: Request):
             "retention", "legal-hold", "logging",
             "encryption", "object-lock", "versionId",
         }
+        active_compat = compat_bucket_read or compat_object_read
         if any(parameter in request.query_params and (
             (parameter != "versionId" or not (is_version_read or is_version_tagging or is_version_delete))
             and (parameter != "versions" or not is_version_listing)
+            and parameter != active_compat
         ) for parameter in unsupported):
             return _error("NotImplemented", "This S3 extension is not implemented", 501)
 
         master = load_master_key()
         db = db_connect()
         store = S3CredentialStore(db, master)
+        ctx = _S3RequestContext(
+            request=request, db=db, store=store, master=master,
+            bucket=bucket, key=key,
+            multi_delete=multi_delete, mpu_bucket_list=mpu_bucket_list,
+            mpu_start=mpu_start, mpu_id=mpu_id, mpu_part=mpu_part,
+            mpu_complete=mpu_complete, mpu_abort=mpu_abort, mpu_list=mpu_list,
+            is_version_read=is_version_read, is_version_delete=is_version_delete,
+            is_version_listing=is_version_listing,
+            is_object_attributes=is_object_attributes,
+            is_object_tagging=is_object_tagging,
+            is_version_tagging=is_version_tagging,
+            is_bucket_tagging=is_bucket_tagging, is_bucket_cors=is_bucket_cors,
+            is_bucket_versioning=is_bucket_versioning,
+            is_public_access_block=is_public_access_block,
+            is_bucket_lifecycle=is_bucket_lifecycle,
+            is_bucket_policy_status=is_bucket_policy_status,
+        )
         if form_upload:
-            if request.headers.get("authorization"):
-                raise SigV4Error("AccessDenied", "Ambiguous form and header authentication")
-            _reject_unimplemented_write_options(request)
-            max_upload = _webapp.REST_MAX_UPLOAD_BYTES
-            form_limit = min(FORM_LIMIT, max_upload)
-            if form_limit < 1:
-                return _error("EntityTooLarge", "Form upload size is disabled", 413)
-            form_bytes = bytearray()
-            async for block in request.stream():
-                form_bytes.extend(block)
-                if len(form_bytes) > form_limit:
-                    return _error("EntityTooLarge", "Browser upload form too large", 413)
-            post_fields, payload = parse_form(
-                request.headers.get("content-type", ""), bytes(form_bytes),
-            )
-            post_key = verify_post_policy(
-                post_fields, payload, bucket, store.resolve, max_bytes=form_limit,
-            )
-            # Signed form fields are validated using the same bounded
-            # metadata contract as ordinary S3 PUT. Browser-controlled MIME,
-            # cache rules and x-amz-meta-* values must not be silently
-            # accepted without durable storage.
-            post_headers = {
-                name.lower(): value for name, value in post_fields.items()
-                if name.lower() in STANDARD_HEADERS
-                or name.startswith("x-amz-meta-")
-            }
-            post_metadata = parse_object_metadata(
-                post_headers, set(post_headers),
-            )
-            # Tagging is a separate S3 capability, not included in generic
-            # PutObject credentials. Enforce BOTH privileges before sending
-            # even a single byte, then publish tags in the HEAD transaction.
-            form_tags = None
-            if "x-amz-tagging" in post_fields:
-                credential_access = post_fields["x-amz-credential"].split("/", 1)[0]
-                if store.resolve(credential_access, "s3:PutObjectTagging") is None:
-                    raise SigV4Error("AccessDenied", "PutObjectTagging permission required")
-                form_tags = _parse_initial_tags(post_fields["x-amz-tagging"])
-            post_catalog = BucketCatalog(ManifestStore(db))
-            if bucket not in post_catalog.list_buckets():
-                return _error("NoSuchBucket", "Upload bucket does not exist", 404)
-            directory = Path(_webapp.STORAGE_SCRATCH_DIR)
-            _secure_mkdir(directory)
-            fd, temp_name = tempfile.mkstemp(prefix="s3-form-", dir=directory)
-            staged = Path(temp_name)
-            try:
-                with os.fdopen(fd, "wb") as dest:
-                    dest.write(payload)
-                    dest.flush()
-                    os.fsync(dest.fileno())
-                transport = storage_transport(db)
-                await transport.verify_target()
-                quota_error = _quota_guard(db, bucket, post_key, len(payload))
-                if quota_error is not None:
-                    return quota_error
-                obj = await TelegramObjectStorage(
-                    post_catalog.manifests, transport,
-                    chunk_size=RECOMMENDED_CHUNK_SIZE,
-                    scratch_directory=directory,
-                ).put_file(bucket, post_key, staged)
-                ObjectMetadataStore(post_catalog).attach_uncommitted(
-                    obj.id, post_metadata,
-                )
-                if form_tags is not None:
-                    ObjectTagStore(post_catalog).attach_uncommitted(
-                        obj.id, form_tags,
-                    )
-                post_catalog.publish(obj.id, now=int(time.time()))
-                etag = '"' + obj.sha256 + '"'
-                response_headers = {"ETag": etag, "x-amz-version-id": obj.id}
-                # A redirect is an explicit signed browser instruction. The
-                # gateway never contacts the target and does not disclose
-                # credentials or original payload in the callback parameters.
-                redirect = post_fields.get("success_action_redirect")
-                if redirect is not None:
-                    parsed_redirect = urlsplit(redirect)  # verified HTTPS URL
-                    parameters = urlencode({
-                        "bucket": bucket, "key": post_key, "etag": etag,
-                    })
-                    redirect_query = (parsed_redirect.query + "&" + parameters
-                                      if parsed_redirect.query else parameters)
-                    location = urlunsplit((
-                        parsed_redirect.scheme, parsed_redirect.netloc,
-                        parsed_redirect.path, redirect_query, "",
-                    ))
-                    return Response(status_code=303, headers={
-                        **response_headers, "Location": location,
-                    })
-                # The requested response status is itself an exact signed
-                # policy condition; no unsigned status override is accepted.
-                status = int(post_fields.get("success_action_status", "204"))
-                if status == 201:
-                    # Quote untrusted key text before placing it in Location.
-                    # The XML serializer escapes the same key in the body.
-                    location = (str(request.base_url).rstrip("/")
-                                + "/" + quote(bucket, safe="")
-                                + "/" + quote(post_key, safe="/"))
-                    response_headers["Location"] = location
-                    return Response(_xml("PostResponse", [
-                        ("Location", location), ("Bucket", bucket),
-                        ("Key", post_key), ("ETag", etag),
-                    ]), media_type="application/xml", status_code=201,
-                        headers=response_headers)
-                return Response(status_code=status, headers=response_headers)
-            finally:
-                staged.unlink(missing_ok=True)
+            return await _handle_form_upload(ctx)
         owner = verify_header_signature(request, store.resolve, action)
+        ctx.owner = owner
         # Every signed S3 method must reject unsupported retention, SSE,
         # requester-payer and governance semantics, including GET/HEAD/DELETE.
         # Ignoring those headers can turn a supposedly protected delete into
@@ -882,6 +2225,9 @@ async def _handle(request: Request):
             separator and request.method == "PUT" and not is_object_tagging
         ) else None
         catalog = BucketCatalog(ManifestStore(db))
+        ctx.inline_tags = inline_tags
+        ctx.checksum_mode = checksum_mode
+        ctx.catalog = catalog
 
         if not bucket:
             return Response(
@@ -890,609 +2236,27 @@ async def _handle(request: Request):
             )
 
         if not separator:
-            if multi_delete:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "The specified bucket does not exist", 404)
-                if request.headers.get("x-amz-mfa") or request.headers.get(
-                    "x-amz-bypass-governance-retention"
-                ):
-                    return _error("NotImplemented", "Retention/MFA Delete unsupported", 501)
-                body = bytearray()
-                async for block in request.stream():
-                    body.extend(block)
-                    if len(body) > MAX_XML_BYTES:
-                        raise BatchDeleteError("MalformedXML", "DeleteObjects XML exceeds 1 MiB")
-                payload = bytes(body)
-                verify_body(payload, request.headers)
-                batch = parse_batch(payload)
-                result = ET.Element("DeleteResult", xmlns=NAMESPACE)
-                for key_to_delete in batch.keys:
-                    try:
-                        marker = catalog.delete_marker(bucket, key_to_delete)
-                    except ValueError:
-                        problem = ET.SubElement(result, "Error")
-                        ET.SubElement(problem, "Key").text = key_to_delete
-                        ET.SubElement(problem, "Code").text = "InvalidObjectName"
-                        ET.SubElement(problem, "Message").text = "Invalid object name"
-                        continue
-                    if not batch.quiet:
-                        deleted = ET.SubElement(result, "Deleted")
-                        ET.SubElement(deleted, "Key").text = key_to_delete
-                        ET.SubElement(deleted, "VersionId").text = marker
-                        ET.SubElement(deleted, "DeleteMarker").text = "true"
-                        ET.SubElement(deleted, "DeleteMarkerVersionId").text = marker
-                return Response(ET.tostring(result, encoding="utf-8", xml_declaration=True),
-                                media_type="application/xml", status_code=200)
-            if is_bucket_policy_status:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "Bucket does not exist", 404)
-                # Public grants and bucket policies cannot be enabled through
-                # this private-only gateway. This is NOT a bucket policy engine.
-                return Response(_xml("PolicyStatus", [("IsPublic", "false")]),
-                                media_type="application/xml")
-            if is_bucket_lifecycle:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "Bucket not found", 404)
-                rules = BucketLifecycleStore(catalog)
-                if request.method == "GET":
-                    value = rules.get(bucket)
-                    if value is None:
-                        return _error("NoSuchLifecycleConfiguration", "No lifecycle configuration", 404)
-                    return Response(lifecycle_xml(value), media_type="application/xml")
-                if request.method == "PUT":
-                    data = bytearray()
-                    async for block in request.stream():
-                        data.extend(block)
-                        if len(data) > MAX_LIFECYCLE_XML:
-                            raise LifecycleError("MalformedXML", "Lifecycle XML exceeds 32 KiB")
-                    _verify_bucket_control_payload(request, bytes(data))
-                    rules.replace(bucket, parse_lifecycle_xml(bytes(data)))
-                    return Response(status_code=200)
-                if request.method == "DELETE":
-                    async for block in request.stream():
-                        if block:
-                            raise LifecycleError("InvalidRequest", "DeleteBucketLifecycle cannot have body")
-                    rules.replace(bucket, None)
-                    return Response(status_code=204)
-                return _error("NotImplemented", "Unsupported lifecycle method", 501)
-            if is_public_access_block:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "Bucket does not exist", 404)
-                if request.method == "GET":
-                    return Response(public_access_xml(), media_type="application/xml")
-                if request.method == "PUT":
-                    payload = bytearray()
-                    async for block in request.stream():
-                        payload.extend(block)
-                        if len(payload) > MAX_PUBLIC_ACCESS_XML_BYTES:
-                            raise PublicAccessError("MalformedXML",
-                                                    "Public access XML exceeds 16 KiB")
-                    _verify_bucket_control_payload(request, bytes(payload))
-                    parse_public_access_xml(bytes(payload))
-                    return Response(status_code=200)
-                return _error("NotImplemented", "Unsupported public access method", 501)
-            if is_bucket_versioning:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "Bucket does not exist", 404)
-                if request.method == "GET":
-                    return Response(versioning_xml(), media_type="application/xml")
-                if request.method == "PUT":
-                    payload = bytearray()
-                    async for block in request.stream():
-                        payload.extend(block)
-                        if len(payload) > MAX_VERSIONING_XML_BYTES:
-                            raise VersioningError("MalformedXML",
-                                                  "Versioning XML exceeds 16 KiB")
-                    _verify_bucket_control_payload(request, bytes(payload))
-                    parse_versioning_xml(bytes(payload))
-                    return Response(status_code=200)
-                return _error("NotImplemented", "Unsupported bucket versioning method", 501)
-            if is_bucket_cors:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "Bucket does not exist", 404)
-                cors_store = BucketCORSStore(catalog)
-                if request.method == "GET":
-                    rules = cors_store.get(bucket)
-                    if rules is None:
-                        return _error("NoSuchCORSConfiguration", "No CORS configuration", 404)
-                    return Response(cors_xml(rules), media_type="application/xml")
-                if request.method == "PUT":
-                    body = bytearray()
-                    async for block in request.stream():
-                        body.extend(block)
-                        if len(body) > MAX_CORS_XML_BYTES:
-                            raise CORSError("MalformedXML", "CORS XML exceeds 64 KiB")
-                    _verify_upload_sha256(
-                        request, hashlib.sha256(body).digest(),
-                        crc64nvme_value=crc64nvme(body),
-                    )
-                    md5_header = request.headers.get("content-md5")
-                    if md5_header and not hmac.compare_digest(
-                        md5_header,
-                        base64.b64encode(hashlib.md5(body, usedforsecurity=False).digest()).decode()
-                    ):
-                        raise CORSError("BadDigest", "Content-MD5 mismatch")
-                    cors_store.replace(bucket, parse_cors_xml(bytes(body)))
-                    return Response(status_code=200)
-                if request.method == "DELETE":
-                    async for block in request.stream():
-                        if block:
-                            raise CORSError("InvalidRequest", "DeleteBucketCors must not have a body")
-                    cors_store.replace(bucket, [])
-                    return Response(status_code=204)
-                return _error("NotImplemented", "Unsupported bucket CORS operation", 501)
-            if is_bucket_tagging:
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "Bucket does not exist", 404)
-                tagstore = BucketTagStore(catalog)
-                if request.method == "GET":
-                    values = tagstore.get(bucket)
-                    if not values:
-                        return _error("NoSuchTagSet", "No bucket tag set exists", 404)
-                    return Response(_tag_xml(values), media_type="application/xml")
-                if request.method == "PUT":
-                    tagstore.replace(bucket, await _tag_request_tags(request, bucket=True))
-                    return Response(status_code=200)
-                if request.method == "DELETE":
-                    async for block in request.stream():
-                        if block:
-                            raise TaggingError("InvalidRequest", "DeleteBucketTagging must have no body")
-                    tagstore.replace(bucket, [])
-                    return Response(status_code=204)
-                return _error("NotImplemented", "Unsupported bucket tagging method", 501)
-            if request.method == "PUT":
-                catalog.create_bucket(bucket, int(time.time()))
-                return Response(status_code=200)
-            if request.method == "DELETE":
-                try:
-                    catalog.delete_bucket(bucket)
-                except ValueError as exc:
-                    raise MultipartError("BucketNotEmpty", str(exc), 409) from exc
-                return Response(status_code=204)
-            if bucket not in catalog.list_buckets():
-                return _error("NoSuchBucket", "The specified bucket does not exist", 404)
-            if request.method == "HEAD":
-                return Response(status_code=200)
-            if "location" in request.query_params:
-                if request.method != "GET":
-                    return _error("MethodNotAllowed", "GetBucketLocation requires GET", 405)
-                if bucket not in catalog.list_buckets():
-                    return _error("NoSuchBucket", "The specified bucket does not exist", 404)
-                # AWS represents us-east-1 as an empty LocationConstraint.
-                root = ET.Element("LocationConstraint", xmlns=NAMESPACE)
-                return Response(
-                    ET.tostring(root, encoding="utf-8", xml_declaration=True),
-                    media_type="application/xml",
-                )
-            if is_version_listing:
-                if len(request.query_params.getlist("versions")) != 1 or (
-                    request.query_params.get("versions") not in ("",)
-                ):
-                    return _error("InvalidArgument", "Invalid versions selector", 400)
-                for marker in ("prefix", "max-keys", "key-marker", "version-id-marker"):
-                    if len(request.query_params.getlist(marker)) > 1:
-                        return _error("InvalidArgument", "Ambiguous version listing parameter", 400)
-                try:
-                    maximum = int(request.query_params.get("max-keys", "1000"))
-                    key_marker = request.query_params.get("key-marker", "")
-                    version_marker = request.query_params.get("version-id-marker", "")
-                    prefix = request.query_params.get("prefix", "")
-                    entries, has_more = catalog.list_bucket_versions(
-                        bucket, prefix=prefix, key_marker=key_marker,
-                        version_marker=version_marker, limit=maximum,
-                    )
-                except ValueError:
-                    return _error("InvalidArgument", "Invalid version list cursor or limit", 400)
-                root = ET.Element("ListVersionsResult", xmlns=NAMESPACE)
-                for label, value in (
-                    ("Name", bucket), ("Prefix", prefix),
-                    ("KeyMarker", key_marker), ("VersionIdMarker", version_marker),
-                    ("MaxKeys", maximum), ("IsTruncated", str(has_more).lower()),
-                ):
-                    ET.SubElement(root, label).text = str(value)
-                if has_more and entries:
-                    ET.SubElement(root, "NextKeyMarker").text = entries[-1]["key"]
-                    ET.SubElement(root, "NextVersionIdMarker").text = entries[-1]["version_id"]
-                mpu = MultipartStore(catalog)
-                for entry in entries:
-                    element = ET.SubElement(
-                        root, "DeleteMarker" if entry["is_delete_marker"] else "Version"
-                    )
-                    fields = [
-                        ("Key", entry["key"]), ("VersionId", entry["version_id"]),
-                        ("IsLatest", str(entry["is_current"]).lower()),
-                        ("LastModified", time.strftime(
-                            "%Y-%m-%dT%H:%M:%S.000Z",
-                            time.gmtime(entry["committed_ns"] // 1_000_000_000),
-                        )),
-                    ]
-                    if not entry["is_delete_marker"]:
-                        fields += [
-                            ("ETag", '"' + mpu.object_etag(
-                                entry["version_id"], entry["sha256"]
-                            ) + '"'),
-                            ("Size", entry["size"]), ("StorageClass", "STANDARD"),
-                        ]
-                    for label, value in fields:
-                        ET.SubElement(element, label).text = str(value)
-                return Response(
-                    ET.tostring(root, encoding="utf-8", xml_declaration=True),
-                    media_type="application/xml",
-                )
-            if mpu_bucket_list:
-                query = request.query_params
-                prefix = query.get("prefix", "")
-                delimiter = query.get("delimiter", "")
-                encoding = query.get("encoding-type")
-                if encoding not in (None, "url"):
-                    return _error("InvalidArgument", "Only encoding-type=url is supported", 400)
-                if len(prefix.encode("utf-8")) > 1024 or len(delimiter.encode("utf-8")) > 16:
-                    return _error("InvalidArgument", "Multipart prefix/delimiter too long", 400)
-                try:
-                    limit = int(query.get("max-uploads", "1000"))
-                except ValueError:
-                    return _error("InvalidArgument", "Invalid max-uploads", 400)
-                if not 1 <= limit <= 1000:
-                    return _error("InvalidArgument", "max-uploads must be 1..1000", 400)
-                marker_key = query.get("key-marker", "")
-                marker_id = query.get("upload-id-marker", "")
-                if marker_id and not marker_key:
-                    return _error("InvalidArgument", "Upload-id marker requires key marker", 400)
-                multipart = MultipartStore(catalog)
-                if delimiter:
-                    entries, more, next_marker = multipart.list_uploads_grouped(
-                        bucket, owner, prefix=prefix, delimiter=delimiter,
-                        after_key=marker_key, after_id=marker_id, limit=limit,
-                    )
-                else:
-                    records, more = multipart.list_uploads(
-                        bucket, owner, prefix=prefix, after_key=marker_key,
-                        after_id=marker_id, limit=limit,
-                    )
-                    entries = [("upload", record) for record in records]
-                    next_marker = ((records[-1].object_key, records[-1].id)
-                                   if records else ("", ""))
-
-                encode = (lambda value: quote(value, safe="/") if encoding == "url" else value)
-                root = ET.Element("ListMultipartUploadsResult", xmlns=NAMESPACE)
-                for label, val in (
-                    ("Bucket", bucket), ("KeyMarker", encode(marker_key)),
-                    ("UploadIdMarker", marker_id), ("Prefix", encode(prefix)),
-                    ("MaxUploads", limit), ("IsTruncated", str(more).lower()),
-                ):
-                    ET.SubElement(root, label).text = str(val)
-                if delimiter:
-                    ET.SubElement(root, "Delimiter").text = encode(delimiter)
-                if encoding:
-                    ET.SubElement(root, "EncodingType").text = encoding
-                if more:
-                    ET.SubElement(root, "NextKeyMarker").text = encode(next_marker[0])
-                    ET.SubElement(root, "NextUploadIdMarker").text = next_marker[1]
-                for kind, value in entries:
-                    if kind == "prefix":
-                        ET.SubElement(
-                            ET.SubElement(root, "CommonPrefixes"), "Prefix"
-                        ).text = encode(value)
-                        continue
-                    item = ET.SubElement(root, "Upload")
-                    for label, contents in (
-                        ("Key", encode(value.object_key)), ("UploadId", value.id),
-                        ("StorageClass", "STANDARD"),
-                        ("Initiated", time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
-                                                    time.gmtime(value.created_at))),
-                    ):
-                        ET.SubElement(item, label).text = str(contents)
-                return Response(ET.tostring(root, encoding="utf-8", xml_declaration=True),
-                                media_type="application/xml")
-            list_type = request.query_params.get("list-type")
-            if list_type not in (None, "2"):
-                return _error("NotImplemented", "Only ListObjectsV1/V2 are supported", 501)
-            version_one = list_type is None
-            prefix = request.query_params.get("prefix", "")
-            delimiter = request.query_params.get("delimiter", "")
-            encoding_type = request.query_params.get("encoding-type")
-            if encoding_type not in (None, "url"):
-                return _error("InvalidArgument", "Unsupported list encoding-type", 400)
-            if len(prefix.encode("utf-8")) > 1024 or len(delimiter.encode("utf-8")) > 16:
-                return _error("InvalidArgument", "Prefix or delimiter is too large", 400)
-            if version_one:
-                if any(p in request.query_params for p in ("continuation-token", "start-after")):
-                    return _error("InvalidArgument", "V2 cursor is not a V1 marker", 400)
-                after = request.query_params.get("marker", "")
-                # V1 NextMarker may denote a CommonPrefix. Skip every
-                # descendant of that prefix instead of returning it again.
-                skip_prefix = after if delimiter and after.endswith(delimiter) else ""
-                token = None
-            else:
-                if "marker" in request.query_params:
-                    return _error("InvalidArgument", "V1 marker cannot be used with V2", 400)
-                token = request.query_params.get("continuation-token")
-                if token:
-                    after, skip_prefix = _cursor_decode(token, master, bucket, prefix, delimiter)
-                else:
-                    after = request.query_params.get("start-after", "")
-                    skip_prefix = ""
-            try:
-                limit = int(request.query_params.get("max-keys", "1000"))
-            except ValueError:
-                return _error("InvalidArgument", "Invalid max-keys", 400)
-            if limit < 1 or limit > 1000:
-                return _error("InvalidArgument", "max-keys must be between 1 and 1000", 400)
-            keys, common, last, skipped, more = _page(
-                catalog, bucket, prefix, delimiter, after, limit, skip_prefix
-            )
-            next_token = (_cursor_encode(master, bucket, prefix, delimiter, last, skipped)
-                          if more and not version_one else None)
-            next_marker = (max([item.item.key for item in keys] + common)
-                           if more and version_one and (keys or common) else None)
-            tags = MultipartStore(catalog)
-            return Response(_list_xml(bucket, keys, common, prefix, limit,
-                                      after if version_one or not token else "",
-                                      delimiter, more, next_token,
-                                      lambda obj: tags.object_etag(obj.id, obj.sha256),
-                                      version_one=version_one, next_marker=next_marker,
-                                      encoding_type=encoding_type),
-                            media_type="application/xml")
-
+            return await _handle_bucket_route(ctx)
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "The specified bucket does not exist", 404)
         if not key:
             return _error("InvalidObjectName", "Object key is empty", 400)
 
+        if compat_object_read is not None:
+            # The probe must address an existing current object.
+            try:
+                catalog.get(bucket, key)
+            except FileNotFoundError:
+                return _error("NoSuchKey", "The requested resource does not exist", 404)
+            return _compat_object_read_response(compat_object_read, owner)
+
         if is_object_tagging:
-            if is_version_tagging:
-                selected_id = request.query_params.get("versionId", "")
-                if not selected_id or len(selected_id) > 80:
-                    return _error("InvalidArgument", "Invalid object VersionId", 400)
-                if not catalog.is_visible_version(bucket, key, selected_id):
-                    return _error("NoSuchVersion", "Object version is not published", 404)
-                try:
-                    version_item = catalog.manifests.get(selected_id)
-                except FileNotFoundError:
-                    return _error("NoSuchVersion", "Object version is not ready", 404)
-                if version_item.bucket != bucket or version_item.key != key:
-                    return _error("NoSuchVersion", "Version ownership mismatch", 404)
-                target_id = selected_id
-            else:
-                try:
-                    target_id = catalog.get(bucket, key).item.id
-                except FileNotFoundError:
-                    return _error("NoSuchKey", "Object does not exist", 404)
-            tags = ObjectTagStore(catalog)
-            if request.method == "GET":
-                return Response(_tag_xml(tags.get(target_id)),
-                                media_type="application/xml", status_code=200,
-                                headers={"x-amz-version-id": target_id})
-            if request.method == "PUT":
-                parsed = await _tag_request_tags(request)
-                if is_version_tagging:
-                    tags.replace_published(bucket, key, target_id, parsed)
-                else:
-                    tags.replace_current(bucket, key, parsed)
-                return Response(status_code=200, headers={"x-amz-version-id": target_id})
-            if request.method == "DELETE":
-                async for block in request.stream():
-                    if block:
-                        raise TaggingError("InvalidRequest", "DeleteObjectTagging must have no body")
-                if is_version_tagging:
-                    tags.replace_published(bucket, key, target_id, [])
-                else:
-                    tags.replace_current(bucket, key, [])
-                return Response(status_code=204, headers={"x-amz-version-id": target_id})
-            return _error("NotImplemented", "Unsupported object tagging method", 501)
+            return await _handle_object_tagging(ctx)
 
         if mpu_start or mpu_part or mpu_complete or mpu_abort or mpu_list:
-            mpu = MultipartStore(catalog)
-            if mpu_start:
-                # Initiate is metadata-only. Reject any supplied body before
-                # allocating a durable multipart session, including if a
-                # leaked presigned URL is replayed with altered content.
-                async for block in request.stream():
-                    if block:
-                        raise MultipartError(
-                            "InvalidRequest", "CreateMultipartUpload requires an empty body"
-                        )
-                http_properties = parse_object_metadata(
-                    request.headers, signed_header_names(request),
-                )
-                upload_id = mpu.initiate(
-                    bucket, key, owner, http_metadata=http_properties,
-                )
-                return Response(_xml("InitiateMultipartUploadResult", [
-                    ("Bucket", bucket), ("Key", key), ("UploadId", upload_id),
-                ]), media_type="application/xml", status_code=200)
-            upload_id = mpu_id
-            if not upload_id:
-                raise MultipartError("NoSuchUpload", "Missing UploadId", 404)
-            if mpu_abort:
-                mpu.abort(upload_id, bucket, key, owner)
-                return Response(status_code=204)
-            if mpu_list:
-                try:
-                    raw_marker = request.query_params.get("part-number-marker", "0")
-                    raw_limit = request.query_params.get("max-parts", "1000")
-                    if (re.fullmatch(r"[0-9]{1,5}", raw_marker) is None
-                            or re.fullmatch(r"[0-9]{1,4}", raw_limit) is None):
-                        raise ValueError("Invalid decimal")
-                    marker = int(raw_marker)
-                    limit = int(raw_limit)
-                except ValueError:
-                    raise MultipartError("InvalidArgument", "Invalid ListParts pagination")
-                selected_parts, more = mpu.list_parts_page(
-                    upload_id, bucket, key, owner, marker=marker, limit=limit,
-                )
-                result = ET.Element("ListPartsResult", xmlns=NAMESPACE)
-                for title, val in (
-                    ("Bucket", bucket), ("Key", key), ("UploadId", upload_id),
-                    ("PartNumberMarker", marker), ("MaxParts", limit),
-                    ("StorageClass", "STANDARD"),
-                    ("IsTruncated", str(more).lower()),
-                ):
-                    ET.SubElement(result, title).text = str(val)
-                if more:
-                    ET.SubElement(result, "NextPartNumberMarker").text = str(
-                        selected_parts[-1].number
-                    )
-                for part in selected_parts:
-                    row = ET.SubElement(result, "Part")
-                    ET.SubElement(row, "PartNumber").text = str(part.number)
-                    ET.SubElement(row, "ETag").text = '"' + part.etag + '"'
-                    ET.SubElement(row, "LastModified").text = time.strftime(
-                        "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(part.updated_at),
-                    )
-                    ET.SubElement(row, "Size").text = str(part.size)
-                return Response(ET.tostring(result, encoding="utf-8", xml_declaration=True),
-                                media_type="application/xml")
-            if mpu_complete:
-                mpu.require(upload_id, bucket, key, owner, allow_completed=True)
-                expected_completion_head = check_write_precondition(
-                    request, catalog, bucket, key,
-                )
-                content = bytearray()
-                async for block in request.stream():
-                    content.extend(block)
-                    if len(content) > 1024 * 1024:
-                        raise MultipartError("MalformedXML", "Complete XML exceeds 1 MiB")
-                if hashlib.sha256(content).hexdigest() != request.headers.get("x-amz-content-sha256"):
-                    raise MultipartError("XAmzContentSHA256Mismatch", "Completion XML checksum mismatch")
-                if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
-                    raise MultipartError("MalformedXML", "XML entities are not accepted")
-                try:
-                    document = SafeET.fromstring(content)
-                    if document.tag.rsplit("}", 1)[-1] != "CompleteMultipartUpload":
-                        raise ValueError("Wrong XML root")
-                    selected = []
-                    for element in document:
-                        if element.tag.rsplit("}", 1)[-1] != "Part":
-                            raise ValueError("Unexpected XML element")
-                        number = element.findtext("{*}PartNumber")
-                        etag = element.findtext("{*}ETag")
-                        if not number or not number.isdigit() or not etag:
-                            raise ValueError("Missing part number or ETag")
-                        selected.append((int(number), etag.strip('"').lower()))
-                except (ValueError, ET.ParseError) as exc:
-                    raise MultipartError("MalformedXML", "Invalid CompleteMultipartUpload XML") from exc
-                transport = storage_transport(db)
-                scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
-                _secure_mkdir(scratch)
-                # Enforce bucket quota using the total selected part size
-                # before any assembly/publish work begins. Query the parts
-                # table directly: list_parts() enforces upload ownership and
-                # would reject the idempotent repeat of an already-completed
-                # upload.
-                from teledrive.s3.multipart import parts as _parts_table
-                selected_numbers = {number for number, _ in selected}
-                part_rows = db.connection.execute(
-                    select(_parts_table.c.number, _parts_table.c.size).where(
-                        _parts_table.c.upload_id == upload_id
-                    )
-                ).all()
-                selected_size = sum(
-                    size for number, size in part_rows
-                    if number in selected_numbers
-                )
-                quota_error = _quota_guard(db, bucket, key, selected_size)
-                if quota_error is not None:
-                    return quota_error
-                engine = TelegramObjectStorage(
-                    catalog.manifests, transport,
-                    chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
-                )
-                finished = await mpu.complete(
-                    upload_id, bucket, key, owner, selected, engine,
-                    expected_generation=(
-                        expected_completion_head.generation
-                        if expected_completion_head else None
-                    ),
-                    expected_object_id=(
-                        expected_completion_head.object_id
-                        if expected_completion_head else None
-                    ),
-                )
-                return Response(_xml("CompleteMultipartUploadResult", [
-                    ("Bucket", bucket), ("Key", key), ("ETag", '"' + finished.etag + '"'),
-                ]), status_code=200, media_type="application/xml")
-            # UploadPart: checksum is verified before any Telegram send.
-            mpu.require(upload_id, bucket, key, owner)
-            try:
-                number = int(request.query_params.get("partNumber", ""))
-            except ValueError:
-                raise MultipartError("InvalidArgument", "Invalid part number")
-            if not 1 <= number <= MAX_PARTS:
-                raise MultipartError("InvalidArgument", "Invalid part number")
-            scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
-            _secure_mkdir(scratch)
-            max_bytes = _webapp.REST_MAX_UPLOAD_BYTES
-            fd, name = tempfile.mkstemp(prefix="s3-part-", dir=scratch)
-            stage = Path(name)
-            try:
-                sha = hashlib.sha256()
-                md5 = hashlib.md5(usedforsecurity=False)
-                sha1 = hashlib.sha1(usedforsecurity=False)
-                crc = 0
-                crc32c_value = 0
-                crc64_value = 0
-                size = 0
-                with os.fdopen(fd, "wb") as output:
-                    async for block in request.stream():
-                        size += len(block)
-                        if max_bytes < 1 or size > max_bytes:
-                            raise MultipartError("EntityTooLarge", "Part exceeds configured upload maximum", 413)
-                        sha.update(block)
-                        md5.update(block)
-                        sha1.update(block)
-                        crc = zlib.crc32(block, crc)
-                        crc32c_value = crc32c(block, crc32c_value)
-                        crc64_value = crc64nvme(block, crc64_value)
-                        output.write(block)
-                    output.flush()
-                    os.fsync(output.fileno())
-                _verify_upload_sha256(
-                    request, sha.digest(), md5_digest=md5.digest(),
-                    sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
-                )
-                checksum_crc = request.headers.get("x-amz-checksum-crc32")
-                if checksum_crc and checksum_crc != base64.b64encode(
-                    (crc & 0xffffffff).to_bytes(4, "big")
-                ).decode():
-                    raise MultipartError("BadDigest", "CRC32 checksum mismatch")
-                declared_crc32c = request.headers.get("x-amz-checksum-crc32c")
-                if declared_crc32c is not None and not hmac.compare_digest(
-                    declared_crc32c,
-                    base64.b64encode(crc32c_value.to_bytes(4, "big")).decode("ascii"),
-                ):
-                    raise MultipartError("BadDigest", "CRC32C checksum mismatch")
-                transport = storage_transport(db)
-                await transport.verify_target()
-                engine = TelegramObjectStorage(
-                    catalog.manifests, transport,
-                    chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
-                )
-                staged = await engine.put_file(bucket, key, stage)
-                tag = md5.hexdigest()
-                mpu.record_part(upload_id, bucket, key, owner,
-                                number=number, object_id=staged.id, etag=tag)
-                return Response(status_code=200, headers={"ETag": '"' + tag + '"'})
-            finally:
-                stage.unlink(missing_ok=True)
-
+            return await _handle_multipart(ctx)
         if is_version_delete:
-            if any(h in request.headers for h in ("if-match", "if-none-match")):
-                return _error("NotImplemented", "Conditional VersionId delete unsupported", 501)
-            version_id = request.query_params["versionId"]
-            if not version_id or len(version_id) > 80:
-                return _error("InvalidArgument", "Invalid version ID", 400)
-            is_marker = db.connection.execute(select(objects.c.status).where(
-                objects.c.id == version_id,
-                objects.c.bucket == bucket,
-                objects.c.object_key == key,
-            )).scalar_one_or_none() == "delete-marker"
-            if not catalog.delete_version(bucket, key, version_id):
-                return _error("NoSuchVersion", "Version does not exist", 404)
-            headers = {"x-amz-version-id": version_id}
-            if is_marker:
-                headers["x-amz-delete-marker"] = "true"
-            return Response(status_code=204, headers=headers)
+            return await _handle_version_delete(ctx)
 
         expected_head = None
         if request.method in ("PUT", "DELETE") and not request.headers.get("x-amz-copy-source"):
@@ -1501,397 +2265,16 @@ async def _handle(request: Request):
             )
 
         if request.method == "PUT" and request.headers.get("x-amz-copy-source") is not None:
-            # The source path must be signed. Otherwise a valid PUT signature
-            # could be replayed to copy a different private source object.
-            if "X-Amz-Algorithm" in request.query_params:
-                raise SigV4Error("NotImplemented", "Presigned CopyObject unsupported")
-            authorization = request.headers.get("authorization", "")
-            signed_headers = authorization.partition("SignedHeaders=")[2].split(",", 1)[0].split(";")
-            source_header = request.headers["x-amz-copy-source"]
-            if ("x-amz-copy-source" not in signed_headers
-                    or store.resolve(owner, "s3:GetObject") is None):
-                raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
-            qualifiers = (
-                "x-amz-copy-source-if-match", "x-amz-copy-source-if-none-match",
-            )
-            for condition in qualifiers:
-                if request.headers.get(condition) is not None and condition not in signed_headers:
-                    raise SigV4Error("AccessDenied", "Copy precondition must be signed")
-            unsupported_headers = (
-                "x-amz-copy-source-if-modified-since",
-                "x-amz-copy-source-if-unmodified-since",
-                "x-amz-copy-source-range",
-                "x-amz-server-side-encryption", "x-amz-storage-class",
-            )
-            if any(request.headers.get(name) is not None for name in unsupported_headers):
-                return _error("NotImplemented", "CopyObject option is unsupported", 501)
-            if (request.headers.get("x-amz-metadata-directive") is not None
-                    and "x-amz-metadata-directive" not in signed_headers):
-                raise SigV4Error(
-                    "AccessDenied", "Copy metadata directive must be signed"
-                )
-            metadata_directive = request.headers.get(
-                "x-amz-metadata-directive", "COPY"
-            )
-            if metadata_directive not in {"COPY", "REPLACE"}:
-                raise ObjectMetadataError("InvalidArgument", "Invalid metadata directive")
-            copy_properties = parse_object_metadata(
-                request.headers, signed_header_names(request),
-            )
-            if metadata_directive == "COPY" and copy_properties:
-                raise ObjectMetadataError(
-                    "InvalidRequest", "Object metadata requires MetadataDirective=REPLACE"
-                )
-            tag_directive = request.headers.get("x-amz-tagging-directive", "COPY")
-            if tag_directive not in {"COPY", "REPLACE"}:
-                raise TaggingError("InvalidArgument", "Invalid CopyObject tagging directive")
-            if tag_directive == "COPY" and inline_tags is not None:
-                raise TaggingError("InvalidRequest", "x-amz-tagging requires TaggingDirective=REPLACE")
-            if (request.headers.get("x-amz-tagging-directive") is not None
-                    and "x-amz-tagging-directive" not in signed_headers):
-                raise SigV4Error("AccessDenied", "Copy tagging directive must be signed")
-            # Copying nonempty source tags is a separate protected read/write
-            # operation; GetObject/PutObject alone must not bypass tag scopes.
-            if tag_directive == "REPLACE":
-                if store.resolve(owner, "s3:PutObjectTagging") is None:
-                    raise SigV4Error("AccessDenied", "Copy tag replacement needs PutObjectTagging")
-
-            if (request.headers.get("x-amz-metadata-directive") is not None
-                    and "x-amz-metadata-directive" not in signed_headers):
-                raise SigV4Error("AccessDenied", "Metadata directive must be signed")
-            # A signed CopySource may name a specific historical version.
-            # Never treat arbitrary query selectors or duplicate VersionIds as
-            # part of the object key; URI escapes are decoded only afterwards.
-            if source_header.startswith("//") or "://" in source_header:
-                return _error("InvalidArgument", "Copy source must be a local bucket/object path", 400)
-            original_header, divider, source_query = source_header.partition("?")
-            source_version_id = None
-            if divider:
-                try:
-                    qualifiers = parse_qsl(
-                        source_query, keep_blank_values=True, strict_parsing=True,
-                        encoding="utf-8", errors="strict", max_num_fields=2,
-                    )
-                except (UnicodeError, ValueError):
-                    return _error("InvalidArgument", "Malformed CopySource version selector", 400)
-                if len(qualifiers) != 1 or qualifiers[0][0] != "versionId":
-                    return _error("InvalidArgument", "Only a single source VersionId is supported", 400)
-                source_version_id = qualifiers[0][1]
-                if not source_version_id or len(source_version_id) > 80:
-                    return _error("InvalidArgument", "Invalid CopySource version ID", 400)
-            original_path = unquote(
-                original_header[1:] if original_header.startswith("/") else original_header
-            )
-            src_bucket, slash, src_key = original_path.partition("/")
-            if not slash or not src_bucket or not src_key:
-                return _error("InvalidArgument", "Invalid CopySource bucket/object key", 400)
-            if src_bucket not in catalog.list_buckets():
-                return _error("NoSuchBucket", "CopySource bucket does not exist", 404)
-            if source_version_id is not None:
-                if not catalog.is_visible_version(src_bucket, src_key, source_version_id):
-                    return _error("NoSuchVersion", "CopySource version is not published", 404)
-                try:
-                    source_item = catalog.manifests.get(source_version_id)
-                except FileNotFoundError:
-                    return _error("NoSuchVersion", "CopySource version not readable", 404)
-                if source_item.bucket != src_bucket or source_item.key != src_key:
-                    return _error("NoSuchVersion", "CopySource key mismatch", 404)
-            else:
-                try:
-                    source_item = catalog.get(src_bucket, src_key).item
-                except FileNotFoundError:
-                    return _error("NoSuchKey", "CopySource object does not exist", 404)
-            if tag_directive == "COPY" and ObjectTagStore(catalog).get(source_item.id):
-                if (store.resolve(owner, "s3:GetObjectTagging") is None
-                        or store.resolve(owner, "s3:PutObjectTagging") is None):
-                    raise SigV4Error("AccessDenied", "Copying source tags needs tag read/write scopes")
-            existing_tag = MultipartStore(catalog).object_etag(source_item.id, source_item.sha256)
-            if_match = request.headers.get("x-amz-copy-source-if-match")
-            if_none_match = request.headers.get("x-amz-copy-source-if-none-match")
-            quoted_tag = '"' + existing_tag + '"'
-            if (if_match is not None and if_match not in (quoted_tag, "*")
-                    or if_none_match is not None and if_none_match in (quoted_tag, "*")):
-                return _error("PreconditionFailed", "CopySource ETag precondition failed", 412)
-            # CopyObject is a metadata-only operation and has no upload body.
-            # Consume streaming requests safely rather than trusting Content-Length.
-            async for block in request.stream():
-                if block:
-                    return _error("InvalidRequest", "CopyObject request must have no body", 400)
-            try:
-                result = copy_object(
-                    catalog, src_bucket, src_key, bucket, key,
-                    expected_source_id=source_item.id,
-                    source_version_id=source_version_id,
-                    replacement_tags=(inline_tags or []) if tag_directive == "REPLACE" else None,
-                    replacement_metadata=copy_properties if metadata_directive == "REPLACE" else None,
-                )
-            except CopyConflict:
-                return _error("OperationAborted", "Concurrent source/destination mutation", 409)
-            copied = ET.Element("CopyObjectResult", xmlns=NAMESPACE)
-            ET.SubElement(copied, "LastModified").text = time.strftime(
-                "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()
-            )
-            ET.SubElement(copied, "ETag").text = '"' + result.etag + '"'
-            return Response(ET.tostring(copied, encoding="utf-8", xml_declaration=True),
-                            media_type="application/xml", status_code=200)
-
+            return await _handle_copy_object(ctx)
         if request.method == "DELETE":
-            try:
-                marker = catalog.delete_marker(
-                    bucket, key,
-                    expected_generation=expected_head.generation if expected_head else None,
-                    expected_object_id=expected_head.object_id if expected_head else None,
-                )
-            except ValueError as exc:
-                if expected_head is not None:
-                    raise WritePreconditionError(
-                        "PreconditionFailed", "Object changed during conditional DELETE", 412
-                    ) from exc
-                raise
-            return Response(status_code=204, headers={
-                "x-amz-delete-marker": "true", "x-amz-version-id": marker,
-            })
+            return await _handle_object_delete(ctx, expected_head)
 
         if request.method == "PUT":
-            root = Path(_webapp.STORAGE_SCRATCH_DIR)
-            _secure_mkdir(root)
-            max_bytes = _webapp.REST_MAX_UPLOAD_BYTES
-            transport = storage_transport(db)
-            await transport.verify_target()
-            fd, name = tempfile.mkstemp(prefix="s3-upload-", dir=root)
-            stage = Path(name)
-            digest = hashlib.sha256()
-            md5 = hashlib.md5(usedforsecurity=False)
-            sha1 = hashlib.sha1(usedforsecurity=False)
-            crc = 0
-            crc32c_value = 0
-            crc64_value = 0
-            length = 0
-            try:
-                with os.fdopen(fd, "wb") as dest:
-                    async for block in request.stream():
-                        length += len(block)
-                        if max_bytes < 1 or length > max_bytes:
-                            return _error("EntityTooLarge", "Upload exceeds configured maximum", 413)
-                        digest.update(block)
-                        md5.update(block)
-                        sha1.update(block)
-                        crc = zlib.crc32(block, crc)
-                        crc32c_value = crc32c(block, crc32c_value)
-                        crc64_value = crc64nvme(block, crc64_value)
-                        dest.write(block)
-                    dest.flush()
-                    os.fsync(dest.fileno())
-                _verify_upload_sha256(
-                    request, digest.digest(), md5_digest=md5.digest(),
-                    sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
-                )
-                # Enforce bucket quota (same TeleDrive-level policy as the
-                # REST upload path) before any Telegram upload work starts.
-                quota_error = _quota_guard(db, bucket, key, length)
-                if quota_error is not None:
-                    return quota_error
-                checksum_crc = request.headers.get("x-amz-checksum-crc32")
-                if checksum_crc and checksum_crc != base64.b64encode((crc & 0xffffffff).to_bytes(4, "big")).decode():
-                    return _error("BadDigest", "CRC32 checksum mismatch", 400)
-                declared_crc32c = request.headers.get("x-amz-checksum-crc32c")
-                if declared_crc32c is not None and not hmac.compare_digest(
-                    declared_crc32c,
-                    base64.b64encode(crc32c_value.to_bytes(4, "big")).decode("ascii"),
-                ):
-                    return _error("BadDigest", "CRC32C checksum mismatch", 400)
-                engine = TelegramObjectStorage(
-                    catalog.manifests, transport,
-                    chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=root,
-                )
-                # Metadata, tags and the head pointer share one SQL
-                # transaction. A failed metadata write cannot publish a
-                # partially described object.
-                http_properties = parse_object_metadata(
-                    request.headers, signed_header_names(request),
-                )
-                http_store = ObjectMetadataStore(catalog)
-                tag_store = ObjectTagStore(catalog) if inline_tags is not None else None
-                item = await engine.put_file(bucket, key, stage)
-                http_store.attach_uncommitted(item.id, http_properties)
-                if tag_store is not None:
-                    tag_store.attach_uncommitted(item.id, inline_tags)
-                try:
-                    catalog.publish(
-                        item.id, now=int(time.time()),
-                        expected_generation=expected_head.generation if expected_head else None,
-                        expected_object_id=expected_head.object_id if expected_head else None,
-                    )
-                except ValueError as exc:
-                    if expected_head is not None:
-                        raise WritePreconditionError(
-                            "PreconditionFailed", "Object changed during conditional PUT", 412
-                        ) from exc
-                    raise
-                return Response(status_code=200, headers={
-                    "ETag": '"' + item.sha256 + '"',
-                    "x-amz-version-id": item.id,
-                })
-            finally:
-                stage.unlink(missing_ok=True)
+            return await _handle_object_put(ctx, expected_head)
 
-        if is_version_read:
-            version_id = request.query_params["versionId"]
-            if not version_id or len(version_id) > 80:
-                return _error("InvalidArgument", "Invalid version ID", 400)
-            if not catalog.is_visible_version(bucket, key, version_id):
-                return _error("NoSuchVersion", "Object version is not published", 404)
-            status_row = db.connection.execute(select(
-                objects.c.status, objects.c.created_at
-            ).where(objects.c.id == version_id)).one_or_none()
-            if status_row is not None and status_row[0] == "delete-marker":
-                response = _error(
-                    "MethodNotAllowed", "Requested version is a delete marker", 405,
-                )
-                response.headers.update({
-                    "x-amz-delete-marker": "true", "x-amz-version-id": version_id,
-                    "Last-Modified": http_last_modified(int(status_row[1])),
-                })
-                return response
-            try:
-                item = catalog.manifests.get(version_id)
-            except FileNotFoundError:
-                return _error("NoSuchVersion", "Object version is not readable", 404)
-            if item.bucket != bucket or item.key != key:
-                return _error("NoSuchVersion", "Version ownership mismatch", 404)
-        else:
-            try:
-                item = catalog.get(bucket, key).item
-            except FileNotFoundError:
-                marker = catalog.current_marker(bucket, key)
-                if marker is not None:
-                    result = _error("NoSuchKey", "Current version is a delete marker", 404)
-                    result.headers["x-amz-delete-marker"] = "true"
-                    result.headers["x-amz-version-id"] = marker
-                    return result
-                return _error("NoSuchKey", "The specified key does not exist", 404)
-        item_etag = MultipartStore(catalog).object_etag(item.id, item.sha256)
-        if is_object_attributes:
-            raw = request.headers.get("x-amz-object-attributes", "")
-            signed = signed_header_names(request)
-            if "x-amz-object-attributes" not in signed:
-                raise SigV4Error("AccessDenied", "Object attributes header must be signed")
-            if len(request.headers.getlist("x-amz-object-attributes")) != 1:
-                return _error("InvalidArgument", "Duplicate object attributes header", 400)
-            requested = raw.split(",")
-            if (not requested or any(not name for name in requested)
-                    or len(set(requested)) != len(requested)):
-                return _error("InvalidArgument", "Invalid object attributes list", 400)
-            permitted = {"ETag", "ObjectSize", "Checksum", "StorageClass", "ObjectParts"}
-            if any(name not in permitted for name in requested):
-                return _error("NotImplemented", "Requested object attributes are unsupported", 501)
-
-            options = {}
-            for name, default, low, high in (
-                ("x-amz-max-parts", 1000, 1, 1000),
-                ("x-amz-part-number-marker", 0, 0, MAX_PARTS),
-            ):
-                values = request.headers.getlist(name)
-                if values:
-                    if name not in signed:
-                        raise SigV4Error("AccessDenied", "Object parts pagination must be signed")
-                    if (len(values) != 1
-                            or re.fullmatch(r"[0-9]{1,5}", values[0]) is None
-                            or not low <= int(values[0]) <= high):
-                        return _error("InvalidArgument", "Invalid object parts pagination", 400)
-                    if "ObjectParts" not in requested:
-                        return _error("InvalidArgument", "Part pagination requires ObjectParts", 400)
-                    options[name] = int(values[0])
-                else:
-                    options[name] = default
-            result = ET.Element("GetObjectAttributesOutput", xmlns=NAMESPACE)
-            if "ETag" in requested:
-                ET.SubElement(result, "ETag").text = '"' + item_etag + '"'
-            if "ObjectSize" in requested:
-                ET.SubElement(result, "ObjectSize").text = str(item.size)
-            if "Checksum" in requested:
-                checksum = ET.SubElement(result, "Checksum")
-                # Immutable object SHA-256 covers the full plaintext bytes,
-                # independent of multipart ETag and physical Telegram chunks.
-                ET.SubElement(checksum, "ChecksumSHA256").text = base64.b64encode(
-                    bytes.fromhex(item.sha256)
-                ).decode("ascii")
-                ET.SubElement(checksum, "ChecksumType").text = "FULL_OBJECT"
-            if "StorageClass" in requested:
-                # TeleDrive exposes one immutable STANDARD-like tier; archived
-                # or replica-backed AWS storage classes do not exist here.
-                ET.SubElement(result, "StorageClass").text = "STANDARD"
-            if "ObjectParts" in requested:
-                layout = MultipartStore(catalog).object_parts_for_version(item.id, item.size)
-                # AWS omits ObjectParts for a plain single PUT. This must not
-                # fabricate logical parts out of Telegram's internal chunks.
-                if layout is not None:
-                    marker = options["x-amz-part-number-marker"]
-                    limit = options["x-amz-max-parts"]
-                    remaining = [part for part in layout if part[0] > marker]
-                    page = remaining[:limit]
-                    listing = ET.SubElement(result, "ObjectParts")
-                    for name, value in (
-                        ("PartsCount", len(layout)),
-                        ("PartNumberMarker", marker),
-                        ("MaxParts", limit),
-                        ("IsTruncated", str(len(remaining) > len(page)).lower()),
-                    ):
-                        ET.SubElement(listing, name).text = str(value)
-                    if len(remaining) > len(page):
-                        ET.SubElement(listing, "NextPartNumberMarker").text = str(page[-1][0])
-                    for number, size, digest, _etag in page:
-                        part_node = ET.SubElement(listing, "Part")
-                        ET.SubElement(part_node, "PartNumber").text = str(number)
-                        ET.SubElement(part_node, "Size").text = str(size)
-                        ET.SubElement(part_node, "ChecksumSHA256").text = base64.b64encode(
-                            bytes.fromhex(digest)
-                        ).decode("ascii")
-            return Response(
-                ET.tostring(result, encoding="utf-8", xml_declaration=True),
-                media_type="application/xml", status_code=200,
-                headers={
-                    "x-amz-version-id": item.id,
-                    "Last-Modified": http_last_modified(item.created_at),
-                },
-            )
-        http_properties = ObjectMetadataStore(catalog).get(item.id)
-        precondition = read_precondition(request, item_etag, item.created_at)
-        if precondition == 304:
-            return Response(status_code=304, headers={
-                "ETag": '"' + item_etag + '"',
-                "Last-Modified": http_last_modified(item.created_at),
-            })
-        if precondition == 412:
-            return _error("PreconditionFailed", "Object precondition failed", 412)
-        if request.method == "HEAD":
-            return Response(status_code=200, headers=_headers(
-                item, item_etag, http_properties,
-                checksum_mode=(checksum_mode == "ENABLED"),
-            ))
-        start, end, partial = _range(request.headers.get("range"), item.size)
-        transport = storage_transport(db)
-        scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
-        _secure_mkdir(scratch)
-        engine = TelegramObjectStorage(
-            catalog.manifests, transport,
-            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
-        )
-
-        async def stream():
-            try:
-                async for piece in engine.iter_bytes(item.id, start=start, end=end):
-                    yield piece
-            finally:
-                db.close()
-
-        retain = True
-        headers = _headers(item, item_etag, http_properties,
-                           checksum_mode=(checksum_mode == "ENABLED"))
-        headers["Content-Length"] = str(end - start)
-        if partial:
-            headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
-        return StreamingResponse(stream(), status_code=206 if partial else 200, headers=headers)
+        response = await _handle_object_read(ctx)
+        retain = ctx.retain
+        return response
     except WritePreconditionError as exc:
         response = _error(exc.code, str(exc), exc.status)
         if request.method == "PUT":

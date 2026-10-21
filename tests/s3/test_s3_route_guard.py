@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 import pytest
 from starlette.datastructures import QueryParams
+from xml.etree import ElementTree as ET
 
 from tests.s3.test_s3_gateway import service, signed
 from teledrive.s3.route_guard import validate_s3_query, S3QueryError
@@ -28,6 +29,19 @@ CONTROL_SELECTORS = (
 )
 EXACT_SUPPORTED = {"location", "cors", "tagging", "versioning",
                    "publicAccessBlock", "lifecycle"}
+# Selectors that route to the read-only AWS compatibility probes in the
+# gateway (valid AWS-shaped answers, never bucket CRUD or object bytes).
+# Every non-GET method on them still fails closed with 501.
+COMPAT_READ_SELECTORS = frozenset({
+    "acl", "policy", "website", "notification", "notificationConfiguration",
+    "logging", "replication", "encryption", "object-lock", "retention",
+    "legal-hold", "ownershipControls", "accelerate", "requestPayment",
+})
+# Only these have object-route compatibility answers; the bucket-only
+# selectors above still fail closed with 501 on an object path.
+COMPAT_OBJECT_READ_SELECTORS = frozenset({"acl", "retention", "legal-hold"})
+# Bucket-route compatibility answers; retention/legal-hold are object-only.
+COMPAT_BUCKET_READ_SELECTORS = COMPAT_READ_SELECTORS - {"retention", "legal-hold"}
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "PUT", "DELETE"])
@@ -38,9 +52,17 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
     assert signed(service, "PUT", "/guard-bucket").status_code == 200
     before = service[2].uploads
     reply = signed(service, method, f"/guard-bucket?{selector}")
-    assert reply.status_code == 501, (method, selector, reply.text)
-    if method != "HEAD":
-        assert b"NotImplemented" in reply.content
+    if method == "GET" and selector in COMPAT_BUCKET_READ_SELECTORS:
+        # Read-only compatibility probe: a valid AWS-shaped answer that is
+        # never bucket CRUD (no ListBucketResult payload, no mutation).
+        assert reply.status_code in (200, 404), (method, selector, reply.text)
+        if reply.status_code == 200:
+            root = ET.fromstring(reply.content)
+            assert root.tag.rsplit("}", 1)[-1] != "ListBucketResult"
+    else:
+        assert reply.status_code == 501, (method, selector, reply.text)
+        if method != "HEAD":
+            assert b"NotImplemented" in reply.content
     assert signed(service, "HEAD", "/guard-bucket").status_code == 200
     assert service[2].uploads == before
 
@@ -55,7 +77,12 @@ def test_unknown_object_control_never_falls_back_to_data_or_delete(
     sent = service[2].uploads
     reply = signed(service, method, f"/guard-bucket/asset.bin?{selector}",
                    b"new-data" if method == "PUT" else b"")
-    assert reply.status_code == 501, (method, selector, reply.text)
+    if method == "GET" and selector in COMPAT_OBJECT_READ_SELECTORS:
+        # Compatibility probe answers never leak or mutate object bytes.
+        assert reply.status_code in (200, 404), (method, selector, reply.text)
+        assert reply.content != b"old-data"
+    else:
+        assert reply.status_code == 501, (method, selector, reply.text)
     assert signed(service, "GET", "/guard-bucket/asset.bin").content == b"old-data"
     assert service[2].uploads == sent
 
@@ -130,7 +157,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":11, "partial":27, "unsupported":78,
+        "supported":11, "partial":42, "unsupported":63,
     }
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-E", "P2-F", "P3-G", "P3-H",

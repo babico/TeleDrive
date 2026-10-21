@@ -30,11 +30,18 @@ _BUCKET_GET_MULTIPART = frozenset({
 _BUCKET_CONTROL = frozenset({
     "location", "cors", "tagging", "versioning", "publicAccessBlock", "lifecycle",
     "policyStatus",
+    # Read-only AWS compatibility probes (see web/s3.py _COMPAT_BUCKET_READS).
+    "acl", "ownershipControls", "policy", "replication", "website", "logging",
+    "notification", "notificationConfiguration", "requestPayment", "accelerate",
+    "encryption", "object-lock",
 })
 _OBJECT_CONTROL = frozenset({"tagging", "attributes", "uploads", "uploadId", "versionId"})
 _EMPTY_FLAG = frozenset({
     "location", "cors", "tagging", "versioning", "publicAccessBlock",
     "lifecycle", "policyStatus", "uploads", "versions", "delete", "attributes",
+    "acl", "ownershipControls", "policy", "replication", "website", "logging",
+    "notification", "notificationConfiguration", "requestPayment", "accelerate",
+    "encryption", "object-lock", "retention", "legal-hold",
 })
 # No upper/lower-case folding for S3 query fields: AWS subresources are
 # case-sensitive. A misspelled control may not be silently ignored.
@@ -76,6 +83,14 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "publicAccessBlock": {"GET", "PUT"},
                 "lifecycle": {"GET", "PUT", "DELETE"},
                 "policyStatus": {"GET"},
+                # Compatibility probes are GET-only; every configuration
+                # attempt (PUT/DELETE) stays fail-closed 501 via `forbidden`.
+                "acl": {"GET"}, "ownershipControls": {"GET"},
+                "policy": {"GET"}, "replication": {"GET"},
+                "website": {"GET"}, "logging": {"GET"},
+                "notification": {"GET"}, "notificationConfiguration": {"GET"},
+                "requestPayment": {"GET"}, "accelerate": {"GET"},
+                "encryption": {"GET"}, "object-lock": {"GET"},
             }
             allowed = frozenset({selector}) if method in methods[selector] else frozenset()
         elif method == "GET":
@@ -104,6 +119,13 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
         elif "tagging" in real:
             allowed = (frozenset({"tagging", "versionId"})
                        if method in {"GET", "PUT", "DELETE"} else frozenset())
+        elif "acl" in real:
+            # Canned private ACL probe: current object only, GET only.
+            allowed = frozenset({"acl"}) if method == "GET" else frozenset()
+        elif "retention" in real:
+            allowed = frozenset({"retention"}) if method == "GET" else frozenset()
+        elif "legal-hold" in real:
+            allowed = frozenset({"legal-hold"}) if method == "GET" else frozenset()
         elif "attributes" in real:
             # GetObjectAttributes may address a published historical VersionId.
             # Other object controls still fail closed, even if correctly signed.

@@ -1008,6 +1008,8 @@ def login_page():
 
 @app.get("/{page_name}", include_in_schema=False)
 def page_route(page_name: str, request: Request):
+    import sys as _sys
+    print('DEBUG page_route cookies=', dict(request.cookies), 'auth=', request.headers.get('authorization'), file=_sys.stderr, flush=True)
     if page_name in {"api", "static", "openapi.json", "docs", "redoc",
                      "__health", "favicon.ico"}:
         raise HTTPException(404, "Not found")

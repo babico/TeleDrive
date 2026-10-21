@@ -35,7 +35,7 @@ class ServiceSettings:
     job_auto_run: bool = True
     job_watch: bool = False
     job_watch_interval_seconds: int = 30
-    job_watch_bucket: str = 
+    job_watch_bucket: str = ""
     allowed_sqlite_roots: tuple[str, ...] = ("/data",)
     auth_failure_limit: int = 5
     auth_failure_window_seconds: int = 300

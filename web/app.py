@@ -2023,13 +2023,19 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             client = TelegramClient(StringSession(request_session), api_id, api_hash,
                                     receive_updates=False, flood_sleep_threshold=0)
             await client.connect()
-            # One sign-in attempt only: Telegram allows very few code
-            # attempts (~3) per phone_code_hash, and a wrong 2FA password
-            # must surface as PasswordHashInvalidError, not be retried
-            # without a password (which would mask it as "2FA needed").
-            await client.sign_in(phone, code=payload.code,
-                                 phone_code_hash=phone_code_hash,
-                                 password=payload.password or None)
+            # Telethon's sign_in IGNORES `password` when a `code` is given
+            # (elif code: branch in telethon/client/auth.py). The 2FA step
+            # is a second, separate sign_in(password=...) call after
+            # SessionPasswordNeededError — exactly what client.start()
+            # does internally. One code attempt only; Telegram allows ~3.
+            from telethon.errors import SessionPasswordNeededError
+            try:
+                await client.sign_in(phone, code=payload.code,
+                                     phone_code_hash=phone_code_hash)
+            except SessionPasswordNeededError:
+                if not payload.password:
+                    raise
+                await client.sign_in(password=payload.password)
             if not await client.is_user_authorized():
                 raise RuntimeError("Sign-in did not authorize the user")
             me = await client.get_me()

@@ -1942,7 +1942,8 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     finally:
         conn.close()
     if row is None:
-        raise HTTPException(404, "No pending code request (expired or invalid token)")
+        raise HTTPException(404, "No pending code request (expired, invalid "
+                                 "token, or already used). Request a new code.")
     api_id, api_hash, phone, phone_code_hash, channel, strategy, created_at = row
     if int(time.time()) - int(created_at) > 300:
         c2 = db_connect()
@@ -1999,17 +2000,20 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             **info,
         }) from exc
     except Exception as exc:
+        # A wrong code must NOT consume the pending request: the user can
+        # retry with the correct code. The token ages out after 5 minutes
+        # and is consumed only on success (below).
         raise HTTPException(400, _scrub_text(str(exc)))
+    # Success: consume the pending token.
+    c3 = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        c3.connection.execute(_text(
+            "DELETE FROM telegram_session_pending WHERE token = :token"
+        ), {"token": payload.token})
+        c3.connection.commit()
     finally:
-        c3 = db_connect()
-        try:
-            from sqlalchemy import text as _text
-            c3.connection.execute(_text(
-                "DELETE FROM telegram_session_pending WHERE token = :token"
-            ), {"token": payload.token})
-            c3.connection.commit()
-        finally:
-            c3.close()
+        c3.close()
 
     # Resolve the channel (optional).
     account = getattr(me, "username", None) or f"user-{me.id}"

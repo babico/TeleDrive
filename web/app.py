@@ -298,11 +298,13 @@ def _create_default_admin() -> None:
 
 
 def _get_current_user(request: Request) -> dict | None:
-    """Resolve the authenticated user from a Bearer token."""
+    """Resolve the authenticated user from a Bearer token or session cookie."""
     auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        return None
-    token = auth[7:].strip()
+    token = None
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+    else:
+        token = request.cookies.get("teledrive_session")
     if not token:
         return None
     conn = db_connect()
@@ -931,8 +933,12 @@ def login(payload: dict, request: Request):
     finally:
         conn.close()
     _log(f"login: username={username}", "auth")
-    return {"token": token, "user": {"id": row[0], "username": row[1], "role": row[3]},
-            "expires_at": expires}
+    from fastapi.responses import JSONResponse
+    resp = JSONResponse(content={"token": token, "user": {"id": row[0], "username": row[1], "role": row[3]},
+                                 "expires_at": expires})
+    resp.set_cookie(key="teledrive_session", value=token, httponly=True,
+                    max_age=7*86400, samesite="lax", path="/")
+    return resp
 
 
 @app.post("/api/auth/logout", tags=["Authentication"], summary="Logout and revoke session")
@@ -951,7 +957,10 @@ def logout(request: Request):
         finally:
             conn.close()
     _log(f"logout: user={user['username'] if user else 'unknown'}", "auth")
-    return {"ok": True}
+    from fastapi.responses import JSONResponse
+    resp = JSONResponse(content={"ok": True})
+    resp.delete_cookie(key="teledrive_session", path="/")
+    return resp
 
 
 @app.get("/api/auth/me", tags=["Authentication"], summary="Get current user")

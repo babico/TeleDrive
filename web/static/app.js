@@ -89,8 +89,7 @@ function app(){
       // Check auth
       if(this.page === 'login') return;
       const token = localStorage.getItem('teledrive_token');
-      if(!token){ window.location.href = '/login'; return; }
-      try { const me = await this.api('/api/auth/me'); this.currentUser = me.user.username; this.currentRole = me.user.role; }
+      try { const me = await this.api('/api/auth/me'); this.currentUser = me.user.username; this.currentRole = me.user.role; if(!token && me.user) localStorage.setItem('teledrive_token', 'cookie'); }
       catch(e){ localStorage.removeItem('teledrive_token'); window.location.href = '/login'; return; }
       await this.loadSettings();
       await this.refreshChannels();
@@ -135,13 +134,7 @@ function app(){
       try {
         const r = await this.api('/api/auth/login',{method:'POST',body:JSON.stringify({username:this.loginUsername,password:this.loginPassword})});
         localStorage.setItem('teledrive_token', r.token);
-        this.currentUser = r.user.username;
-        this.currentRole = r.user.role;
-        this.loginError = '';
-        window.location.href = '/';
-        await this.refreshChannels();
-        await this.refreshTgSessionStatus();
-        await this.refreshDashboard();
+        window.location.replace('/');
       } catch(e){ this.loginError = e.message; }
     },
     async logout(){

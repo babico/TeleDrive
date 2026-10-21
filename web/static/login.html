@@ -44,14 +44,12 @@ tailwind.config = { darkMode: 'class', theme: { extend: { colors: { brand: { 600
 <script src="/static/app.js"></script>
 <script>
 function initLogin(){
-  // Check if already logged in
+  // Check if already logged in (via cookie or token)
   const token = localStorage.getItem('teledrive_token');
-  if(token){
-    fetch('/api/auth/me', {headers:{'Authorization':'Bearer '+token}}).then(r=>{
-      if(r.ok) window.location.href = '/';
-      else localStorage.removeItem('teledrive_token');
-    }).catch(()=>{});
-  }
+  const headers = token ? {'Authorization':'Bearer '+token} : {};
+  fetch('/api/auth/me', {credentials:'include', headers}).then(r=>{
+    if(r.ok) window.location.href = '/';
+  }).catch(()=>{});
 }
 </script>
 </body></html>

@@ -978,7 +978,12 @@ def me(request: Request):
 
 
 @app.get("/", include_in_schema=False)
-def index(_: None = Depends(require_auth)):
+def index(request: Request):
+    try:
+        require_auth(request)
+    except HTTPException:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/login", status_code=302)
     return FileResponse(STATIC_DIR / "index.html")
 
 

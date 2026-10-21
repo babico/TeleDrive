@@ -994,6 +994,8 @@ def page_html(page_name: str, request: Request):
     except HTTPException:
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/login", status_code=302)
+    if page_name == "dashboard":
+        page_name = "index"
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)
@@ -1015,6 +1017,8 @@ def page_route(page_name: str, request: Request):
     except HTTPException:
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/login", status_code=302)
+    if page_name == "dashboard":
+        page_name = "index"
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)

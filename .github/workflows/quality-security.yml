@@ -112,7 +112,7 @@ jobs:
           python - <<'PY'
           import json
           schema=json.load(open("/tmp/openapi.json",encoding="utf-8"))
-          assert "/api/auth" in schema["paths"]
+          assert "/api/v1/auth/login" in schema["paths"]
           PY
           if curl -fsS http://127.0.0.1:18080/openapi.json >/dev/null; then
             echo "Anonymous Web API unexpectedly available" >&2

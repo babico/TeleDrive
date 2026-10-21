@@ -50,6 +50,7 @@ function app(){
     tgPhone: '',
     tgSessionStatus: 'Not checked',
     tgSessions: [],
+    tgChecking: '',
     tgSessionError: '',
     floodActive: false,
     floodLast: null,
@@ -313,6 +314,15 @@ function app(){
           ? this.tgSessions.length+' account(s) authorized'
           : 'No session configured.';
       } catch(e){ this.tgSessionStatus = 'Error: '+e.message; }
+    },
+    async checkTgSession(account){
+      this.tgChecking = account;
+      try {
+        const r = await this.api('/api/v1/admin/storage/telegram-sessions/'+encodeURIComponent(account)+'/health-check',{method:'POST'});
+        this.toast(r.authorized ? 'Account OK: '+account : 'UNAUTHORIZED: '+account+' — re-login needed', !r.authorized);
+        await this.refreshTgSessionStatus();
+      } catch(e){ this.toast(e.message,true); }
+      finally { this.tgChecking = ''; }
     },
     async deleteTgSession(account, force){
       const hasData = this.tgSessions.find(s=>s.account===account)?.objects > 0;

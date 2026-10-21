@@ -178,7 +178,7 @@ tailwind.config = {
       <h3>Authorized accounts (<span x-text="tgSessions.length"></span>)</h3>
       <p class="muted">Uploads are distributed across accounts by the configured strategy (round_robin / failover / parallel). A FloodWait on one account automatically fails over to the others. Add another account by logging in above with a different phone number.</p>
       <table>
-        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Channel</th><th>Strategy</th><th>Objects</th><th>Size</th><th>Flood</th><th>Updated</th><th></th></tr></thead>
+        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Channel</th><th>Strategy</th><th>Objects</th><th>Size</th><th>Flood</th><th>Health</th><th>Updated</th><th></th></tr></thead>
         <tbody>
           <template x-for="s in tgSessions" :key="s.account">
             <tr>
@@ -193,6 +193,12 @@ tailwind.config = {
                 <span x-show="s.cooldown_remaining_s>0" class="text-red-400" x-text="'cooldown '+Math.ceil(s.cooldown_remaining_s/60)+'m'"></span>
                 <span x-show="!s.cooldown_remaining_s" class="text-green-400">OK</span>
                 <span class="muted text-xs" x-show="s.flood_observations" x-text="'('+s.flood_observations+' total)'"></span>
+              </td>
+              <td>
+                <span x-show="s.authorized===1" class="text-green-400" title="">OK</span>
+                <span x-show="s.authorized===0" class="text-red-400 font-bold" :title="'Last check: '+fmtTs(s.health_checked_at)">UNAUTHORIZED</span>
+                <span x-show="s.authorized==null" class="muted">unknown</span>
+                <button class="btn btn-sm ml-1" @click="checkTgSession(s.account)" :disabled="tgChecking===s.account" x-text="tgChecking===s.account?'...':'Check'"></button>
               </td>
               <td x-text="fmtTs(s.updated_at)"></td>
               <td><button class="btn btn-sm" @click="deleteTgSession(s.account)">Delete</button></td>

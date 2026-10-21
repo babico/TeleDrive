@@ -900,6 +900,7 @@ async def lifespan(_: FastAPI):
     upload_job_scheduler_task = asyncio.create_task(upload_job_scheduler_loop())
     lifecycle_scheduler_task = asyncio.create_task(lifecycle_scheduler_loop())
     folder_watch_task = asyncio.create_task(folder_watch_loop())
+    session_health_task = asyncio.create_task(telegram_session_health_loop())
     yield
     if upload_job_scheduler_task:
         upload_job_scheduler_task.cancel()
@@ -910,6 +911,9 @@ async def lifespan(_: FastAPI):
     if folder_watch_task:
         folder_watch_task.cancel()
         await asyncio.gather(folder_watch_task, return_exceptions=True)
+    if session_health_task:
+        session_health_task.cancel()
+        await asyncio.gather(session_health_task, return_exceptions=True)
     await mtproto_storage_runtime.stop()
 
 
@@ -1752,6 +1756,122 @@ def _mask_phone(phone: str | None) -> str:
     return digits[:4] + "***" + digits[-2:]
 
 
+async def _probe_telegram_session(api_id: int, api_hash: str,
+                                  session_string: str) -> bool:
+    """One lightweight authorization probe: connect + is_authorized."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    try:
+        client = TelegramClient(StringSession(session_string), api_id,
+                                api_hash, receive_updates=False,
+                                flood_sleep_threshold=0)
+    except Exception:
+        return False
+    try:
+        await client.connect()
+        return bool(await client.is_user_authorized())
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+def _store_session_health(account: str, authorized: bool) -> None:
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "UPDATE telegram_sessions SET authorized = :a, "
+            "health_checked_at = :now WHERE account = :account"
+        ), {"a": 1 if authorized else 0, "now": int(time.time()),
+            "account": account})
+        conn.connection.commit()
+    finally:
+        conn.close()
+
+
+def _probe_account_now(account: str) -> dict:
+    """Probe one account synchronously (endpoint context)."""
+    import asyncio
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT api_id, api_hash, session_string FROM "
+            "telegram_sessions WHERE account = :account"
+        ), {"account": account}).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(404, "Unknown Telegram session account")
+    api_id, api_hash, session_string = row
+    try:
+        authorized = asyncio.run(
+            _probe_telegram_session(api_id, api_hash, session_string))
+    except Exception as exc:
+        _log(f"session health: account={account} probe error "
+             f"{type(exc).__name__}", "telegram-session")
+        authorized = False
+    _store_session_health(account, authorized)
+    if not authorized:
+        _log(f"session health: account={account} UNAUTHORIZED "
+             "(expired/revoked); re-login required", "telegram-session")
+    return {"account": account, "authorized": authorized,
+            "health_checked_at": int(time.time())}
+
+
+async def telegram_session_health_loop() -> None:
+    """Probe every Telegram session for expiry/revocation, periodically.
+
+    A dead session silently turns uploads into failures; the probe keeps
+    an explicit authorized flag on every account row and logs a warning
+    the moment a previously-healthy session dies.
+    """
+    while True:
+        try:
+            conn = db_connect()
+            try:
+                from sqlalchemy import text as _text
+                rows = conn.connection.execute(_text(
+                    "SELECT account, api_id, api_hash, session_string, "
+                    "authorized FROM telegram_sessions")).fetchall()
+            finally:
+                conn.close()
+            for account, api_id, api_hash, session_string, previous in rows:
+                try:
+                    authorized = await _probe_telegram_session(
+                        int(api_id), str(api_hash), str(session_string))
+                except Exception as exc:
+                    _log(f"session health: account={account} probe error "
+                         f"{type(exc).__name__}", "telegram-session")
+                    continue
+                _store_session_health(str(account), authorized)
+                if not authorized and previous not in (0, None):
+                    _log(f"session health: account={account} UNAUTHORIZED "
+                         "(expired/revoked); re-login required",
+                         "telegram-session")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("session health scheduler: " + type(exc).__name__,
+                 "scheduler")
+        await asyncio.sleep(1800)
+
+
+@app.post("/api/v1/admin/storage/telegram-sessions/{account}/health-check",
+          tags=["Storage jobs"],
+          summary="Probe one Telegram session for authorization now")
+def telegram_session_health_check(account: str, request: Request,
+                                  _: None = Depends(require_auth)):
+    _same_origin(request)
+    account = account.strip()
+    if not account:
+        raise HTTPException(400, "account is required")
+    result = _probe_account_now(account)
+    return {"ok": True, **result}
+
+
 @app.get("/api/v1/admin/storage/telegram-sessions", tags=["Storage jobs"],
          summary="List all Telegram sessions with per-account health")
 def list_telegram_sessions(_: None = Depends(require_auth)):
@@ -1761,7 +1881,8 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
         from sqlalchemy import text as _text
         rows = conn.connection.execute(_text(
             "SELECT account, api_id, phone, channel, strategy, created_at, "
-            "updated_at FROM telegram_sessions ORDER BY account")).fetchall()
+            "updated_at, authorized, health_checked_at FROM "
+            "telegram_sessions ORDER BY account")).fetchall()
         # Usage, cooldowns and flood observations live in the storage
         # catalog tables; degrade gracefully when this deployment's web
         # database does not carry them.
@@ -1792,7 +1913,8 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
     finally:
         conn.close()
     sessions = []
-    for account, api_id, phone, channel, strategy, created, updated in rows:
+    for account, api_id, phone, channel, strategy, created, updated, \
+            authorized, checked in rows:
         objects, total = usage.get(str(account), (0, 0))
         remaining_ms = max(0, cooldowns.get(str(account), 0) - now_ms)
         sessions.append({
@@ -1803,6 +1925,8 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
             "objects": objects, "bytes": total,
             "cooldown_remaining_s": remaining_ms // 1000,
             "flood_observations": floods.get(str(account), 0),
+            "authorized": None if authorized is None else bool(authorized),
+            "health_checked_at": checked,
         })
     return {"sessions": sessions, "count": len(sessions)}
 

@@ -66,6 +66,10 @@ telegram_sessions = Table(
     Column("strategy", String(32), server_default="round_robin"),
     Column("created_at", BigInteger, nullable=False),
     Column("updated_at", BigInteger, nullable=False),
+    # Health probe results: NULL = never checked, 1 = authorized,
+    # 0 = expired/revoked/unusable.
+    Column("authorized", Integer),
+    Column("health_checked_at", BigInteger),
 )
 
 telegram_channels = Table(
@@ -450,6 +454,23 @@ def _setup_schema(engine: Engine) -> None:
             for column in missing:
                 rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
                 conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
+
+    # telegram_sessions health-probe columns: existing databases get
+    # them via the same dialect-aware ALTER.
+    session_cols = {c["name"] for c in inspect(engine).get_columns(
+        "telegram_sessions")}
+    for name, column in (
+        ("authorized", Column("authorized", Integer)),
+        ("health_checked_at", Column("health_checked_at", BigInteger)),
+    ):
+        if name not in session_cols:
+            preparer = engine.dialect.identifier_preparer
+            table_name = preparer.quote("telegram_sessions")
+            rendered = str(CreateColumn(column).compile(
+                dialect=engine.dialect))
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD {rendered}")
 
     # telegram_session_pending.session_string (login-flow fix): existing
     # databases get the column via the same dialect-aware ALTER.

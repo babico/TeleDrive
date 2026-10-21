@@ -1020,3 +1020,46 @@ def test_telegram_session_delete_soft_guard(authenv):
     assert r.status_code == 200
     r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
     assert r.json()["sessions"] == []
+
+
+def test_telegram_session_health_check(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "user-4004")
+    finally:
+        db.close()
+
+    # Unknown account.
+    r = client.post(
+        "/api/v1/admin/storage/telegram-sessions/nobody/health-check",
+        headers={**admin, **CSRF})
+    assert r.status_code == 404
+
+    # A garbage session string fails the probe locally (StringSession
+    # raises before any network traffic) and marks the account dead.
+    r = client.post(
+        "/api/v1/admin/storage/telegram-sessions/user-4004/health-check",
+        headers={**admin, **CSRF})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authorized"] is False
+    assert body["health_checked_at"] > 0
+
+    # The verdict and timestamp persist into the sessions list.
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    entry = next(s for s in r.json()["sessions"] if s["account"] == "user-4004")
+    assert entry["authorized"] is False
+    assert entry["health_checked_at"] > 0
+
+    # Viewer may read the list but cannot trigger a probe.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.post(
+        "/api/v1/admin/storage/telegram-sessions/user-4004/health-check",
+        headers={**viewer, **CSRF}).status_code == 403
+
+    # The unauthorized verdict lands in the log buffer.
+    r = client.get("/api/v1/logs?limit=50", headers=admin)
+    joined = " ".join(e.get("message", "") for e in r.json()["entries"])
+    assert "user-4004 UNAUTHORIZED" in joined

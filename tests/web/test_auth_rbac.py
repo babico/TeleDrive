@@ -640,3 +640,163 @@ def test_admin_download_object_streams_bytes(authenv):
     assert r.status_code == 200
     suggested = r.headers["content-disposition"].split('filename="')[1].rstrip('"')
     assert '"' not in suggested and ";" not in suggested
+
+
+# ---------------------------------------------------------------- file manager
+
+def _admin_bucket(client, auth, name):
+    r = client.post("/api/v1/admin/storage/buckets", headers={**auth, **CSRF},
+                    json={"name": name})
+    assert r.status_code == 201, r.text
+
+
+def test_admin_bucket_create_delete(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    _admin_bucket(client, admin, "bucket-tidy")
+    # Duplicate is a conflict.
+    r = client.post("/api/v1/admin/storage/buckets", headers={**admin, **CSRF},
+                    json={"name": "bucket-tidy"})
+    assert r.status_code == 409
+    # Viewers may not create or delete buckets.
+    assert client.post("/api/v1/admin/storage/buckets",
+                       headers={**viewer, **CSRF},
+                       json={"name": "nope"}).status_code == 403
+    assert client.delete("/api/v1/admin/storage/buckets/bucket-tidy",
+                         headers={**viewer, **CSRF}).status_code == 403
+    # Empty bucket deletion works; missing bucket is a 404.
+    assert client.delete("/api/v1/admin/storage/buckets/bucket-tidy",
+                         headers={**admin, **CSRF}).status_code == 200
+    assert client.delete("/api/v1/admin/storage/buckets/bucket-tidy",
+                         headers={**admin, **CSRF}).status_code == 404
+
+
+def test_admin_upload_download_round_trip(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    _admin_bucket(client, admin, "upload-bucket")
+
+    r = client.put("/api/v1/admin/storage/buckets/upload-bucket/content",
+                   headers={**admin, **CSRF,
+                            "content-type": "application/octet-stream"},
+                   params={"key": "docs/readme.txt"}, content=b"round-trip-bytes")
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["key"] == "docs/readme.txt"
+
+    # Download through the session-authenticated reader.
+    r = client.get("/api/v1/admin/storage/buckets/upload-bucket/content",
+                   headers=admin, params={"key": "docs/readme.txt"})
+    assert r.status_code == 200 and r.content == b"round-trip-bytes"
+
+    # CSRF is required; viewers cannot upload; wrong content-type rejected.
+    assert client.put("/api/v1/admin/storage/buckets/upload-bucket/content",
+                      headers={**admin, "content-type": "application/octet-stream"},
+                      params={"key": "x"}, content=b"y").status_code == 403
+    assert client.put("/api/v1/admin/storage/buckets/upload-bucket/content",
+                      headers={**viewer, **CSRF,
+                               "content-type": "application/octet-stream"},
+                      params={"key": "x"}, content=b"y").status_code == 403
+    assert client.put("/api/v1/admin/storage/buckets/upload-bucket/content",
+                      headers={**admin, **CSRF, "content-type": "text/plain"},
+                      params={"key": "x"}, content=b"y").status_code == 415
+
+    # Quota enforcement on the session upload path.
+    r = client.put("/api/v1/admin/storage/buckets/upload-bucket/quota",
+                   headers={**admin, **CSRF},
+                   json={"max_size_bytes": 4, "max_objects": None})
+    assert r.status_code == 200
+    r = client.put("/api/v1/admin/storage/buckets/upload-bucket/content",
+                   headers={**admin, **CSRF,
+                            "content-type": "application/octet-stream"},
+                   params={"key": "big.bin"}, content=b"too-many-bytes")
+    assert r.status_code == 413
+
+
+def test_admin_copy_object_and_search(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    _admin_bucket(client, admin, "copy-bucket")
+    _publish_object(authenv, "copy-bucket", "reports/Annual Summary.txt", b"data")
+    _publish_object(authenv, "copy-bucket", "notes.txt", b"notes")
+
+    # Rename-style copy within the bucket.
+    r = client.post("/api/v1/admin/storage/buckets/copy-bucket/objects/copy",
+                    headers={**admin, **CSRF},
+                    params={"key": "reports/Annual Summary.txt"},
+                    json={"destination_key": "reports/Annual_Summary_v2.txt"})
+    assert r.status_code == 200, r.text
+    # Original still exists.
+    assert client.get("/api/v1/admin/storage/buckets/copy-bucket/content",
+                      headers=admin,
+                      params={"key": "reports/Annual Summary.txt"}
+                      ).status_code == 200
+
+    # Destination equals source is rejected.
+    r = client.post("/api/v1/admin/storage/buckets/copy-bucket/objects/copy",
+                    headers={**admin, **CSRF}, params={"key": "notes.txt"},
+                    json={"destination_key": "notes.txt"})
+    assert r.status_code == 400
+    # Missing source is a 404.
+    r = client.post("/api/v1/admin/storage/buckets/copy-bucket/objects/copy",
+                    headers={**admin, **CSRF}, params={"key": "ghost.txt"},
+                    json={"destination_key": "any.txt"})
+    assert r.status_code == 404
+
+    # Search: case-insensitive match across the catalog.
+    r = client.get("/api/v1/admin/storage/search", headers=admin,
+                   params={"q": "annual"})
+    assert r.status_code == 200
+    keys = {o["key"] for o in r.json()["objects"]}
+    assert "reports/Annual Summary.txt" in keys
+    assert "reports/Annual_Summary_v2.txt" in keys
+    # LIKE wildcards are escaped: '%' and '_' never broaden the query.
+    r = client.get("/api/v1/admin/storage/search", headers=admin,
+                   params={"q": "%"})
+    assert r.status_code == 200 and r.json()["objects"] == []
+    r = client.get("/api/v1/admin/storage/search", headers=admin,
+                   params={"q": "notes.tx_"})
+    assert r.status_code == 200 and r.json()["objects"] == []
+
+
+def test_folder_watch_scan_enqueues_new_files(authenv, monkeypatch):
+    root = authenv["tmp"] / "uploads"
+    root.mkdir(exist_ok=True)
+    monkeypatch.setattr(web, "JOB_SOURCE_ROOT", str(root))
+    monkeypatch.setattr(web, "WATCH_BUCKET", "watch-bucket")
+    monkeypatch.setattr(web, "WATCH_ENABLED", True)
+    # Point the parsed config's upload.source_dir at the test root.
+    config_path = authenv["tmp"] / "config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="ascii")
+        + "upload:\n  source_dir: " + str(root) + "\n",
+        encoding="ascii")
+
+    db = authenv["connect"]()
+    try:
+        from teledrive.storage.catalog import BucketCatalog
+        from teledrive.storage.manifest import ManifestStore
+        from teledrive.storage.jobs import StorageUploadJobs
+        catalog = BucketCatalog(ManifestStore(db))
+        catalog.create_bucket("watch-bucket", int(time.time()))
+    finally:
+        db.close()
+
+    (root / "watched-file.bin").write_bytes(b"watched")
+    report = web.folder_watch_scan()
+    assert report["queued"] == 1
+
+    db = authenv["connect"]()
+    try:
+        jobs = StorageUploadJobs(
+            BucketCatalog(ManifestStore(db))).list_jobs(limit=10)
+    finally:
+        db.close()
+    assert any(j["source_path"].endswith("watched-file.bin") for j in jobs)
+
+    # Idempotent: the same file is never re-queued.
+    report2 = web.folder_watch_scan()
+    assert report2["queued"] == 0
+    assert report2["already_queued"] >= 1

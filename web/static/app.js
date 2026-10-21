@@ -15,6 +15,20 @@ function app(){
     historyRows: [],
     bucketUsage: [],
     mustChangePassword: false,
+    searchQuery: '',
+    searchResults: null,
+    dropHover: false,
+    uploading: false,
+    uploadName: '',
+    uploadPct: 0,
+    selectedKeyList: [],
+    selectedKeys: new Set(),
+    previewOpen: false,
+    previewBucket: '',
+    previewKey: '',
+    previewKind: 'binary',
+    previewSize: 0,
+    previewText: '',
 
     // Settings
     config: null,
@@ -374,6 +388,116 @@ function app(){
     downloadObject(bucket, key){
       window.open('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key), '_blank');
     },
+    contentUrl(bucket, key){
+      return '/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key);
+    },
+    previewUrl(){ return this.contentUrl(this.previewBucket, this.previewKey); },
+    previewKindFor(key){
+      const ext = (key.split('.').pop()||'').toLowerCase();
+      if(['png','jpg','jpeg','gif','webp','bmp','svg'].includes(ext)) return 'image';
+      if(['mp4','webm','mkv','mov'].includes(ext)) return 'video';
+      if(['mp3','ogg','wav','flac','m4a'].includes(ext)) return 'audio';
+      if(['txt','json','csv','md','log','xml','yaml','yml','ini','conf','py','js','html','css','sh'].includes(ext)) return 'text';
+      return 'binary';
+    },
+    async previewObject(bucket, key){
+      this.previewBucket = bucket; this.previewKey = key;
+      this.previewKind = this.previewKindFor(key);
+      this.previewText = '';
+      this.previewOpen = true;
+      if(this.previewKind === 'text'){
+        try {
+          const r = await fetch(this.contentUrl(bucket,key), {credentials:'include', headers:{'range':'bytes=0-8191'}});
+          if(r.ok || r.status===206) this.previewText = await r.text();
+          else this.previewKind = 'binary';
+        } catch(e){ this.previewKind = 'binary'; }
+      }
+      if(this.previewKind === 'binary'){
+        try { this.previewSize = 0; } catch(e){}
+      }
+    },
+    async searchObjects(){
+      const q = (this.searchQuery||'').trim();
+      if(!q){ this.searchResults = null; return; }
+      try {
+        const r = await this.api('/api/v1/admin/storage/search?q='+encodeURIComponent(q));
+        this.searchResults = r.objects||[];
+        if(!this.searchResults.length) this.toast('No objects matched');
+      } catch(e){ this.toast(e.message,true); }
+    },
+    syncSelectedKeys(){ this.selectedKeys = new Set(this.selectedKeyList); },
+    async deleteSelected(){
+      if(!this.selectedKeys.size || !confirm('Delete ' + this.selectedKeys.size + ' object(s)? Telegram media is retained.')) return;
+      let ok = 0;
+      for(const key of this.selectedKeys){
+        try {
+          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.currentBucket)+'/objects?'+new URLSearchParams({key}), {method:'DELETE'});
+          ok++;
+        } catch(e){}
+      }
+      this.selectedKeyList = []; this.syncSelectedKeys();
+      this.toast('Deleted ' + ok + ' object(s)');
+      await this.browseBucket(this.currentBucket);
+      await this.refreshBuckets();
+    },
+    async renameObject(bucket, key){
+      const parts = key.split('/');
+      const name = parts.pop();
+      const dir = parts.length ? parts.join('/') + '/' : '';
+      const next = prompt('New key:', key);
+      if(!next || next === key) return;
+      try {
+        await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects/copy?'+new URLSearchParams({key}),
+          {method:'POST', body: JSON.stringify({destination_key: next})});
+        await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}), {method:'DELETE'});
+        this.toast('Renamed');
+        await this.browseBucket(bucket);
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async moveObject(bucket, key){
+      const dest = prompt('Move to bucket[/prefix/new-name]:', '');
+      if(!dest) return;
+      let destBucket = dest, destKey = key;
+      if(dest.includes('/')){
+        const i = dest.indexOf('/');
+        destBucket = dest.substring(0, i); destKey = dest.substring(i+1);
+        if(!destKey) destKey = key;
+      }
+      try {
+        await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects/copy?'+new URLSearchParams({key}),
+          {method:'POST', body: JSON.stringify({destination_bucket: destBucket, destination_key: destKey})});
+        await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}), {method:'DELETE'});
+        this.toast('Moved');
+        await this.browseBucket(bucket);
+        await this.refreshBuckets();
+      } catch(e){ this.toast(e.message,true); }
+    },
+    handleDrop(ev){ this.dropHover = false; this.uploadFiles(this.currentBucket, ev.dataTransfer.files); },
+    handleFileInput(ev){ this.uploadFiles(this.currentBucket, ev.target.files); ev.target.value = ''; },
+    uploadFiles(bucket, files){
+      const list = Array.from(files||[]);
+      if(!list.length) return;
+      // Sequential XHR uploads so progress is visible per file.
+      const uploadNext = (i) => {
+        if(i >= list.length){ this.uploading = false; this.browseBucket(bucket).then(()=>this.refreshBuckets()); return; }
+        const file = list[i];
+        this.uploading = true; this.uploadName = file.name; this.uploadPct = 0;
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', this.contentUrl(bucket, file.name));
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.setRequestHeader('X-TeleDrive-CSRF', '1');
+        xhr.withCredentials = true;
+        xhr.upload.onprogress = (ev) => { if(ev.lengthComputable) this.uploadPct = Math.round(100*ev.loaded/ev.total); };
+        xhr.onload = () => {
+          if(xhr.status === 201){ this.toast('Uploaded ' + file.name); }
+          else { this.toast('Upload failed: ' + (xhr.responseText||xhr.status), true); }
+          uploadNext(i+1);
+        };
+        xhr.onerror = () => { this.toast('Upload failed: ' + file.name, true); uploadNext(i+1); };
+        xhr.send(file);
+      };
+      uploadNext(0);
+    },
     async refreshBuckets(){
       try { const r = await this.api('/api/v1/admin/storage/buckets'); this.buckets = r.buckets||[]; }
       catch(e){ this.toast(e.message,true); }
@@ -381,7 +505,7 @@ function app(){
     async createBucket(){
       if(!this.newBucketName.trim()) return;
       try {
-        await this.api('/api/v1/buckets',{method:'POST',body:JSON.stringify({name:this.newBucketName.trim()})});
+        await this.api('/api/v1/admin/storage/buckets',{method:'POST',body:JSON.stringify({name:this.newBucketName.trim()})});
         this.toast('Bucket created');
         this.showNewBucket = false;
         this.newBucketName = '';
@@ -390,7 +514,7 @@ function app(){
     },
     async deleteBucket(name){
       if(!confirm('Delete bucket '+name+'? (must be empty)')) return;
-      try { await this.api('/api/v1/buckets/'+encodeURIComponent(name),{method:'DELETE'}); this.toast('Deleted'); await this.refreshBuckets(); if(this.currentBucket===name) this.currentBucket=null; }
+      try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name),{method:'DELETE'}); this.toast('Deleted'); await this.refreshBuckets(); if(this.currentBucket===name) this.currentBucket=null; }
       catch(e){ this.toast(e.message,true); }
     },
     async browseBucket(name){

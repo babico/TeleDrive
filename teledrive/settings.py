@@ -33,6 +33,9 @@ class ServiceSettings:
     storage_scratch_dir: str = "/data/tmp"
     job_source_root: str = "/uploads"
     job_auto_run: bool = True
+    job_watch: bool = False
+    job_watch_interval_seconds: int = 30
+    job_watch_bucket: str = 
     allowed_sqlite_roots: tuple[str, ...] = ("/data",)
     auth_failure_limit: int = 5
     auth_failure_window_seconds: int = 300
@@ -146,6 +149,11 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
             or os.environ.get("TELEDRIVE_JOB_SOURCE_ROOT", "/uploads")),
         job_auto_run=bool(jobs.get("auto_run",
                           os.environ.get("TELEDRIVE_JOB_AUTO_RUN", "1") == "1")),
+        job_watch=bool(jobs.get("watch", False)),
+        job_watch_interval_seconds=_int(
+            jobs.get("watch_interval_seconds", 30), 30,
+            "watch_interval_seconds", minimum=5),
+        job_watch_bucket=str(jobs.get("watch_bucket", "")),
         allowed_sqlite_roots=_hosts(
             state.get("allowed_sqlite_roots")
             or os.environ.get("TELEDRIVE_ALLOWED_SQLITE_ROOTS", "/data"),

@@ -92,14 +92,17 @@
 
 ## 4. Phase 2 — The file manager (WebUI usable without an S3 client)
 
-- [ ] Drag-and-drop upload in the S3 browser (browser-driven multipart with
-      progress, checksums and quota enforcement).
-- [ ] Inline previews for images/audio/video via HTTP Range; capped text/JSON
-      preview.
-- [ ] Object actions: rename, cross-bucket move, bulk select + delete.
-- [ ] Full-text search over the catalog (SQLite FTS5 / Postgres tsvector).
-- [ ] Folder auto-sync: inotify watcher on the job source root auto-enqueues
-      new/changed files.
+- [x] Drag-and-drop upload in the S3 browser (session-authenticated single-shot
+      streaming PUT with XHR progress, quota enforcement and generation CAS;
+      files above web.rest_max_upload_bytes use rclone/S3 multipart).
+- [x] Inline previews for images/audio/video via HTTP Range; capped text/JSON
+      preview (8 KiB cap, extension-based type detection).
+- [x] Object actions: rename, cross-bucket move (metadata-level copy + delete),
+      bulk select + delete, cross-bucket search.
+- [ ] Content search inside object bytes (key search shipped; FTS5/tsvector
+      only if key search proves insufficient).
+- [x] Folder auto-sync: periodic idempotent scan of the job source root
+      (jobs.watch / jobs.watch_bucket / jobs.watch_interval_seconds).
 
 ## 5. Phase 3 — Sharing, visibility and governance
 

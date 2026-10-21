@@ -75,6 +75,13 @@ storage:
 jobs:
   source_root: "/uploads"
   auto_run: true                 # process explicitly queued jobs
+  # Optional folder auto-sync ("Dropbox-style"): periodically scan the
+  # source root and enqueue new/changed files as durable upload jobs.
+  # watch_bucket is required for watch to run; uploads still go through
+  # the durable job scheduler with quota enforcement.
+  watch: false
+  watch_interval_seconds: 30     # minimum 5
+  watch_bucket: ""               # e.g. "uploads"
 
 # ---------------------------------------------------------------------------
 # SQL state: the shared object catalog database.

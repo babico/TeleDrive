@@ -69,6 +69,9 @@ JOB_AUTO_RUN = True
 ALLOWED_SQLITE_ROOTS = ("/data",)
 AUTH_FAILURE_WINDOW_SECONDS = 300
 AUTH_FAILURE_LIMIT = 5
+WATCH_ENABLED = False
+WATCH_INTERVAL = 30
+WATCH_BUCKET = ""
 SSL_CERTFILE = ""
 SSL_KEYFILE = ""
 DB_EXTRA_PACKAGES: tuple[str, ...] = ()
@@ -107,6 +110,7 @@ def _reload_service_settings() -> None:
     global MAX_REQUEST_BYTES, ALLOWED_HOSTS, AUTH_DIR, STORAGE_SCRATCH_DIR
     global REST_MAX_UPLOAD_BYTES, JOB_SOURCE_ROOT, JOB_AUTO_RUN
     global ALLOWED_SQLITE_ROOTS, AUTH_FAILURE_WINDOW_SECONDS, AUTH_FAILURE_LIMIT
+    global WATCH_ENABLED, WATCH_INTERVAL, WATCH_BUCKET
     global SSL_CERTFILE, SSL_KEYFILE, DB_EXTRA_PACKAGES
 
     from teledrive.settings import load_settings
@@ -126,6 +130,9 @@ def _reload_service_settings() -> None:
     ALLOWED_SQLITE_ROOTS = settings.allowed_sqlite_roots
     AUTH_FAILURE_WINDOW_SECONDS = settings.auth_failure_window_seconds
     AUTH_FAILURE_LIMIT = settings.auth_failure_limit
+    WATCH_ENABLED = settings.job_watch
+    WATCH_INTERVAL = settings.job_watch_interval_seconds
+    WATCH_BUCKET = settings.job_watch_bucket
     SSL_CERTFILE = settings.ssl_certfile
     SSL_KEYFILE = settings.ssl_keyfile
     DB_EXTRA_PACKAGES = settings.db_extra_packages
@@ -530,6 +537,9 @@ def default_config() -> dict[str, Any]:
         "jobs": {
             "source_root": "/uploads",
             "auto_run": True,
+            "watch": False,
+            "watch_interval_seconds": 30,
+            "watch_bucket": "",
         },
         "upload": {
             "source_dir": "/uploads",
@@ -755,9 +765,73 @@ async def lifecycle_scheduler_loop() -> None:
         await asyncio.sleep(3600)
 
 
+def folder_watch_scan() -> dict:
+    """One auto-sync pass: enqueue new/changed files from the source root.
+
+    Returns the enqueue_legacy_folder report (queued, already_queued,
+    excluded, job_ids). Raises when the source root is not configured.
+    """
+    from teledrive.storage.legacy_bridge import enqueue_legacy_folder
+    root = _storage_job_root()
+    conn = db_connect()
+    try:
+        cfg = effective_config()
+        source_root = Path(cfg.source_dir).resolve(strict=True)
+        if not source_root.is_relative_to(root):
+            raise RuntimeError("watch source is outside the job root")
+        manager = StorageUploadJobs(BucketCatalog(ManifestStore(conn)))
+        report = enqueue_legacy_folder(
+            cfg, manager, bucket=WATCH_BUCKET, prefix="",
+            max_files=100, dry_run=False, lease_heartbeat=None,
+        )
+        conn.connection.commit()
+        return {"queued": report.queued, "already_queued": report.already_queued,
+                "excluded": report.excluded, "job_ids": list(report.job_ids)}
+    finally:
+        conn.close()
+
+
+async def folder_watch_loop() -> None:
+    """Optional folder auto-sync (jobs.watch in config/config.yaml).
+
+    Every jobs.watch_interval_seconds the source root is scanned and
+    new/changed files are enqueued as durable upload jobs targeting
+    jobs.watch_bucket. Failures never crash the loop; the durable job
+    scheduler performs the actual Telegram uploads.
+    """
+    while True:
+        interval = max(5, int(WATCH_INTERVAL))
+        try:
+            if not WATCH_ENABLED:
+                await asyncio.sleep(10)
+                continue
+            if not WATCH_BUCKET:
+                _log("folder watch enabled but jobs.watch_bucket is not "
+                     "configured; skipping scans", "watcher")
+                await asyncio.sleep(60)
+                continue
+            report = folder_watch_scan()
+            if report.get("queued"):
+                _log(f"folder watch queued {report['queued']} file(s)",
+                     "watcher")
+        except asyncio.CancelledError:
+            raise
+        except HTTPException as exc:
+            # Source root not configured yet — expected on fresh installs.
+            message = f"folder watch idle: {exc.detail}"
+            if _SCHEDULER_IDLE_NOTICE.get("watch") != message:
+                _log(message, "watcher")
+                _SCHEDULER_IDLE_NOTICE["watch"] = message
+            interval = max(interval, 60)
+        except Exception as exc:
+            _log("folder watch: " + type(exc).__name__, "watcher")
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global upload_job_scheduler_task, lifecycle_scheduler_task
+    global folder_watch_task
     os.umask(0o077)
     ensure_config()
     _reload_service_settings()
@@ -825,6 +899,7 @@ async def lifespan(_: FastAPI):
         _log(_scrub_text(f"startup database warning: {exc}"), "startup")
     upload_job_scheduler_task = asyncio.create_task(upload_job_scheduler_loop())
     lifecycle_scheduler_task = asyncio.create_task(lifecycle_scheduler_loop())
+    folder_watch_task = asyncio.create_task(folder_watch_loop())
     yield
     if upload_job_scheduler_task:
         upload_job_scheduler_task.cancel()
@@ -832,6 +907,9 @@ async def lifespan(_: FastAPI):
     if lifecycle_scheduler_task:
         lifecycle_scheduler_task.cancel()
         await asyncio.gather(lifecycle_scheduler_task, return_exceptions=True)
+    if folder_watch_task:
+        folder_watch_task.cancel()
+        await asyncio.gather(folder_watch_task, return_exceptions=True)
     await mtproto_storage_runtime.stop()
 
 
@@ -892,8 +970,11 @@ async def _audit_log_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    binary_upload = (request.method == "PUT" and
-                     re.fullmatch(r"/api/v1/buckets/[A-Za-z0-9.-]+/content", request.url.path))
+    binary_upload = (request.method == "PUT" and (
+        re.fullmatch(r"/api/v1/buckets/[A-Za-z0-9.-]+/content", request.url.path)
+        or re.fullmatch(
+            r"/api/v1/admin/storage/buckets/[A-Za-z0-9.-]+/content",
+            request.url.path)))
     if request.method in {"POST", "PUT", "PATCH"} and not binary_upload:
         # Size-bound browser JSON requests. Cache on the ORIGINAL request:
         # Starlette's call_next() replays _CachedRequest's cached body.
@@ -2171,14 +2252,8 @@ def admin_list_buckets(_: None = Depends(require_auth)):
         buckets = catalog.list_buckets()
         result = []
         for b in buckets:
-            # Get object count and total size
-            from sqlalchemy import text as _text
-            row = conn.connection.execute(_text(
-                "SELECT COUNT(*), COALESCE(SUM(size),0) FROM storage_objects "
-                "WHERE bucket = :b AND is_current = 1"
-            ), {"b": b}).fetchone()
-            count = row[0] if row else 0
-            size = row[1] if row else 0
+            # Current object count and total size (heads join).
+            count, size = _bucket_current_usage(conn, b)
             max_size, max_objects = _bucket_quota(conn, b)
             quota = None
             if max_size is not None or max_objects is not None:
@@ -2186,6 +2261,43 @@ def admin_list_buckets(_: None = Depends(require_auth)):
             result.append({"name": b, "object_count": count,
                            "total_size": size, "quota": quota})
         return {"buckets": result}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/storage/buckets", tags=["Object catalog"],
+          status_code=201, summary="Create a bucket (WebUI session)")
+def admin_create_bucket(payload: BucketCreateRequest, request: Request,
+                        _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        try:
+            BucketCatalog(ManifestStore(conn)).create_bucket(
+                payload.name, int(time.time()))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        _log(f"create bucket: name={payload.name}", "storage")
+        return {"name": payload.name}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/admin/storage/buckets/{bucket}", tags=["Object catalog"],
+            summary="Remove a physically empty bucket (WebUI session)")
+def admin_delete_bucket(bucket: str, request: Request,
+                        _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        try:
+            BucketCatalog(ManifestStore(conn)).delete_bucket(bucket)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Bucket not found") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        _log(f"delete bucket: name={bucket}", "storage")
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -2282,6 +2394,107 @@ async def admin_download_object(bucket: str, request: Request,
                              media_type="application/octet-stream", headers=headers)
 
 
+@app.put("/api/v1/admin/storage/buckets/{bucket}/content",
+         tags=["Object catalog"], status_code=201,
+         summary="Upload object bytes through the WebUI session")
+async def admin_upload_object(bucket: str, request: Request,
+                              key: str = Query(..., min_length=1, max_length=1024),
+                              generation: int | None = Query(None, ge=0),
+                              _: None = Depends(require_auth)):
+    """Session-authenticated twin of the API-key-scoped content upload."""
+    _same_origin(request)
+    return await _stream_object_upload(bucket, key, request, generation)
+
+
+class ObjectCopyRequest(BaseModel):
+    destination_bucket: str | None = Field(default=None, min_length=3, max_length=63)
+    destination_key: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/api/v1/admin/storage/buckets/{bucket}/objects/copy",
+          tags=["Object catalog"],
+          summary="Copy (rename/move) an object at the catalog level")
+def admin_copy_object(bucket: str, request: Request,
+                      payload: ObjectCopyRequest,
+                      key: str = Query(..., min_length=1, max_length=1024),
+                      _: None = Depends(require_auth)):
+    """Metadata-level copy: no Telegram bytes move, quota is enforced."""
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        destination_bucket = payload.destination_bucket or bucket
+        if destination_bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Destination bucket not found")
+        if destination_bucket == bucket and payload.destination_key == key:
+            raise HTTPException(400, "Destination equals source")
+        # Enforce the destination bucket's object-count quota for new keys.
+        _enforce_bucket_quota(conn, destination_bucket,
+                              payload.destination_key, 0)
+        try:
+            dest_head = catalog.get(destination_bucket, payload.destination_key)
+            dest_generation = dest_head.generation
+            dest_id = dest_head.item.id
+        except FileNotFoundError:
+            dest_generation, dest_id = 0, None
+        try:
+            restored = copy_object(
+                catalog, bucket, key,
+                destination_bucket, payload.destination_key,
+                expected_destination_generation=dest_generation,
+                expected_destination_object_id=dest_id,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Object not found") from exc
+        except (CopyConflict, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        _log(f"copy object: {bucket}/{key} -> "
+             f"{destination_bucket}/{payload.destination_key}", "storage")
+        return {"id": restored.object_id, "bucket": destination_bucket,
+                "key": payload.destination_key, "etag": restored.etag,
+                "size": restored.size,
+                "generation": catalog.get(
+                    destination_bucket, payload.destination_key).generation}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/storage/search", tags=["Object catalog"],
+         summary="Search current object keys across all buckets")
+def admin_search_objects(q: str = Query(..., min_length=1, max_length=256),
+                         limit: int = Query(100, ge=1, le=1000),
+                         _: None = Depends(require_auth)):
+    """Case-insensitive key search over the unified catalog (all buckets)."""
+    from sqlalchemy import func, select as _select
+    from teledrive.storage.manifest import objects as _objects
+    # Escape LIKE wildcards so user input cannot broaden the pattern.
+    escaped = (q.replace(chr(92), chr(92) * 2)
+                .replace("%", chr(92) + "%")
+                .replace("_", chr(92) + "_")).lower()
+    pattern = "%" + escaped + "%"
+    escape_char = chr(92)
+    conn = db_connect()
+    try:
+        from teledrive.storage.catalog import heads as _heads
+        rows = conn.connection.execute(
+            _select(_objects.c.id, _objects.c.bucket, _objects.c.object_key,
+                    _objects.c.size, _objects.c.sha256, _objects.c.created_at)
+            .select_from(_heads.join(
+                _objects, _objects.c.id == _heads.c.object_id))
+            .where(func.lower(_objects.c.object_key).like(
+                pattern, escape=escape_char))
+            .order_by(_objects.c.bucket, _objects.c.object_key)
+            .limit(limit)
+        ).all()
+        return {"query": q, "objects": [
+            {"id": r[0], "bucket": r[1], "key": r[2], "size": r[3],
+             "sha256": r[4], "created_at": r[5]} for r in rows]}
+    finally:
+        conn.close()
+
+
 class BucketQuotaRequest(BaseModel):
     max_size_bytes: int | None = None
     max_objects: int | None = None
@@ -2296,6 +2509,29 @@ def _bucket_quota(conn, bucket: str) -> tuple[int | None, int | None]:
     return (row[0], row[1]) if row else (None, None)
 
 
+def _bucket_current_usage(conn, bucket: str) -> tuple[int, int]:
+    """(object_count, total_size) of a bucket's CURRENT objects (heads join)."""
+    from sqlalchemy import text as _text
+    row = conn.connection.execute(_text(
+        "SELECT COUNT(o.id), COALESCE(SUM(o.size), 0) "
+        "FROM storage_object_heads h "
+        "JOIN storage_objects o ON o.id = h.object_id "
+        "WHERE h.bucket = :b"
+    ), {"b": bucket}).fetchone()
+    return (int(row[0]) if row else 0, int(row[1]) if row else 0)
+
+
+def _bucket_has_current_key(conn, bucket: str, key: str) -> bool:
+    import hashlib as _hl
+    from sqlalchemy import text as _text
+    key_hash = _hl.sha256(key.encode("utf-8")).hexdigest()
+    row = conn.connection.execute(_text(
+        "SELECT COUNT(*) FROM storage_object_heads "
+        "WHERE bucket = :b AND key_hash = :kh"
+    ), {"b": bucket, "kh": key_hash}).scalar()
+    return bool(row)
+
+
 def _enforce_bucket_quota(conn, bucket: str, key: str, incoming_size: int) -> None:
     """TeleDrive-level per-bucket quota enforcement (S3 has no native quota).
 
@@ -2306,23 +2542,14 @@ def _enforce_bucket_quota(conn, bucket: str, key: str, incoming_size: int) -> No
     max_size_q, max_objects_q = _bucket_quota(conn, bucket)
     if max_size_q is None and max_objects_q is None:
         return
-    from sqlalchemy import text as _text
     if max_size_q is not None:
-        cur_size = conn.connection.execute(_text(
-            "SELECT COALESCE(SUM(size),0) FROM storage_objects "
-            "WHERE bucket = :b AND is_current = 1"
-        ), {"b": bucket}).scalar() or 0
+        _count, cur_size = _bucket_current_usage(conn, bucket)
         if cur_size + incoming_size > max_size_q:
             raise HTTPException(413, "Upload exceeds bucket quota (max size)")
     if max_objects_q is not None:
-        cur_count = conn.connection.execute(_text(
-            "SELECT COUNT(*) FROM storage_objects WHERE bucket = :b AND is_current = 1"
-        ), {"b": bucket}).scalar() or 0
-        existing = conn.connection.execute(_text(
-            "SELECT COUNT(*) FROM storage_objects "
-            "WHERE bucket = :b AND key = :k AND is_current = 1"
-        ), {"b": bucket, "k": key}).scalar() or 0
-        if existing == 0 and cur_count >= max_objects_q:
+        cur_count, _size = _bucket_current_usage(conn, bucket)
+        if not _bucket_has_current_key(conn, bucket, key) \
+                and cur_count >= max_objects_q:
             raise HTTPException(413, "Upload exceeds bucket quota (max objects)")
 
 
@@ -2909,13 +3136,9 @@ def unlink_current_object(bucket: str, key: str = Query(..., min_length=1, max_l
         conn.close()
 
 
-@app.put("/api/v1/buckets/{bucket}/content", tags=["Uploads"],
-         summary="Upload raw binary content to Telegram (synchronous commit)", status_code=201)
-async def put_object_content(
-    bucket: str, request: Request, key: str = Query(..., min_length=1, max_length=1024),
-    generation: int | None = Query(None, ge=0),
-    _: None = Depends(require_api_scope("objects:write")),
-):
+async def _stream_object_upload(bucket: str, key: str, request: Request,
+                                generation: int | None) -> dict:
+    """Shared upload core: validate, stage, enforce quota, upload, publish."""
     if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/octet-stream":
         raise HTTPException(415, "Content-Type must be application/octet-stream")
     max_size = REST_MAX_UPLOAD_BYTES
@@ -2971,6 +3194,16 @@ async def put_object_content(
         if staged is not None:
             staged.unlink(missing_ok=True)
         conn.close()
+
+
+@app.put("/api/v1/buckets/{bucket}/content", tags=["Uploads"],
+         summary="Upload raw binary content to Telegram (synchronous commit)", status_code=201)
+async def put_object_content(
+    bucket: str, request: Request, key: str = Query(..., min_length=1, max_length=1024),
+    generation: int | None = Query(None, ge=0),
+    _: None = Depends(require_api_scope("objects:write")),
+):
+    return await _stream_object_upload(bucket, key, request, generation)
 
 
 @app.head("/api/v1/buckets/{bucket}/content", tags=["Uploads"],

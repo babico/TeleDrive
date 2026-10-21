@@ -99,6 +99,29 @@ tailwind.config = {
       <button class="btn btn-sm" @click="refreshBuckets()">Refresh buckets</button>
       <button class="btn btn-primary btn-sm" x-show="isAdmin" @click="showNewBucket=!showNewBucket">New bucket</button>
     </div>
+    <div class="row mt-3">
+      <input x-model="searchQuery" class="input" placeholder="Search objects across all buckets…" @keyup.enter="searchObjects()">
+      <button class="btn btn-sm" @click="searchObjects()">Search</button>
+      <button class="btn btn-sm" x-show="searchResults" @click="searchResults=null">Clear</button>
+    </div>
+    <div class="mt-3" x-show="searchResults">
+      <h4 x-text="'Search results (\'' + searchQuery + '\')'"></h4>
+      <div class="scroll">
+        <table><thead><tr><th>Bucket</th><th>Key</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody><template x-for="o in searchResults" :key="o.id"><tr>
+          <td x-text="o.bucket"></td><td x-text="o.key"></td><td x-text="fmtBytes(o.size)"></td><td x-text="fmtTs(o.created_at)"></td>
+          <td class="whitespace-nowrap"><button class="btn btn-sm" @click="downloadObject(o.bucket,o.key)">Download</button> <button class="btn btn-sm" @click="previewObject(o.bucket,o.key)">Preview</button></td>
+        </tr></template></tbody></table>
+      </div>
+    </div>
+    <div class="mt-3 border-2 border-dashed rounded-lg p-4 text-center"
+         :class="dropHover ? 'border-brand-500 bg-brand-600/10' : 'border-gray-700'"
+         x-show="currentBucket && canWrite"
+         @dragover.prevent="dropHover=true" @dragleave.prevent="dropHover=false" @drop.prevent="handleDrop($event)">
+      <span class="muted" x-text="uploading ? 'Uploading ' + uploadName + ' — ' + uploadPct + '%' : 'Drop files here to upload to ' + currentBucket + ' (or click)'"
+            @click="$refs.fileInput.click()"></span>
+      <input type="file" multiple x-ref="fileInput" class="hidden" @change="handleFileInput($event)">
+    </div>
     <div class="mt-2" x-show="showNewBucket">
       <div class="row">
         <input x-model="newBucketName" class="input" placeholder="bucket-name">
@@ -121,13 +144,43 @@ tailwind.config = {
     </div>
     <div class="mt-3" x-show="currentBucket">
       <h4 x-text="'Objects in ' + currentBucket"></h4>
+      <div class="row mt-2" x-show="canWrite && bucketObjects.length">
+        <button class="btn btn-danger btn-sm" x-show="selectedKeys.size" @click="deleteSelected()">Delete selected (<span x-text="selectedKeys.size"></span>)</button>
+        <span class="muted text-xs" x-show="!selectedKeys.size">Select objects with the checkboxes to bulk delete.</span>
+      </div>
       <div class="scroll">
-        <table><thead><tr><th>Key</th><th>Size</th><th>SHA-256</th><th>Created</th><th>Actions</th></tr></thead>
+        <table><thead><tr><th x-show="canWrite"></th><th>Key</th><th>Size</th><th>SHA-256</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody><template x-for="o in bucketObjects" :key="o.id"><tr>
-          <td x-text="o.key"></td><td x-text="fmtBytes(o.size)"></td><td class="text-xs text-gray-500" x-text="(o.sha256||'').substring(0,12)+'…'"></td>
+          <td x-show="canWrite"><input type="checkbox" :value="o.key" x-model="selectedKeyList" @change="syncSelectedKeys()"></td>
+          <td><a href="#" @click.prevent="previewObject(currentBucket,o.key)" class="text-brand-400 hover:underline" x-text="o.key"></a></td>
+          <td x-text="fmtBytes(o.size)"></td><td class="text-xs text-gray-500" x-text="(o.sha256||'').substring(0,12)+'…'"></td>
           <td x-text="fmtTs(o.created_at)"></td>
-          <td class="whitespace-nowrap"><button class="btn btn-sm" @click="downloadObject(currentBucket,o.key)">Download</button> <button class="btn btn-danger btn-sm" @click="deleteObject(currentBucket,o.key)">Delete</button></td>
+          <td class="whitespace-nowrap">
+            <button class="btn btn-sm" @click="downloadObject(currentBucket,o.key)">Download</button>
+            <button class="btn btn-sm" @click="previewObject(currentBucket,o.key)">Preview</button>
+            <button class="btn btn-sm" x-show="canWrite" @click="renameObject(currentBucket,o.key)">Rename</button>
+            <button class="btn btn-sm" x-show="canWrite" @click="moveObject(currentBucket,o.key)">Move</button>
+            <button class="btn btn-danger btn-sm" x-show="canWrite" @click="deleteObject(currentBucket,o.key)">Delete</button>
+          </td>
         </tr></template></tbody></table>
+      </div>
+    </div>
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50" x-show="previewOpen" x-cloak @click.self="previewOpen=false">
+      <div class="card bg-gray-900 max-w-3xl w-full mx-4">
+        <div class="flex justify-between items-center mb-2">
+          <h4 x-text="previewKey"></h4>
+          <div class="row">
+            <button class="btn btn-sm" @click="downloadObject(previewBucket,previewKey)">Download</button>
+            <button class="btn btn-sm" @click="previewOpen=false">Close</button>
+          </div>
+        </div>
+        <div class="scroll" style="max-height:70vh">
+          <img x-show="previewKind==='image'" :src="previewUrl()" class="max-w-full" alt="preview">
+          <video x-show="previewKind==='video'" :src="previewUrl()" controls class="max-w-full"></video>
+          <audio x-show="previewKind==='audio'" :src="previewUrl()" controls class="w-full"></audio>
+          <pre x-show="previewKind==='text'" x-text="previewText" class="text-xs whitespace-pre-wrap bg-gray-950 p-3 rounded"></pre>
+          <p class="muted" x-show="previewKind==='binary'" x-text="'No inline preview for this file type (' + fmtBytes(previewSize) + ')'"></p>
+        </div>
       </div>
     </div>
     <div class="mt-3" x-show="quotaEditBucket">

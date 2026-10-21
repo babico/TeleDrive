@@ -279,7 +279,9 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8080/api/v1/admin/storage/jobs
 ~~~
 
-With `jobs.auto_run: true` in `config/config.yaml` (the default) the service processes **explicitly queued** jobs automatically. Set it to `false` to disable background processing while retaining queue entries. **A copy into `/uploads` does not automatically trigger a scan or upload.**
+With `jobs.auto_run: true` in `config/config.yaml` (the default) the service processes **explicitly queued** jobs automatically. Set it to `false` to disable background processing while retaining queue entries.
+
+**Folder auto-sync** — set `jobs.watch: true` plus a `jobs.watch_bucket` (and optionally `jobs.watch_interval_seconds`, default 30) to make TeleDrive scan the source root periodically and enqueue new/changed files automatically, Dropbox-style. Uploads still flow through the durable job scheduler with quota enforcement; repeated scans are idempotent (same inode/mtime/size is not re-queued).
 
 Jobs are persisted in SQL and protect against source mutation, unexpected generation changes and interrupted uploads. Keep the source file until the job reaches `done`. The admin API also supports job inspection/retry, stale-pending previews, history restore and safe health checks. Failed/uncertain remote sends do not authorize physical cleanup.
 

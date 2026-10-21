@@ -87,6 +87,11 @@ telegram_session_pending = Table(
     Column("api_hash", String(128), nullable=False),
     Column("phone", String(64), nullable=False),
     Column("phone_code_hash", String(255)),
+    # Serialized (unauthorized) Telethon session of the code REQUEST
+    # client: MTProto binds phone_code_hash to that session's auth key,
+    # so verify-code must reuse it or Telegram rejects the hash as
+    # expired no matter how fresh it is.
+    Column("session_string", Text),
     Column("channel", String(255)),
     Column("strategy", String(32), server_default="round_robin"),
     Column("created_at", BigInteger, nullable=False),
@@ -457,6 +462,18 @@ def _build_engine(url: str) -> Engine:
             for column in missing:
                 rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
                 conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
+
+    # telegram_session_pending.session_string (login-flow fix): existing
+    # databases get the column via the same dialect-aware ALTER.
+    pending_cols = {c["name"] for c in inspect(engine).get_columns(
+        "telegram_session_pending")}
+    if "session_string" not in pending_cols:
+        preparer = engine.dialect.identifier_preparer
+        table_name = preparer.quote("telegram_session_pending")
+        column = Column("session_string", Text)
+        rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
     return engine
 
 

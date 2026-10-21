@@ -873,3 +873,62 @@ def test_telegram_error_response_maps_and_logs(authenv):
     except HTTPException as e:
         assert "RuntimeError" in str(e.detail)
         assert "secret" not in str(e.detail)
+
+
+def test_pending_session_string_migration_and_legacy_row(authenv):
+    """The login-flow fix: pending rows must carry the requesting session.
+
+    1) Old rows without session_string get a clean 410 instead of a
+       doomed Telethon round-trip.
+    2) The engine build adds the column to databases created before it
+       existed (dialect-aware ALTER).
+    """
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    now = int(time.time())
+    try:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "INSERT INTO telegram_session_pending (token, api_id, api_hash, "
+            "phone, phone_code_hash, session_string, channel, strategy, "
+            "created_at) VALUES (:t, 1, 'h', '+900', 'pch', NULL, NULL, "
+            "'round_robin', :now)"), {"t": "legacy-token", "now": now})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    r = client.post("/api/v1/admin/storage/telegram-session/verify-code",
+                    headers={**admin, **CSRF},
+                    json={"token": "legacy-token", "code": "12345"})
+    assert r.status_code == 410
+    assert "predates" in r.json()["detail"]
+
+    # The legacy token was consumed, not left to age out.
+    db = authenv["connect"]()
+    try:
+        from sqlalchemy import text as _text
+        left = db.connection.execute(_text(
+            "SELECT COUNT(*) FROM telegram_session_pending "
+            "WHERE token = 'legacy-token'")).fetchone()[0]
+    finally:
+        db.close()
+    assert left == 0
+
+    # Dialect-aware migration: an old-schema database gains the column.
+    import sqlalchemy as sa
+    import teledrive.db as tdb
+    with sa.create_engine(
+            f"sqlite:////tmp/opencode/old_schema_test.db").connect() as oc:
+        oc.exec_driver_sql(
+            "CREATE TABLE telegram_session_pending (token VARCHAR(64) "
+            "PRIMARY KEY, api_id BIGINT NOT NULL, api_hash VARCHAR(128) "
+            "NOT NULL, phone VARCHAR(64) NOT NULL, phone_code_hash "
+            "VARCHAR(255), channel VARCHAR(255), strategy VARCHAR(32) "
+            "DEFAULT 'round_robin', created_at BIGINT NOT NULL)")
+        oc.commit()
+    eng = tdb._build_engine("sqlite:////tmp/opencode/old_schema_test.db")
+    cols = {c["name"] for c in sa.inspect(eng).get_columns(
+        "telegram_session_pending")}
+    eng.dispose()
+    assert "session_string" in cols

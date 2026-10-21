@@ -1923,10 +1923,15 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
             await client.connect()
             result = await client.send_code_request(payload.phone)
             h = result.phone_code_hash
+            # The unauthorized session carries the auth key that
+            # phone_code_hash is bound to. verify-code MUST sign in with
+            # this exact session; a fresh one always gets
+            # PHONE_CODE_EXPIRED from Telegram.
+            sess = client.session.save()
             await client.disconnect()
-            return h
+            return h, sess
 
-        phone_code_hash = asyncio.run(_send())
+        phone_code_hash, request_session = asyncio.run(_send())
     except FloodWaitError as exc:
         info = _record_flood_wait(
             "send_code", int(getattr(exc, "seconds", 0)),
@@ -1948,11 +1953,13 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
         ), {"cutoff": now - 300})
         conn.connection.execute(_text(
             "INSERT INTO telegram_session_pending (token, api_id, api_hash, phone, "
-            "phone_code_hash, channel, strategy, created_at) "
-            "VALUES (:token, :api_id, :api_hash, :phone, :pch, :channel, :strategy, :now)"
+            "phone_code_hash, session_string, channel, strategy, created_at) "
+            "VALUES (:token, :api_id, :api_hash, :phone, :pch, :sess, :channel, "
+            ":strategy, :now)"
         ), {"token": token, "api_id": payload.api_id, "api_hash": payload.api_hash,
-            "phone": payload.phone, "pch": phone_code_hash, "channel": channel,
-            "strategy": payload.strategy or "round_robin", "now": now})
+            "phone": payload.phone, "pch": phone_code_hash, "sess": request_session,
+            "channel": channel, "strategy": payload.strategy or "round_robin",
+            "now": now})
         conn.connection.commit()
     finally:
         conn.close()
@@ -1980,20 +1987,28 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     try:
         from sqlalchemy import text as _text
         row = conn.connection.execute(_text(
-            "SELECT api_id, api_hash, phone, phone_code_hash, channel, strategy, "
-            "created_at FROM telegram_session_pending WHERE token = :token"
+            "SELECT api_id, api_hash, phone, phone_code_hash, session_string, "
+            "channel, strategy, created_at FROM telegram_session_pending "
+            "WHERE token = :token"
         ), {"token": payload.token}).fetchone()
     finally:
         conn.close()
     if row is None:
         raise HTTPException(404, "No pending code request (expired, invalid "
                                  "token, or already used). Request a new code.")
-    api_id, api_hash, phone, phone_code_hash, channel, strategy, created_at = row
+    api_id, api_hash, phone, phone_code_hash, request_session, channel, \
+        strategy, created_at = row
     _log(f"verify-code: token={payload.token[:8]}... request_age="
          f"{int(time.time()) - int(created_at)}s", "telegram-session")
     if int(time.time()) - int(created_at) > 300:
         _consume_pending_session_token(payload.token)
         raise HTTPException(410, "Code request expired; request a new one")
+    if not request_session:
+        # Pending row from before the session-binding fix: the hash can
+        # never be verified without the requesting session.
+        _consume_pending_session_token(payload.token)
+        raise HTTPException(410, "This code request predates a server fix; "
+                                 "request a new code")
     if not payload.code:
         raise HTTPException(400, "code is required")
     try:
@@ -2002,7 +2017,10 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
         import asyncio
 
         async def _verify():
-            client = TelegramClient(StringSession(), api_id, api_hash,
+            # Reuse the code-REQUEST session: phone_code_hash is bound to
+            # its auth key. A fresh session here is the classic cause of
+            # PhoneCodeExpiredError on a brand-new code.
+            client = TelegramClient(StringSession(request_session), api_id, api_hash,
                                     receive_updates=False, flood_sleep_threshold=0)
             await client.connect()
             # One sign-in attempt only: Telegram allows very few code

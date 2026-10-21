@@ -308,15 +308,17 @@ def _get_current_user(request: Request) -> dict | None:
     if not token:
         _log(f"_get_current_user: no token (cookies={dict(request.cookies)})", "auth")
         return None
-    _log(f"_get_current_user: token={token[:12]}...", "auth")
+    _log(f"_get_current_user: token={token[:12]}... len={len(token)}", "auth")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
+        _log(f"_get_current_user: db_url={conn.url}", "auth")
         row = conn.connection.execute(_text(
             "SELECT u.id, u.username, u.role, s.expires_at "
             "FROM user_sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.token = :token"
         ), {"token": token}).fetchone()
+        _log(f"_get_current_user: row={row}", "auth")
         if row is None:
             return None
         if int(time.time()) > int(row[3]):

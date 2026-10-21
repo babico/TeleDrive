@@ -935,3 +935,88 @@ def test_pending_session_string_migration_and_legacy_row(authenv, tmp_path):
         "telegram_session_pending")}
     eng.dispose()
     assert "session_string" in cols
+
+
+# ------------------------------------------------- multi-account sessions
+
+def _insert_session(db, account, phone="+905551112233"):
+    from sqlalchemy import text as _text
+    db.connection.execute(_text(
+        "INSERT INTO telegram_sessions (api_id, api_hash, phone, "
+        "session_string, account, channel, strategy, created_at, updated_at) "
+        "VALUES (1, 'h', :phone, 'sess', :account, NULL, 'round_robin', "
+        ":now, :now)"),
+        {"phone": phone, "account": account, "now": int(time.time())})
+    db.connection.commit()
+
+
+def test_telegram_sessions_list_and_delete(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "user-1001")
+        _insert_session(db, "user-2002", "+905559998877")
+    finally:
+        db.close()
+
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    accounts = {s["account"] for s in body["sessions"]}
+    assert accounts == {"user-1001", "user-2002"}
+    for s in body["sessions"]:
+        assert s["phone"].startswith("+905***") or "***" in s["phone"]
+        assert "session_string" not in s and "api_hash" not in s
+        assert s["objects"] == 0 and s["bytes"] == 0
+        assert s["cooldown_remaining_s"] == 0
+
+    # Viewer may read but not delete.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.get("/api/v1/admin/storage/telegram-sessions",
+                      headers=viewer).status_code == 200
+    assert client.delete("/api/v1/admin/storage/telegram-sessions/user-1001",
+                         headers={**viewer, **CSRF}).status_code == 403
+
+    # Delete one account; the other survives.
+    r = client.delete("/api/v1/admin/storage/telegram-sessions/user-1001",
+                      headers={**admin, **CSRF})
+    assert r.status_code == 200 and r.json()["deleted"] == 1
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    assert {s["account"] for s in r.json()["sessions"]} == {"user-2002"}
+
+
+def test_telegram_session_delete_soft_guard(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "user-3003")
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "CREATE TABLE storage_chunks (object_id VARCHAR(36), "
+            "account VARCHAR(255), size BIGINT)"))
+        db.connection.execute(_text(
+            "INSERT INTO storage_chunks VALUES ('obj-1', 'user-3003', 100), "
+            "('obj-1', 'user-3003', 200)"))
+        db.connection.commit()
+    finally:
+        db.close()
+
+    # Soft-guard: 409 with usage details while chunks reference the account.
+    r = client.delete("/api/v1/admin/storage/telegram-sessions/user-3003",
+                      headers={**admin, **CSRF})
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["objects"] == 1 and detail["bytes"] == 300
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    assert {s["account"] for s in r.json()["sessions"]} == {"user-3003"}
+
+    # force=true deletes anyway.
+    r = client.delete(
+        "/api/v1/admin/storage/telegram-sessions/user-3003?force=true",
+        headers={**admin, **CSRF})
+    assert r.status_code == 200
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    assert r.json()["sessions"] == []

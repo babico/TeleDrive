@@ -49,6 +49,7 @@ function app(){
     tgApiHash: '',
     tgPhone: '',
     tgSessionStatus: 'Not checked',
+    tgSessions: [],
     tgSessionError: '',
     floodActive: false,
     floodLast: null,
@@ -306,13 +307,30 @@ function app(){
 
     async refreshTgSessionStatus(){
       try {
-        const r = await this.api('/api/v1/admin/storage/telegram-session');
-        if(r.configured && r.session){
-          this.tgSessionStatus = 'Authorized: '+r.session.account+' (api_id '+r.session.api_id+'), channel '+(r.session.channel||'-');
-        } else {
-          this.tgSessionStatus = 'No session configured.';
-        }
+        const r = await this.api('/api/v1/admin/storage/telegram-sessions');
+        this.tgSessions = r.sessions||[];
+        this.tgSessionStatus = this.tgSessions.length
+          ? this.tgSessions.length+' account(s) authorized'
+          : 'No session configured.';
       } catch(e){ this.tgSessionStatus = 'Error: '+e.message; }
+    },
+    async deleteTgSession(account, force){
+      const hasData = this.tgSessions.find(s=>s.account===account)?.objects > 0;
+      const msg = hasData && !force
+        ? 'The account '+account+' still stores objects. Delete its session anyway? (Reads of those objects will need the account re-authorized.)'
+        : 'Delete the Telegram session for '+account+'?';
+      if(!confirm(msg)) return;
+      try {
+        await this.api('/api/v1/admin/storage/telegram-sessions/'+encodeURIComponent(account)
+          +(force?'?force=true':''), {method:'DELETE'});
+        this.toast('Session deleted: '+account);
+        await this.refreshTgSessionStatus();
+      } catch(e){
+        // 409 soft-guard: confirm once more with the data warning shown
+        if(e.message && e.message.includes('still stores objects')){
+          if(confirm(e.message+'\n\nDelete anyway?')) return this.deleteTgSession(account, true);
+        } else this.toast(e.message,true);
+      }
     },
     async refreshFlood(){
       try {

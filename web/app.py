@@ -1743,6 +1743,115 @@ def restore_published_version(
 
 # --- Telegram session management (WebUI-driven) -----------------------------
 
+def _mask_phone(phone: str | None) -> str:
+    if not phone:
+        return "-"
+    digits = str(phone).strip()
+    if len(digits) <= 6:
+        return "***"
+    return digits[:4] + "***" + digits[-2:]
+
+
+@app.get("/api/v1/admin/storage/telegram-sessions", tags=["Storage jobs"],
+         summary="List all Telegram sessions with per-account health")
+def list_telegram_sessions(_: None = Depends(require_auth)):
+    now_ms = int(time.time() * 1000)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        rows = conn.connection.execute(_text(
+            "SELECT account, api_id, phone, channel, strategy, created_at, "
+            "updated_at FROM telegram_sessions ORDER BY account")).fetchall()
+        # Usage, cooldowns and flood observations live in the storage
+        # catalog tables; degrade gracefully when this deployment's web
+        # database does not carry them.
+        usage: dict[str, tuple[int, int]] = {}
+        cooldowns: dict[str, int] = {}
+        floods: dict[str, int] = {}
+        try:
+            for acct, objects, total in conn.connection.execute(_text(
+                    "SELECT account, COUNT(DISTINCT object_id), SUM(size) "
+                    "FROM storage_chunks GROUP BY account")):
+                usage[str(acct)] = (int(objects or 0), int(total or 0))
+        except Exception:
+            pass
+        try:
+            for acct, until in conn.connection.execute(_text(
+                    "SELECT account, MAX(cooldown_until_ms) FROM "
+                    "storage_mtproto_chat_cooldowns GROUP BY account")):
+                cooldowns[str(acct)] = int(until or 0)
+        except Exception:
+            pass
+        try:
+            for acct, obs in conn.connection.execute(_text(
+                    "SELECT account, SUM(observations) FROM "
+                    "storage_mtproto_flood_observations GROUP BY account")):
+                floods[str(acct)] = int(obs or 0)
+        except Exception:
+            pass
+    finally:
+        conn.close()
+    sessions = []
+    for account, api_id, phone, channel, strategy, created, updated in rows:
+        objects, total = usage.get(str(account), (0, 0))
+        remaining_ms = max(0, cooldowns.get(str(account), 0) - now_ms)
+        sessions.append({
+            "account": account, "api_id": api_id,
+            "phone": _mask_phone(phone), "channel": channel,
+            "strategy": strategy or "round_robin",
+            "created_at": created, "updated_at": updated,
+            "objects": objects, "bytes": total,
+            "cooldown_remaining_s": remaining_ms // 1000,
+            "flood_observations": floods.get(str(account), 0),
+        })
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.delete("/api/v1/admin/storage/telegram-sessions/{account}",
+            tags=["Storage jobs"],
+            summary="Delete one account's Telegram session")
+def delete_telegram_session_account(account: str, request: Request,
+                                    force: bool = False,
+                                    _: None = Depends(require_auth)):
+    _same_origin(request)
+    account = account.strip()
+    if not account:
+        raise HTTPException(400, "account is required")
+    # Soft-guard: an account that still stores chunks must be deleted
+    # explicitly with force=true. The catalog rows survive either way,
+    # but reads of those objects need the session re-authorized first.
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        objects, total = 0, 0
+        try:
+            guard = conn.connection.execute(_text(
+                "SELECT COUNT(DISTINCT object_id), SUM(size) FROM "
+                "storage_chunks WHERE account = :account"
+            ), {"account": account}).fetchone()
+            if guard is not None:
+                objects, total = int(guard[0] or 0), int(guard[1] or 0)
+        except Exception:
+            pass
+        if objects and not force:
+            raise HTTPException(409, {
+                "message": "This account still stores objects in the "
+                           "catalog. Deleting the session stops new "
+                           "uploads from using it, but reading those "
+                           "objects requires re-authorizing the account.",
+                "account": account, "objects": objects, "bytes": total,
+            })
+        deleted = conn.connection.execute(_text(
+            "DELETE FROM telegram_sessions WHERE account = :account"
+        ), {"account": account}).rowcount
+        conn.connection.commit()
+    finally:
+        conn.close()
+    _log(f"telegram session deleted: account={account} rows={deleted}",
+         "storage")
+    return {"ok": True, "deleted": deleted, "account": account}
+
+
 @app.get("/api/v1/admin/storage/telegram-session", tags=["Storage jobs"],
          summary="Read the active Telegram USER session status")
 def get_telegram_session(_: None = Depends(require_auth)):

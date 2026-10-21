@@ -174,6 +174,33 @@ tailwind.config = {
       <button class="btn btn-primary" @click="sendTgCode()">Send code</button>
       <span class="muted" x-text="tgSessionStatus"></span>
     </div>
+    <div class="card mt-4" x-show="tgSessions.length" x-cloak>
+      <h3>Authorized accounts (<span x-text="tgSessions.length"></span>)</h3>
+      <p class="muted">Uploads are distributed across accounts by the configured strategy (round_robin / failover / parallel). A FloodWait on one account automatically fails over to the others. Add another account by logging in above with a different phone number.</p>
+      <table>
+        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Channel</th><th>Strategy</th><th>Objects</th><th>Size</th><th>Flood</th><th>Updated</th><th></th></tr></thead>
+        <tbody>
+          <template x-for="s in tgSessions" :key="s.account">
+            <tr>
+              <td class="font-mono" x-text="s.account"></td>
+              <td x-text="s.phone"></td>
+              <td x-text="s.api_id"></td>
+              <td x-text="s.channel||'-'"></td>
+              <td x-text="s.strategy"></td>
+              <td x-text="s.objects"></td>
+              <td x-text="fmtBytes(s.bytes)"></td>
+              <td>
+                <span x-show="s.cooldown_remaining_s>0" class="text-red-400" x-text="'cooldown '+Math.ceil(s.cooldown_remaining_s/60)+'m'"></span>
+                <span x-show="!s.cooldown_remaining_s" class="text-green-400">OK</span>
+                <span class="muted text-xs" x-show="s.flood_observations" x-text="'('+s.flood_observations+' total)'"></span>
+              </td>
+              <td x-text="fmtTs(s.updated_at)"></td>
+              <td><button class="btn btn-sm" @click="deleteTgSession(s.account)">Delete</button></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
     <div class="text-sm text-red-400 mt-2 font-mono" x-show="tgSessionError" x-text="tgSessionError" x-cloak></div>
     <div class="mt-3 space-y-3" x-show="tgCodeVisible">
       <div class="field"><label>Code (from Telegram app)</label><input x-model="tgCode" class="input" autocomplete="one-time-code">

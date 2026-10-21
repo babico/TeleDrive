@@ -129,7 +129,38 @@
 
 ---
 
-## 7. Advanced S3 parity track
+## 7. Phase 5 — Multi-account Telegram storage
+
+The transport layer already supports N accounts: per-account send slots,
+shared FloodWait cooldowns (SQL-published across workers),
+round_robin/failover/parallel strategies, cross-account retry on flood,
+chunks tagged with the storing account. This phase is the management and
+visibility layer on top — capacity, parallel speed and flood failover
+come from simply authorizing more accounts.
+
+- [x] Multi-session API: `GET /api/v1/admin/storage/telegram-sessions` —
+      every account with usage (objects, bytes from `storage_chunks`),
+      active cooldown remaining and lifetime flood observation count.
+- [x] Per-account session delete:
+      `DELETE /api/v1/admin/storage/telegram-sessions/{account}` with a
+      soft-guard: accounts that still store chunks require `?force=true`
+      (the catalog keeps the data, but new uploads stop using the
+      account; reads need the session re-authorized). The legacy
+      delete-all endpoint stays for compatibility.
+- [x] Storage page: authorized-accounts table (account, masked phone,
+      api_id, channel, strategy, objects, size, flood status, updated)
+      with per-account delete. Adding another account = logging in with
+      a different phone number in the session card.
+- [ ] Placement policies: bucket→account pinning (store a bucket's
+      objects on a chosen account) and per-account soft quotas.
+- [ ] Account health probes: periodic `is_authorized` check per session,
+      dead/expired session detection with a UI warning and re-login hint.
+- [ ] Strategy control from the UI (switch round_robin/failover/parallel
+      without editing the config file).
+
+---
+
+## 8. Advanced S3 parity track
 
 - [ ] Deliver [P2 Advanced S3](docs/S3_SPECS.md#5-p2-advanced-s3-implementation-plan)
       from the [116-operation compatibility matrix](docs/S3_SPECS.md):
@@ -141,7 +172,7 @@
 - [ ] Establish longer-duration real-environment capacity benchmarks on
       owner-controlled infrastructure.
 
-## 8. Owner gates — physical GC prerequisites (BLOCKED_OWNER_ACTION)
+## 9. Owner gates — physical GC prerequisites (BLOCKED_OWNER_ACTION)
 
 - [ ] Independent backup host (Phase 6 replication or rclone export job).
 - [ ] Authorized 1h soak on 2–8 HTTPS endpoints.
@@ -155,7 +186,7 @@
 - [ ] **Authorize physical GC** only after ALL gates pass; `deletion_permitted`
       stays False; no Telegram media has been deleted.
 
-## 9. Release decision rules
+## 10. Release decision rules
 
 - [ ] Any new release candidate requires all mandatory checks green on that
       exact SHA; previous green commits cannot be reused as proof.

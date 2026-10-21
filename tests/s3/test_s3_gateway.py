@@ -432,3 +432,34 @@ def test_private_acl_and_standard_class_hints_do_not_weaken_private_storage(serv
         assert b"NotImplemented" in refused.content
     assert service[2].uploads == before + 1
     assert signed(service, "GET", "/backup-bucket/refused").status_code == 404
+
+
+def test_s3_port_traffic_is_logged(service, monkeypatch):
+    """S3 requests must reach the audit log — even unsigned probes.
+
+    The S3 ASGI app had no logging middleware, so S3 client connection
+    attempts were invisible on the logs page.
+    """
+    client, issued, telegram, connection, key = service
+    captured = []
+    monkeypatch.setattr(
+        gateway, "_log",
+        lambda msg, source, user=None: captured.append((source, msg, user)))
+
+    # Unsigned probe (403) — still logged with method, path and client.
+    r = client.get("/some-bucket/some-key")
+    assert r.status_code in (400, 401, 403)
+    assert any(source == "http" and "GET /some-bucket/some-key from" in msg
+               for source, msg, _ in captured)
+    assert any("-> 40" in msg for _, msg, _ in captured)
+
+    # Signed request logs the access key id as the user.
+    captured.clear()
+    signed(service, "GET", "/")
+    assert any(source == "http" and user not in (None, "-", "")
+               for source, msg, user in captured)
+
+    # Health checks stay quiet.
+    captured.clear()
+    client.get("/__health")
+    assert not captured

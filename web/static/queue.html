@@ -45,6 +45,7 @@ tailwind.config = {
   .page{display:none}.page.active{display:block}
   .field{margin-bottom:12px}
   .field label{display:block;font-size:12px;color:#9ca3af;margin-bottom:4px}
+  input[type=checkbox]{accent-color:#6366f1;width:16px;height:16px;cursor:pointer}
   .muted{color:#6b7280;font-size:13px}
   .section{margin-top:16px}
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -65,16 +66,20 @@ tailwind.config = {
     <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-sm">T</div>
     <span class="font-semibold text-lg">TeleDrive</span>
   </div>
-  <nav class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
-        <a href="/dashboard" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Dashboard</a>
-    <a href="/queue" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-brand-600 text-white">Queue</a>
-    <a href="/history" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">History</a>
-    <a href="/storage" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Storage</a>
-    <a href="/settings" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Settings</a>
-    <a href="/api-management" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">API Management</a>
-    <a href="/s3" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">S3</a>
-    <a href="/logs" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Logs</a>
-    <a href="/users" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-gray-100 hover:bg-gray-800">Users</a>
+    <nav class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
+    <a href="/dashboard" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/dashboard')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Dashboard</a>
+    <a href="/queue" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/queue')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Queue</a>
+    <a href="/history" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/history')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">History</a>
+    <div class="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">Settings</div>
+    <a href="/settings/general" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/settings/general')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">General</a>
+    <a href="/settings/telegram" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/settings/telegram')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Telegram</a>
+    <div class="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">S3</div>
+    <a href="/s3/credentials" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/s3/credentials')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Credentials</a>
+    <a href="/s3/buckets" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/s3/buckets')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Buckets</a>
+    <div class="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">Access</div>
+    <a href="/api-management" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/api-management')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">API Management</a>
+    <a href="/users" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/users')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Users</a>
+    <a href="/logs" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/logs')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Logs</a>
   </nav>
   <div class="px-4 py-3 border-t border-gray-800 text-xs text-gray-500">TeleDrive</div>
 </aside>

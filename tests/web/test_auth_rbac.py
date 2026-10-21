@@ -301,13 +301,39 @@ def test_expired_session_cleaned_up(authenv):
 
 # ---------------------------------------------------------------- page routes
 
-@pytest.mark.parametrize("page", ["/", "/dashboard", "/storage", "/s3",
-                                  "/users", "/logs", "/settings", "/queue",
-                                  "/history", "/api-management"])
+@pytest.mark.parametrize("page", ["/", "/dashboard", "/users", "/logs",
+                                  "/queue", "/history", "/api-management",
+                                  "/settings/general", "/settings/telegram",
+                                  "/s3/credentials", "/s3/buckets"])
 def test_pages_redirect_to_login_when_unauthenticated(authenv, page):
     r = authenv["client"].get(page, follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"].endswith("/login")
+
+
+@pytest.mark.parametrize("legacy,new", [("/settings", "/settings/general"),
+                                        ("/storage", "/settings/telegram"),
+                                        ("/s3", "/s3/buckets")])
+def test_legacy_page_paths_redirect(authenv, legacy, new):
+    client = authenv["client"]
+    r = client.get(legacy, follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == new
+    # Unauthenticated visitors ultimately land on /login.
+    r = client.get(legacy, follow_redirects=True)
+    assert r.url.path.endswith("/login")
+
+
+def test_nested_pages_served_when_authenticated(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    for path, marker in [("/settings/general", "Source directory"),
+                         ("/settings/telegram", "Telegram session"),
+                         ("/s3/credentials", "S3-compatible gateway"),
+                         ("/s3/buckets", "Bucket browser")]:
+        r = client.get(path, headers=admin)
+        assert r.status_code == 200, (path, r.status_code)
+        assert marker in r.text, (path, marker)
 
 
 def test_login_page_served_unauthenticated(authenv):

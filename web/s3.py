@@ -59,7 +59,7 @@ from teledrive.storage.manifest import ManifestStore, objects
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 import web.app as _webapp
 from web.app import (db_connect, storage_transport, _secure_mkdir,
-                     _enforce_bucket_quota)
+                     _enforce_bucket_quota, _log)
 
 NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 app = FastAPI(title="TeleDrive S3 (initial compatibility subset)", docs_url=None,
@@ -2320,6 +2320,41 @@ async def _handle(request: Request):
     finally:
         if db is not None and not retain:
             db.close()
+
+
+@app.middleware("http")
+async def _s3_audit_log_middleware(request: Request, call_next):
+    """Mirror the web http audit log for S3-port traffic.
+
+    S3 client connection attempts — failed signatures, bucket probes,
+    even plain browser hits — were previously invisible on the logs
+    page because only the web app had an audit middleware. Registered
+    after the CORS middleware so it is the OUTERMOST layer and also
+    captures its short-circuit responses.
+    """
+    start = time.time()
+    path = request.url.path
+    method = request.method
+    skip = path == "/__health"
+    if not skip:
+        client = request.client.host if request.client else "-"
+        user = "-"
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("AWS4-HMAC-SHA256 Credential="):
+            # Access key id only; SigV4 never transmits the secret.
+            user = auth.split("Credential=", 1)[1].split("/", 1)[0]
+        _log(f"{method} {path} from {client}", "http", user=user)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        if not skip:
+            _log(f"{method} {path} -> EXCEPTION: {type(exc).__name__}", "http")
+        raise
+    elapsed = (time.time() - start) * 1000
+    if not skip:
+        _log(f"{method} {path} -> {response.status_code} ({elapsed:.0f}ms)",
+             "http")
+    return response
 
 
 @app.middleware("http")

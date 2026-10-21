@@ -129,15 +129,16 @@ function app(){
       if(path === '/' || path === '/dashboard' || path === '/queue'){
         await this.refreshDashboard();
         setInterval(()=>this.refreshDashboard(), 30000);
-      } else if(path === '/storage' || path === '/settings'){
+      } else if(path === '/settings/general'){
         await this.loadSettings();
-        if(path === '/storage'){
-          await this.refreshFlood();
-          setInterval(()=>this.refreshFlood(), 30000);
-          setInterval(()=>{ this.floodNow = Math.floor(Date.now()/1000); }, 1000);
-        }
-      } else if(path === '/s3'){
+      } else if(path === '/settings/telegram'){
+        await this.loadSettings();
+        await this.refreshFlood();
+        setInterval(()=>this.refreshFlood(), 30000);
+        setInterval(()=>{ this.floodNow = Math.floor(Date.now()/1000); }, 1000);
+      } else if(path === '/s3/buckets'){
         await this.refreshBuckets();
+      } else if(path === '/s3/credentials'){
         await this.refreshS3Keys();
       } else if(path === '/users'){
         await this.loadUsers();
@@ -149,6 +150,8 @@ function app(){
         await this.refreshHistory();
       }
     },
+
+    navActive(p){ return window.location.pathname === p; },
 
     toast(msg, bad=false){
       this.toastMsg = msg;

@@ -97,7 +97,7 @@ def test_delete_session(admin):
 def test_settings_page_contains_ui_elements():
     """Verify the settings HTML contains the new UI cards and elements."""
     from pathlib import Path
-    html = Path("web/static/storage.html").read_text(encoding="utf-8")
+    html = Path("web/static/telegram.html").read_text(encoding="utf-8")
     assert "Telegram session (USER MTProto)" in html
     assert "Channels" in html
     assert 'addChannel()' in html

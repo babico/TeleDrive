@@ -1333,6 +1333,46 @@ def _serve_static_page(page_name: str, request: Request):
     raise HTTPException(404, "Page not found")
 
 
+# --- Nested UI routes (user-facing information architecture) ---------------
+# /settings/{general,telegram} and /s3/{credentials,buckets}; the flat
+# legacy paths redirect so old bookmarks keep working.
+
+
+@app.get("/settings/general", include_in_schema=False)
+def settings_general_page(request: Request):
+    return _serve_static_page("settings", request)
+
+
+@app.get("/settings/telegram", include_in_schema=False)
+def settings_telegram_page(request: Request):
+    return _serve_static_page("telegram", request)
+
+
+@app.get("/s3/credentials", include_in_schema=False)
+def s3_credentials_page(request: Request):
+    return _serve_static_page("credentials", request)
+
+
+@app.get("/s3/buckets", include_in_schema=False)
+def s3_buckets_page(request: Request):
+    return _serve_static_page("buckets", request)
+
+
+@app.get("/settings", include_in_schema=False)
+def settings_legacy_redirect():
+    return RedirectResponse(url="/settings/general", status_code=302)
+
+
+@app.get("/storage", include_in_schema=False)
+def storage_legacy_redirect():
+    return RedirectResponse(url="/settings/telegram", status_code=302)
+
+
+@app.get("/s3", include_in_schema=False)
+def s3_legacy_redirect():
+    return RedirectResponse(url="/s3/buckets", status_code=302)
+
+
 @app.get("/", include_in_schema=False)
 def index(request: Request):
     return _serve_static_page("index", request)

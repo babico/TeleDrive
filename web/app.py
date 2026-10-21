@@ -1776,6 +1776,18 @@ class TelegramSessionRequestCode(BaseModel):
     strategy: str | None = None
 
 
+def _consume_pending_session_token(token: str) -> None:
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "DELETE FROM telegram_session_pending WHERE token = :token"
+        ), {"token": token})
+        conn.connection.commit()
+    finally:
+        conn.close()
+
+
 def _telegram_error_response(exc: Exception, action: str) -> HTTPException:
     """Log the exact Telegram failure reason and map known errors to hints.
 
@@ -1797,6 +1809,8 @@ def _telegram_error_response(exc: Exception, action: str) -> HTTPException:
          "The code is empty: enter the code Telegram sent"),
         (tg_errors.PhoneNumberUnoccupiedError,
          "No Telegram account exists for this phone number"),
+        (tg_errors.PasswordHashInvalidError,
+         "The 2FA password is incorrect: check it and retry"),
     )
     message = next((hint for cls, hint in hints if isinstance(exc, cls)), None)
     if message is None:
@@ -1958,9 +1972,10 @@ class TelegramSessionVerifyCode(BaseModel):
 def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                                 request: Request,
                                 _: None = Depends(require_auth)):
-    from telethon.errors import FloodWaitError
+    from telethon.errors import FloodWaitError, PhoneCodeExpiredError
     _same_origin(request)
     _log(f"verify-code: token={payload.token[:8]}...", "telegram-session")
+
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
@@ -1974,16 +1989,10 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
         raise HTTPException(404, "No pending code request (expired, invalid "
                                  "token, or already used). Request a new code.")
     api_id, api_hash, phone, phone_code_hash, channel, strategy, created_at = row
+    _log(f"verify-code: token={payload.token[:8]}... request_age="
+         f"{int(time.time()) - int(created_at)}s", "telegram-session")
     if int(time.time()) - int(created_at) > 300:
-        c2 = db_connect()
-        try:
-            from sqlalchemy import text as _text
-            c2.connection.execute(_text(
-                "DELETE FROM telegram_session_pending WHERE token = :token"
-            ), {"token": payload.token})
-            c2.connection.commit()
-        finally:
-            c2.close()
+        _consume_pending_session_token(payload.token)
         raise HTTPException(410, "Code request expired; request a new one")
     if not payload.code:
         raise HTTPException(400, "code is required")
@@ -1996,19 +2005,13 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             client = TelegramClient(StringSession(), api_id, api_hash,
                                     receive_updates=False, flood_sleep_threshold=0)
             await client.connect()
-            from telethon.errors import SessionPasswordNeededError
-            try:
-                await client.sign_in(phone, code=payload.code,
-                                     phone_code_hash=phone_code_hash,
-                                     password=payload.password or None)
-            except SessionPasswordNeededError:
-                # 2FA is required but no/incorrect password was supplied;
-                # do NOT blindly retry without it (masks real errors).
-                raise
-            except Exception:
-                # Fall back to code-only sign-in when no password is needed.
-                await client.sign_in(phone, code=payload.code,
-                                     phone_code_hash=phone_code_hash)
+            # One sign-in attempt only: Telegram allows very few code
+            # attempts (~3) per phone_code_hash, and a wrong 2FA password
+            # must surface as PasswordHashInvalidError, not be retried
+            # without a password (which would mask it as "2FA needed").
+            await client.sign_in(phone, code=payload.code,
+                                 phone_code_hash=phone_code_hash,
+                                 password=payload.password or None)
             if not await client.is_user_authorized():
                 raise RuntimeError("Sign-in did not authorize the user")
             me = await client.get_me()
@@ -2028,21 +2031,23 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                        "rate-limited by Telegram.",
             **info,
         }) from exc
+    except PhoneCodeExpiredError as exc:
+        # The hash is burned for good: retrying with this token can never
+        # succeed, so consume it and force a fresh code request.
+        _consume_pending_session_token(payload.token)
+        _log("verify-code FAILED: PhoneCodeExpiredError: the code has "
+             "expired", "telegram-session")
+        raise HTTPException(410, "The code has expired. Request a new code "
+                                 "and use the code from the NEWEST Telegram "
+                                 "message (each request invalidates all "
+                                 "previous codes).") from exc
     except Exception as exc:
         # A wrong code must NOT consume the pending request: the user can
         # retry with the correct code. The token ages out after 5 minutes
         # and is consumed only on success (below).
         raise _telegram_error_response(exc, "verify-code") from exc
     # Success: consume the pending token.
-    c3 = db_connect()
-    try:
-        from sqlalchemy import text as _text
-        c3.connection.execute(_text(
-            "DELETE FROM telegram_session_pending WHERE token = :token"
-        ), {"token": payload.token})
-        c3.connection.commit()
-    finally:
-        c3.close()
+    _consume_pending_session_token(payload.token)
 
     # Resolve the channel (optional).
     account = getattr(me, "username", None) or f"user-{me.id}"

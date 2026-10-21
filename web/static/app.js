@@ -1,3 +1,8 @@
+// UI-side noise filter: the logs page's own polling and status requests
+// would otherwise flood its live view. Everything stays in the log
+// file/buffer; these entries are only hidden from the table.
+const LOG_NOISE_RE = /^GET \/api\/v1\/logs( |$)|^GET \/api\/v1\/admin\/storage\/telegram-session\/floodwait( |$)/;
+
 function app(){
   return {
     // State
@@ -77,6 +82,8 @@ function app(){
     _logTimer: null,
     logFilter: '',
     logLimit: 1000,
+    logHideNoise: true,
+    logHiddenCount: 0,
 
     // Buckets
     buckets: [],
@@ -417,6 +424,9 @@ function app(){
         const filter = (this.logFilter||'').trim().toLowerCase();
         const x = await this.api('/api/v1/logs?limit='+limit);
         let entries = x.entries||[];
+        this.logHiddenCount = this.logHideNoise
+          ? entries.filter(e => e.source==='http' && LOG_NOISE_RE.test(e.message)).length : 0;
+        if(this.logHideNoise) entries = entries.filter(e => !(e.source==='http' && LOG_NOISE_RE.test(e.message)));
         if(filter) entries = entries.filter(e => (e.ts+' '+e.user+' '+e.source+' '+e.message).toLowerCase().includes(filter));
         this.logEntries = entries;
       } catch(e){ this.toast(e.message,true); }

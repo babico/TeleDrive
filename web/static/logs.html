@@ -98,6 +98,10 @@ tailwind.config = {
       <div class="field" style="flex:2"><label>Filter (text)</label><input x-model="logFilter" class="input" placeholder="filter by text, source, user..." @input.debounce.300ms="loadLogs()"></div>
       <div class="field" style="flex:1"><label>Lines</label><select x-model="logLimit" class="input" @change="loadLogs()"><option value="100">100</option><option value="500">500</option><option value="1000">1000</option><option value="1500">1500</option></select></div>
       <button class="btn btn-sm" @click="loadLogs()">Refresh</button>
+      <label class="flex items-center gap-1 text-sm muted cursor-pointer" title="Hide this page's own polling requests (still recorded in the log)">
+        <input type="checkbox" x-model="logHideNoise" @change="loadLogs()"> Hide polling noise
+      </label>
+      <span class="text-xs muted" x-show="logHideNoise && logHiddenCount" x-text="logHiddenCount + ' hidden'"></span>
       <button class="btn btn-sm" :class="logLive?'btn-primary':''" @click="toggleLogLive()" x-text="logLive?'Live ON':'Live OFF'"></button>
     </div>
     <div class="scroll mt-3">

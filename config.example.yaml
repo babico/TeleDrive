@@ -1,9 +1,11 @@
 # TeleDrive configuration example (copy to config/config.yaml and edit).
 #
 # The unified WebUI/REST/S3/local-job service reads this file as its ONLY
-# settings source. Except TZ, PUID/PGID and TELEDRIVE_CONFIG, nothing is
-# configured through environment variables. Secrets belong ONLY in this
-# file and the session files; never commit real values.
+# settings source. Only TZ, PUID/PGID and TELEDRIVE_CONFIG come from the
+# environment (plus a few internal paths the Docker image sets itself, such
+# as TELEDRIVE_AUTH_DIR). A TELEDRIVE_S3_MASTER_KEY environment variable
+# also exists for specialized deployments, but secrets belong in this file
+# and the session files; never commit real values.
 
 # ---------------------------------------------------------------------------
 # Web service: authentication, listeners and request limits.
@@ -22,6 +24,12 @@ web:
   # Optional HTTPS: generate certs with scripts/ops/generate_ssl.py and set:
   # ssl_certfile: "/config/tls/server.crt"
   # ssl_keyfile: "/config/tls/server.key"
+  # Read the admin password from a file instead of the plaintext field above:
+  # password_file: "/config/web-password"
+  # Maximum accepted HTTP request body size (32 MiB default):
+  # max_request_bytes: 33554432
+  # Directory for login session tokens (the Docker image sets this path):
+  # auth_dir: "/data/auth"
 
 # ---------------------------------------------------------------------------
 # Unified storage: Telethon USER MTProto (the only live transport).
@@ -83,8 +91,11 @@ state:
 
   allowed_sqlite_roots: "/data"
 
-# ---
-# Internal path allowlists for the legacy uploader validation.
+# ---------------------------------------------------------------------------
+# Approved filesystem paths. source_roots is the approved upload-roots list
+# for folder ingestion: only files under these paths can be queued as durable
+# local-file upload jobs. The remaining keys constrain sessions, logs and the
+# temporary split/lock directories.
 # ---------------------------------------------------------------------------
 paths:
   source_roots: "/uploads"

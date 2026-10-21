@@ -44,6 +44,10 @@
 | Clients and operational proof | Boto3, AWS CLI and rclone scenarios exist, with **synthetic Telegram transport** for most storage integration tests; dedicated live Telegram E2E tests validate other actual payload paths. **Cyberduck, other SDKs and every SDK checksum mode remain unverified.** | [client tests](../tests/s3/test_s3_cli_compat.py), [CI guide](CI_WORKFLOWS.md) |
 | Physical delete and lifecycle | Object deletion removes catalog visibility or version references; it **does not authorize deleting Telegram messages**. Only SQL-only AbortIncompleteMultipartUpload lifecycle rules are implemented; an hourly task marks old unfinished upload sessions aborted while retaining Telegram chunks. Object expiration/transitions and physical GC are not enabled. | [Lifecycle](../teledrive/s3/lifecycle.py), [lifecycle tests](../tests/s3/test_s3_lifecycle.py), [GC safeguards](IMPLEMENTATION_STATUS.md#41-physical-telegram-garbage-collection-disabled) |
 
+### Quotas
+
+Each bucket can carry an optional per-bucket quota: a maximum total size in bytes and/or a maximum object count. Quotas are enforced server-side on upload through both the S3 gateway and the REST API, and are configurable via the admin API (`GET`/`PUT /api/v1/admin/storage/buckets/{bucket}/quota` with `max_size_bytes` and `max_objects`; `null` disables a limit) or the Web UI **S3** page. Uploads that would exceed either limit are rejected.
+
 ## 3. Implemented and partially implemented AWS S3 actions
 
 The following operations have a routed implementation. Every qualification in the right column is part of the contract.

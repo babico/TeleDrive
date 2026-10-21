@@ -37,7 +37,7 @@ cp config.example.yaml config/config.yaml   # optional tidy template
 chmod 600 .env config/config.yaml
 ~~~
 
-Set a unique `web.password` of at least 16 characters in `config/config.yaml` (the file keeps **all** service settings; `.env` only holds `PUID`/`PGID`/`TZ`/port mappings). Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session with the instructions in [Section 4](#4-s3-compatible-api) **before** starting Docker. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
+Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. The YAML file keeps **all** service settings; `.env` only holds `PUID`/`PGID`/`TZ`/port mappings. Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session with the instructions in [Section 4](#4-s3-compatible-api) **before** starting Docker. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
 
 ~~~bash
 docker compose up -d --build
@@ -52,7 +52,7 @@ docker compose logs -f teledrive
 
 **One service, one container, one Python process.** Both listeners use the **same SQL catalog and Telegram object engine**. You do not need `docker compose --profile s3` and there is no second S3 container.
 
-The service binds `0.0.0.0` inside the container; the Compose host mapping stays loopback by default. For remote access, use an SSH tunnel, private VPN, or an HTTPS reverse proxy (see `scripts/ops/generate_ssl.py` for TLS); never expose Basic credentials or S3 secrets over untrusted plaintext HTTP.
+The service binds `0.0.0.0` inside the container; the Compose host mapping stays loopback by default. For remote access, use an SSH tunnel, private VPN, or an HTTPS reverse proxy (see `scripts/ops/generate_ssl.py` for TLS); never expose login credentials, session tokens or S3 secrets over untrusted plaintext HTTP.
 
 | Host folder | Container path | Purpose |
 | --- | --- | --- |
@@ -63,6 +63,22 @@ The service binds `0.0.0.0` inside the container; the Compose host mapping stays
 To use a different source directory, change the host side of the `/uploads` mount, retaining the container-side path and read-only mode. The image has no GUI/X11/PySide6 dependency.
 
 **Configure S3 before writing:** the gateway listener starts automatically, but writing S3 objects requires configured authenticated USER MTProto credentials, a persistent encryption key and scoped S3 credentials. See [Section 4](#4-s3-compatible-api).
+
+### Web UI
+
+The Web UI is multi-page. After logging in at `/login` you can switch between:
+
+| Page | Purpose |
+| --- | --- |
+| `/dashboard` | Overview of storage, jobs and service health |
+| `/queue` | Durable local-file upload job queue with retry controls |
+| `/history` | Completed job and transfer history |
+| `/storage` | Buckets, channels, active channel settings and Telegram session state |
+| `/s3` | S3 bucket browser with per-bucket quotas, plus S3 gateway credentials |
+| `/api-management` | REST and S3 credential issuance, rotation and revocation |
+| `/logs` | Service logs with a live tail mode |
+| `/users` | User management: create users, change roles and passwords |
+| `/settings` | Service configuration editor |
 
 ## 2. Storage architecture
 
@@ -90,7 +106,7 @@ The original uploader accepts Telegram user accounts through MTProto/Telethon; a
 
 **Unified storage never uses Saved Messages or Bot API**: select a private broadcast channel that the authorized user can post to. The old standalone uploader still has historical `me` settings; they are not enabled in REST/S3. Respect Telegram rate limits, and never reuse a writable session among independent uploader processes.
 
-The **REST/S3/local-job engine requires USER MTProto**. `TELEDRIVE_STORAGE_TRANSPORT=telethon` is the default and the only accepted value; anything else fails closed. No Bot credentials exist in the runtime. The same SQL catalog and bounded chunk engine are retained. Existing `api-bot` objects are readable using the authorized USER session only when the original **same channel** is accessible and the immutable SQL manifest retains real message IDs; full checksums are still verified. Old objects in inaccessible channels require a separately verified migration and backup. No existing media is automatically deleted.
+The **REST/S3/local-job engine requires USER MTProto**: it fails closed without an authorized user session. No Bot credentials exist in the runtime. The same SQL catalog and bounded chunk engine are retained. Existing `api-bot` objects are readable using the authorized USER session only when the original **same channel** is accessible and the immutable SQL manifest retains real message IDs; full checksums are still verified. Old objects in inaccessible channels require a separately verified migration and backup. No existing media is automatically deleted.
 
 ## 3. REST API
 
@@ -102,11 +118,23 @@ The Web listener publishes an authenticated interface at:
 | `http://127.0.0.1:8080/redoc` | ReDoc |
 | `http://127.0.0.1:8080/openapi.json` | Machine-readable OpenAPI schema |
 
+### Authentication
+
+Authentication is token-based. Log in at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) (or `POST /api/auth/login`) with a username and password; the response returns a Bearer session token and sets an httpOnly `teledrive_session` cookie valid for seven days.
+
 ~~~bash
-curl -u "admin:YOUR_PASSWORD" http://127.0.0.1:8080/openapi.json
+# Log in (default admin/admin on first start — change it immediately):
+curl -fsS -X POST http://127.0.0.1:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"YOUR_PASSWORD"}'
+# => {"token":"td_sess_...","user":{...},"expires_at":...}
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/openapi.json
 ~~~
 
-Use HTTP Basic authentication for administrative API key issuance/rotation/revocation and include `X-TeleDrive-CSRF: 1` on administrative mutations. REST object calls use separately issued, scoped Bearer API keys; those are **not** S3 Access Key IDs.
+Roles are enforced server-side on `/api/v1/admin/*` endpoints: **admin** has full access, **operator** may run storage/job operations and read logs, and **viewer** is read-only. Use an authenticated session for administrative API key issuance/rotation/revocation and include `X-TeleDrive-CSRF: 1` on administrative mutations. REST object calls use separately issued, scoped Bearer API keys; those are **not** S3 Access Key IDs.
+
+HTTP Basic authentication (`web.user`/`web.password` in `config/config.yaml`) is retained **only** as a backward-compatibility fallback for scripts and API clients; it always authenticates as the admin user and is not the primary authentication path.
 
 Key operations include bucket management, object listing, logical unlink, full object upload/download, metadata-only HEAD and checksum-verified Range GET. Administrative keys are shown once; only digests are persisted.
 
@@ -205,6 +233,10 @@ assert client.get_object(Bucket="backup-bucket", Key="hello.txt")["Body"].read()
 
 S3 client integrations tested in CI use **real** AWS CLI and rclone executables against the actual gateway and SQL with **synthetic Telegram transport**; real Telegram byte transfer is tested in separate live E2E workflows. For rclone use `type=s3`, `provider=Other`, `force_path_style=true` and your issued S3 key pair. Create buckets first if `no_check_bucket=true`.
 
+### Bucket quotas
+
+Each bucket can carry an optional quota — a maximum total size in bytes and/or a maximum object count — enforced server-side on uploads through both the REST API and the S3 gateway. Quotas are managed with the admin API (`GET`/`PUT /api/v1/admin/storage/buckets/{bucket}/quota`, body fields `max_size_bytes` and `max_objects`; `null` disables a limit) or edited directly on the **S3** page of the Web UI.
+
 ### Non-destructive storage and multipart maintenance
 
 Before considering stale multipart recovery or garbage collection, inspect the admin-only endpoints and **dry-run** responses. The admin API provides `/api/v1/admin/s3-multipart/stale`, `/api/v1/admin/s3-multipart/{upload_id}/recover` (with `"execute": false` for preview), and `/api/v1/admin/storage/gc-candidates`. A stale completion may be explicitly returned to `active` under expiry/fencing conditions; it is not equivalent to deleting Telegram messages.
@@ -217,7 +249,7 @@ The Docker mount `./uploads:/uploads:ro` gives the service read-only access to a
 
 ~~~bash
 # Ensure the bucket exists. Then enqueue an existing local file:
-curl -fsS -u "admin:$WEB_PASSWORD" \
+curl -fsS -H "Authorization: Bearer $TOKEN" \
   -H "X-TeleDrive-CSRF: 1" \
   -H "Content-Type: application/json" \
   -d '{"bucket":"backups","key":"local/example.bin","source_path":"/uploads/example.bin"}' \
@@ -232,7 +264,7 @@ Jobs are persisted in SQL and protect against source mutation, unexpected genera
 
 TeleDrive is a single WebUI + REST + S3 service; there is no separate headless uploader CLI. All operation is through the WebUI, REST API, or S3-compatible API.
 
-WebUI automation is configured through **Settings → Automation**. Do not launch multiple client processes against the same writable Telethon session file. Ingestion of an existing folder is done through the admin `import-legacy` endpoint, which queues files as durable jobs in the shared SQL catalog using the configured Telethon transport; it never starts a separate direct-send path.
+Background automation is configured through `jobs.auto_run` in `config/config.yaml`, not the Web UI settings page. Do not launch multiple client processes against the same writable Telethon session file. Ingestion of an existing folder is done through the admin `import-legacy` endpoint, which queues files as durable jobs in the shared SQL catalog using the configured Telethon transport; it never starts a separate direct-send path.
 
 ### Telegram account setup
 
@@ -259,7 +291,7 @@ postgresql+psycopg://user:password@db:5432/teledrive
 mysql+pymysql://user:password@db:3306/teledrive
 ~~~
 
-For additional reviewed packages, set `TELEDRIVE_DB_EXTRA_PACKAGES` in `.env` and rebuild the Docker image. Some database drivers require OS libraries in a derived Docker image. Enable DB TLS remotely and use least-privilege credentials. Back up the DB together with Telegram access and the S3 master key; see [Backup and Restore](docs/BACKUP_RESTORE.md).
+For additional reviewed packages, set `TELEDRIVE_DB_EXTRA_PACKAGES` in `.env` (see [`.env.example`](.env.example); it is passed to the Docker image as a compose build arg) and rebuild the Docker image. Some database drivers require OS libraries in a derived Docker image. Enable DB TLS remotely and use least-privilege credentials. Back up the DB together with Telegram access and the S3 master key; see [Backup and Restore](docs/BACKUP_RESTORE.md).
 
 ## 8. Security and operational limits
 
@@ -284,9 +316,9 @@ Repository layout:
 | `.github/ci/` | Workflow-specific supporting Docker assets |
 
 ~~~bash
-python -m pip install -r requirements.txt pytest
+python -m pip install -r requirements.txt pytest httpx boto3
 python -m pytest -q
-python -m compileall -q teledrive web app tests
+python -m compileall -q teledrive web tests
 docker compose config --quiet
 # Isolated fault-injection acceptance:
 bash scripts/dev/run_docker_fault_injection.sh

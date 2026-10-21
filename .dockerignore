@@ -9,10 +9,7 @@ dist
 build
 
 # Keep the runtime image context minimal
-app/
 scripts/
-installer/
 tests/
-examples/
 .github/
 *.md

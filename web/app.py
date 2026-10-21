@@ -328,6 +328,7 @@ def _get_current_user(request: Request) -> dict | None:
             ), {"token": token})
             conn.connection.commit()
             return None
+        _log(f"_get_current_user: returning user {row[1]}", "auth")
         return {"id": row[0], "username": row[1], "role": row[2]}
     except Exception as exc:
         _log(f"_get_current_user error: {type(exc).__name__}: {exc}", "auth")

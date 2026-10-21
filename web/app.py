@@ -984,23 +984,7 @@ def index(_: None = Depends(require_auth)):
 
 @app.get("/{page_name}.html", include_in_schema=False)
 def page_html(page_name: str, request: Request):
-    if WEB_PASSWORD:
-        from fastapi.security import HTTPBasicCredentials
-        creds = None
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.lower().startswith("basic "):
-            import base64 as _b64
-            try:
-                decoded = _b64.b64decode(auth_header[6:]).decode("utf-8", "replace")
-                u, p_ = decoded.split(":", 1)
-                creds = HTTPBasicCredentials(username=u, password=p_)
-            except Exception:
-                pass
-        if creds is None or not (
-            hmac.compare_digest(creds.username, WEB_USER)
-            and hmac.compare_digest(creds.password, WEB_PASSWORD)
-        ):
-            raise HTTPException(401, "Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    require_auth(request)
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)
@@ -1014,28 +998,10 @@ def login_page():
 
 @app.get("/{page_name}", include_in_schema=False)
 def page_route(page_name: str, request: Request):
-    import sys as _sys
-    print('DEBUG page_route cookies=', dict(request.cookies), 'auth=', request.headers.get('authorization'), file=_sys.stderr, flush=True)
     if page_name in {"api", "static", "openapi.json", "docs", "redoc",
                      "__health", "favicon.ico"}:
         raise HTTPException(404, "Not found")
-    if WEB_PASSWORD:
-        from fastapi.security import HTTPBasicCredentials
-        creds = None
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.lower().startswith("basic "):
-            import base64 as _b64
-            try:
-                decoded = _b64.b64decode(auth_header[6:]).decode("utf-8", "replace")
-                u, p_ = decoded.split(":", 1)
-                creds = HTTPBasicCredentials(username=u, password=p_)
-            except Exception:
-                pass
-        if creds is None or not (
-            hmac.compare_digest(creds.username, WEB_USER)
-            and hmac.compare_digest(creds.password, WEB_PASSWORD)
-        ):
-            raise HTTPException(401, "Unauthorized", headers={"WWW-Authenticate": "Basic"})
+    require_auth(request)
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)

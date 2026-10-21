@@ -80,11 +80,10 @@ function app(){
       const path = window.location.pathname.replace(/\/+$/, '') || '/';
       if(path === '/login') return;
       try {
-        const me = await this.api('/api/auth/me');
+        const me = await this.api('/api/v1/auth/me');
         this.currentUser = me.user.username;
         this.currentRole = me.user.role;
       } catch(e){
-        localStorage.removeItem('teledrive_token');
         window.location.href = '/login';
         return;
       }
@@ -114,9 +113,9 @@ function app(){
     },
 
     async api(url, opt={}){
-      const token = localStorage.getItem('teledrive_token');
+      // Session auth flows through the httpOnly teledrive_session cookie
+      // (credentials:'include'); no token is kept in localStorage.
       const headers = {'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})};
-      if(token) headers['Authorization'] = 'Bearer '+token;
       const r = await fetch(url, {credentials:'include', headers, ...opt});
       if(!r.ok) throw new Error(await r.text() || r.statusText);
       return r.json();
@@ -162,19 +161,17 @@ function app(){
 
     async login(){
       try {
-        const r = await this.api('/api/auth/login',{method:'POST',body:JSON.stringify({username:this.loginUsername,password:this.loginPassword})});
-        localStorage.setItem('teledrive_token', r.token);
+        await this.api('/api/v1/auth/login',{method:'POST',body:JSON.stringify({username:this.loginUsername,password:this.loginPassword})});
         window.location.replace('/');
       } catch(e){ this.loginError = e.message; }
     },
     async logout(){
-      try { await this.api('/api/auth/logout',{method:'POST'}); } catch(e){}
-      localStorage.removeItem('teledrive_token');
+      try { await this.api('/api/v1/auth/logout',{method:'POST'}); } catch(e){}
       window.location.replace('/login');
     },
     async loadSettings(){
       try {
-        const config = await this.api('/api/config');
+        const config = await this.api('/api/v1/config');
         const tg = config.telegram||{}, up = config.upload||{}, st = config.state||{}, app = config.app||{};
         const storage = config.storage||{}, jobs = config.jobs||{};
         this.config = config;
@@ -217,7 +214,7 @@ function app(){
         c.storage.scratch_dir = c.storage.scratch_dir||'/data/tmp';
         c.upload.allowed_extensions = this.extensionsStr.split(',').map(x=>x.trim()).filter(Boolean);
         delete c.state.db_path;
-        await this.api('/api/config',{method:'PUT',body:JSON.stringify(c)});
+        await this.api('/api/v1/config',{method:'PUT',body:JSON.stringify(c)});
         this.toast('Settings saved');
       } catch(e){ this.toast(e.message,true); }
     },
@@ -353,7 +350,7 @@ function app(){
       try {
         const limit = this.logLimit || 1000;
         const filter = (this.logFilter||'').trim().toLowerCase();
-        const x = await this.api('/api/logs?limit='+limit);
+        const x = await this.api('/api/v1/logs?limit='+limit);
         let entries = x.entries||[];
         if(filter) entries = entries.filter(e => (e.ts+' '+e.user+' '+e.source+' '+e.message).toLowerCase().includes(filter));
         this.logEntries = entries;

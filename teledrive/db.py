@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -193,12 +194,26 @@ class Database:
     url: str
     engine: Engine
     connection: Connection
+    owns_engine: bool = True
 
     def close(self) -> None:
         try:
-            self.connection.close()
+            if not self.owns_engine \
+                    and self.engine.url.get_backend_name() == "sqlite":
+                # Shared (cached) engines keep pooled connections alive, so
+                # the WAL journal is NOT checkpointed by disposal. Flush it
+                # now so the database file is self-contained for readers
+                # that open it directly (e.g. DR rebuild publication).
+                try:
+                    self.connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
         finally:
-            self.engine.dispose()
+            try:
+                self.connection.close()
+            finally:
+                if self.owns_engine:
+                    self.engine.dispose()
 
     def commit(self) -> None:
         self.connection.commit()
@@ -397,8 +412,8 @@ class Database:
         self.connection.execute(delete(files))
 
 
-def connect_database(url_or_path: str, *, config_dir: Path | None = None) -> Database:
-    url = normalize_database_url(url_or_path, config_dir=config_dir)
+def _build_engine(url: str) -> Engine:
+    """Create a new engine and run idempotent schema setup/migrations."""
     connect_args: dict[str, Any] = {}
 
     if url.startswith("sqlite:"):
@@ -432,9 +447,49 @@ def connect_database(url_or_path: str, *, config_dir: Path | None = None) -> Dat
             for column in missing:
                 rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
                 conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
+    return engine
+
+
+# Bounded LRU cache of shared engines. Production uses exactly one database
+# URL; the bound keeps long test runs from accumulating file handles.
+# sqlite:///:memory: is never cached: every connection there is a separate
+# throwaway database by design.
+_ENGINE_CACHE_MAX = 8
+_engine_cache: "OrderedDict[str, Engine]" = OrderedDict()
+
+
+def _shared_engine(url: str) -> Engine:
+    """Return a cached engine for this URL, building it on first use.
+
+    Sharing the engine (instead of rebuilding it per request) skips the
+    per-request YAML config parse, `create_all` and dialect migrations.
+    Connections are still per-call; `pool_pre_ping` recovers stale ones.
+    """
+    engine = _engine_cache.get(url)
+    if engine is not None:
+        _engine_cache.move_to_end(url)
+        return engine
+    engine = _build_engine(url)
+    _engine_cache[url] = engine
+    while len(_engine_cache) > _ENGINE_CACHE_MAX:
+        _engine_cache.popitem(last=False)
+    return engine
+
+
+def connect_database(url_or_path: str, *, config_dir: Path | None = None) -> Database:
+    url = normalize_database_url(url_or_path, config_dir=config_dir)
+
+    if url == "sqlite:///:memory:":
+        # Uncached: each call is an isolated in-memory database.
+        engine = _build_engine(url)
+        owns_engine = True
+    else:
+        engine = _shared_engine(url)
+        owns_engine = False
 
     connection = engine.connect()
     if engine.url.get_backend_name() == "sqlite":
         connection.exec_driver_sql("PRAGMA busy_timeout=30000")
         connection.exec_driver_sql("PRAGMA journal_mode=WAL")
-    return Database(url=url, engine=engine, connection=connection)
+    return Database(url=url, engine=engine, connection=connection,
+                    owns_engine=owns_engine)

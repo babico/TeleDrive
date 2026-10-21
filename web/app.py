@@ -413,11 +413,16 @@ def _required_roles(method: str, path: str) -> frozenset[str] | None:
     - operator: additionally all storage operations (jobs, channels, versions, recovery)
     - admin: additionally user management, API keys, S3 credentials, config and quotas
     """
+    # Canonicalize legacy aliases (/api/auth/*, /api/config, /api/logs)
+    # onto the /api/v1/* namespace before policy matching.
+    if path.startswith("/api/") and not path.startswith("/api/v1/") \
+            and not path.startswith("/api/health"):
+        path = "/api/v1/" + path[len("/api/"):]
     if path.startswith("/api/v1/admin/users"):
         return _ROLE_ADMIN
     if method == "GET":
         return None
-    if path == "/api/config":
+    if path == "/api/v1/config":
         return _ROLE_ADMIN
     if path.startswith("/api/v1/admin/keys"):
         return _ROLE_ADMIN
@@ -600,8 +605,20 @@ def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict
 
 
 def effective_config():
-    ensure_config()
-    return uploader.load_config(str(CONFIG_PATH))
+    # Cache the parsed config by file mtime: every request used to re-read
+    # and re-parse the YAML (plus path validation) through db_connect().
+    try:
+        mtime = CONFIG_PATH.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if _CONFIG_CACHE["config"] is None or _CONFIG_CACHE["mtime"] != mtime:
+        ensure_config()
+        _CONFIG_CACHE["config"] = uploader.load_config(str(CONFIG_PATH))
+        _CONFIG_CACHE["mtime"] = mtime
+    return _CONFIG_CACHE["config"]
+
+
+_CONFIG_CACHE: dict = {"mtime": None, "config": None}
 
 
 def validate_and_write_config(raw: dict[str, Any]) -> None:
@@ -1044,7 +1061,8 @@ def redoc_docs(_: None = Depends(require_auth)):
     return get_redoc_html(openapi_url="/openapi.json", title="TeleDrive API · ReDoc")
 
 
-@app.post("/api/auth/login", tags=["Authentication"], summary="Login with username and password")
+@app.post("/api/v1/auth/login", tags=["Authentication"], summary="Login with username and password")
+@app.post("/api/auth/login", tags=["Authentication"], include_in_schema=False)
 def login(payload: dict, request: Request):
     _same_origin(request)
     username = str(payload.get("username", "")).strip()
@@ -1113,7 +1131,8 @@ def login(payload: dict, request: Request):
     return resp
 
 
-@app.post("/api/auth/logout", tags=["Authentication"], summary="Logout and revoke session")
+@app.post("/api/v1/auth/logout", tags=["Authentication"], summary="Logout and revoke session")
+@app.post("/api/auth/logout", tags=["Authentication"], include_in_schema=False)
 def logout(request: Request):
     _same_origin(request)
     user = _get_current_user(request)
@@ -1139,7 +1158,8 @@ def logout(request: Request):
     return resp
 
 
-@app.get("/api/auth/me", tags=["Authentication"], summary="Get current user")
+@app.get("/api/v1/auth/me", tags=["Authentication"], summary="Get current user")
+@app.get("/api/auth/me", tags=["Authentication"], include_in_schema=False)
 def me(request: Request):
     user = _get_current_user(request)
     if user is None:
@@ -1184,12 +1204,14 @@ def page_route(page_name: str, request: Request):
     return _serve_static_page(page_name, request)
 
 
-@app.get("/api/config", tags=["Configuration"], summary="Read configuration (secrets redacted)")
+@app.get("/api/v1/config", tags=["Configuration"], summary="Read configuration (secrets redacted)")
+@app.get("/api/config", tags=["Configuration"], include_in_schema=False)
 def get_config(_: None = Depends(require_auth)):
     return _redacted_config(read_raw_config())
 
 
-@app.put("/api/config", tags=["Configuration"], response_model=OKResponse, summary="Validate and save configuration")
+@app.put("/api/v1/config", tags=["Configuration"], response_model=OKResponse, summary="Validate and save configuration")
+@app.put("/api/config", tags=["Configuration"], include_in_schema=False)
 def put_config(request: Request, payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
     _same_origin(request)
     _log("settings save requested", "config")
@@ -2001,7 +2023,8 @@ def get_active_channel(_: None = Depends(require_auth)):
     finally:
         conn.close()
 
-@app.get("/api/logs", tags=["System"], summary="Read recent redacted activity logs")
+@app.get("/api/v1/logs", tags=["System"], summary="Read recent redacted activity logs")
+@app.get("/api/logs", tags=["System"], include_in_schema=False)
 def logs(limit: int = Query(default=1000, ge=1, le=1500),
          _: None = Depends(require_auth)):
     combined = list(LOG_BUFFER)[-limit:]
@@ -2015,7 +2038,7 @@ def logs(limit: int = Query(default=1000, ge=1, le=1500),
                            "source": m.group(3), "message": m.group(4)})
         else:
             entries.append({"ts": "", "user": "", "source": "", "message": line})
-    return {"lines": combined, "entries": entries}
+    return {"entries": entries}
 
 
 

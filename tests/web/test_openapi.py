@@ -23,8 +23,10 @@ def test_api_schema_exposes_typed_requests_and_security():
     schema = webapp.app.openapi()
     assert schema["info"]["title"] == "TeleDrive API"
     paths = schema["paths"]
-    for endpoint in ["/api/config", "/api/health"]:
+    # Canonical API namespace; legacy /api/config is an undocumented alias.
+    for endpoint in ["/api/v1/config", "/api/v1/auth/login", "/api/health"]:
         assert endpoint in paths
+    assert "/api/config" not in paths
     assert "/docs" not in paths
     assert "HTTPBearer" in schema["components"]["securitySchemes"]
 

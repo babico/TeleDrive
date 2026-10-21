@@ -203,6 +203,25 @@ def test_logout_revokes_bearer_session(authenv):
     assert client.get("/api/auth/me", headers=auth).status_code == 401
 
 
+def test_canonical_v1_paths_work_alongside_legacy_aliases(authenv):
+    client = authenv["client"]
+    # Canonical /api/v1/auth/login
+    r = client.post("/api/v1/auth/login", headers=CSRF,
+                    json={"username": "admin", "password": "admin-password-1"})
+    assert r.status_code == 200
+    # Canonical /api/v1/auth/me and /api/v1/logs
+    assert client.get("/api/v1/auth/me").status_code == 200
+    r = client.get("/api/v1/logs?limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    # The legacy duplicated `lines` payload is gone; entries only.
+    assert "lines" not in body
+    assert isinstance(body["entries"], list) and body["entries"]
+    # Legacy aliases still resolve.
+    assert client.get("/api/auth/me").status_code == 200
+    assert client.get("/api/logs?limit=5").status_code == 200
+
+
 def test_logout_revokes_cookie_session(authenv):
     client = authenv["client"]
     assert _login(client, "admin", "admin-password-1").status_code == 200

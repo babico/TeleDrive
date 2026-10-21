@@ -150,6 +150,23 @@ tailwind.config = {
   <div class="card">
     <h3>Telegram session (USER MTProto)</h3>
     <p class="muted">API credentials and session. Stored in the database; no config file needed.</p>
+    <div class="card bg-red-900/30 border border-red-700 mt-2" x-show="floodActive" x-cloak>
+      <div class="flex items-center gap-3">
+        <span class="text-2xl" x-text="'&#9203;'"></span>
+        <div>
+          <div class="font-bold text-red-300">Telegram FloodWait active</div>
+          <div class="text-sm">
+            <span x-text="floodScope"></span> is rate-limited by Telegram —
+            <span class="font-mono" x-text="floodCountdown"></span> remaining
+            (expires <span class="font-mono" x-text="floodExpiresLocal"></span>)
+          </div>
+          <div class="text-xs muted mt-1">Do NOT send more code requests while waiting; each attempt can extend the wait.</div>
+        </div>
+      </div>
+    </div>
+    <div class="text-xs muted mt-2" x-show="!floodActive && floodLast" x-cloak>
+      Last FloodWait: <span x-text="floodLastText"></span> — no active wait now.
+    </div>
     <div class="field"><label>API ID</label><input x-model="tgApiId" class="input" type="number"></div>
     <div class="field"><label>API hash</label><input x-model="tgApiHash" class="input"></div>
     <div class="field"><label>Phone (with country code)</label><input x-model="tgPhone" class="input" placeholder="+90..."></div>

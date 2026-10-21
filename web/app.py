@@ -1776,11 +1776,70 @@ class TelegramSessionRequestCode(BaseModel):
     strategy: str | None = None
 
 
+def _record_flood_wait(scope: str, seconds: int, detail: str = "") -> dict:
+    """Persist a Telegram FloodWait and log the full countdown picture."""
+    now = int(time.time())
+    seconds = max(1, int(seconds))
+    expires = now + seconds
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "INSERT INTO flood_waits (scope, started_at, wait_seconds, "
+            "expires_at, detail) VALUES (:s, :n, :w, :e, :d)"
+        ), {"s": scope, "n": now, "w": seconds, "e": expires, "d": detail})
+        conn.connection.commit()
+    finally:
+        conn.close()
+    _log(
+        f"FLOODWAIT scope={scope} wait={seconds}s "
+        f"({seconds // 3600}h {(seconds % 3600) // 60}m) "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} "
+        f"expires={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expires))}",
+        "telegram-session",
+    )
+    return {"scope": scope, "started_at": now, "wait_seconds": seconds,
+            "expires_at": expires, "remaining_seconds": seconds,
+            "detail": detail}
+
+
+def _flood_wait_status() -> dict:
+    """Latest FloodWait record with the live remaining countdown."""
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT scope, started_at, wait_seconds, expires_at, detail "
+            "FROM flood_waits ORDER BY id DESC LIMIT 1")).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"active": False, "remaining_seconds": 0, "last": None}
+    now = int(time.time())
+    remaining = max(0, int(row[3]) - now)
+    return {
+        "active": remaining > 0,
+        "remaining_seconds": remaining,
+        "now": now,
+        "last": {"scope": row[0], "started_at": row[1],
+                 "wait_seconds": row[2], "expires_at": row[3],
+                 "remaining_seconds": remaining, "detail": row[4]},
+    }
+
+
+@app.get("/api/v1/admin/storage/telegram-session/floodwait",
+         tags=["Storage jobs"],
+         summary="Read the current Telegram FloodWait status and countdown")
+def telegram_floodwait_status(_: None = Depends(require_auth)):
+    return _flood_wait_status()
+
+
 @app.post("/api/v1/admin/storage/telegram-session/request-code",
           tags=["Storage jobs"], summary="Send a Telegram login code to the phone")
 def request_telegram_session_code(payload: TelegramSessionRequestCode,
                                  request: Request,
                                  _: None = Depends(require_auth)):
+    from telethon.errors import FloodWaitError
     _same_origin(request)
     _log(f"request-code: api_id={payload.api_id} channel={payload.channel}", "telegram-session")
     if payload.api_id <= 0 or not payload.api_hash or not payload.phone:
@@ -1825,6 +1884,15 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
             return h
 
         phone_code_hash = asyncio.run(_send())
+    except FloodWaitError as exc:
+        info = _record_flood_wait(
+            "send_code", int(getattr(exc, "seconds", 0)),
+            "Telegram login code request")
+        raise HTTPException(429, {
+            "message": "Telegram FloodWait: too many code requests. "
+                       "The code request is rate-limited by Telegram.",
+            **info,
+        }) from exc
     except Exception as exc:
         raise HTTPException(400, _scrub_text(str(exc)))
 
@@ -1861,6 +1929,7 @@ class TelegramSessionVerifyCode(BaseModel):
 def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                                 request: Request,
                                 _: None = Depends(require_auth)):
+    from telethon.errors import FloodWaitError
     _same_origin(request)
     _log(f"verify-code: token={payload.token[:8]}...", "telegram-session")
     conn = db_connect()
@@ -1920,6 +1989,15 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             return session_string, me
 
         session_string, me = asyncio.run(_verify())
+    except FloodWaitError as exc:
+        info = _record_flood_wait(
+            "sign_in", int(getattr(exc, "seconds", 0)),
+            "Telegram login verification")
+        raise HTTPException(429, {
+            "message": "Telegram FloodWait: the verification is "
+                       "rate-limited by Telegram.",
+            **info,
+        }) from exc
     except Exception as exc:
         raise HTTPException(400, _scrub_text(str(exc)))
     finally:

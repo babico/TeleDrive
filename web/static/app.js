@@ -44,6 +44,11 @@ function app(){
     tgApiHash: '',
     tgPhone: '',
     tgSessionStatus: 'Not checked',
+    floodActive: false,
+    floodLast: null,
+    floodScope: '',
+    floodExpiresAt: 0,
+    floodNow: Math.floor(Date.now()/1000),
     tgCodeVisible: false,
     tgCode: '',
     tgPassword: '',
@@ -115,6 +120,11 @@ function app(){
         setInterval(()=>this.refreshDashboard(), 30000);
       } else if(path === '/storage' || path === '/settings'){
         await this.loadSettings();
+        if(path === '/storage'){
+          await this.refreshFlood();
+          setInterval(()=>this.refreshFlood(), 30000);
+          setInterval(()=>{ this.floodNow = Math.floor(Date.now()/1000); }, 1000);
+        }
       } else if(path === '/s3'){
         await this.refreshBuckets();
         await this.refreshS3Keys();
@@ -288,6 +298,31 @@ function app(){
         }
       } catch(e){ this.tgSessionStatus = 'Error: '+e.message; }
     },
+    async refreshFlood(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/telegram-session/floodwait');
+        this.floodLast = r.last||null;
+        this.floodActive = !!r.active;
+        if(r.last){
+          this.floodScope = r.last.scope;
+          this.floodExpiresAt = r.last.expires_at;
+        }
+      } catch(e){}
+    },
+    get floodCountdown(){
+      const rem = Math.max(0, this.floodExpiresAt - this.floodNow);
+      const h = Math.floor(rem/3600), m = Math.floor((rem%3600)/60), sec = rem%60;
+      return h ? (h+'h '+String(m).padStart(2,'0')+'m') : (m ? (m+'m '+String(sec).padStart(2,'0')+'s') : (sec+'s'));
+    },
+    get floodExpiresLocal(){
+      if(!this.floodExpiresAt) return '-';
+      return new Date(this.floodExpiresAt*1000).toLocaleTimeString();
+    },
+    get floodLastText(){
+      if(!this.floodLast) return '';
+      const d = new Date(this.floodLast.started_at*1000).toLocaleString();
+      return this.floodLast.scope+' ('+Math.round(this.floodLast.wait_seconds/60)+' min, '+d+')';
+    },
 
     async sendTgCode(){
       try {
@@ -302,7 +337,10 @@ function app(){
         this.tgSessionToken = r.token;
         this.tgCodeVisible = true;
         this.toast('Code sent to Telegram app');
-      } catch(e){ this.toast(e.message,true); }
+      } catch(e){
+        this.toast(e.message,true);
+        await this.refreshFlood();
+      }
     },
 
     async verifyTgCode(){

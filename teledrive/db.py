@@ -113,6 +113,16 @@ users = Table(
     Column("last_login", BigInteger),
 )
 
+flood_waits = Table(
+    "flood_waits", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("scope", String(64), nullable=False),
+    Column("started_at", BigInteger, nullable=False),
+    Column("wait_seconds", Integer, nullable=False),
+    Column("expires_at", BigInteger, nullable=False),
+    Column("detail", Text),
+)
+
 user_sessions = Table(
     "user_sessions", metadata,
     Column("token", String(128), primary_key=True),

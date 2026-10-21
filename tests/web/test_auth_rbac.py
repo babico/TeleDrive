@@ -800,3 +800,48 @@ def test_folder_watch_scan_enqueues_new_files(authenv, monkeypatch):
     report2 = web.folder_watch_scan()
     assert report2["queued"] == 0
     assert report2["already_queued"] >= 1
+
+
+# ---------------------------------------------------------------- floodwait
+
+def test_flood_wait_status_lifecycle(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    # No FloodWait recorded yet.
+    r = client.get("/api/v1/admin/storage/telegram-session/floodwait",
+                   headers=admin)
+    assert r.status_code == 200
+    assert r.json() == {"active": False, "remaining_seconds": 0, "last": None}
+
+    # Record an active wait; the endpoint reports the live countdown.
+    info = web._record_flood_wait("send_code", 3600, "test wait")
+    r = client.get("/api/v1/admin/storage/telegram-session/floodwait",
+                   headers=admin)
+    body = r.json()
+    assert body["active"] is True
+    assert 3500 < body["remaining_seconds"] <= 3600
+    assert body["last"]["scope"] == "send_code"
+    assert body["last"]["wait_seconds"] == 3600
+    assert body["last"]["detail"] == "test wait"
+
+    # An already-expired wait is inactive but still reported as the last one.
+    db = authenv["connect"]()
+    try:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "UPDATE flood_waits SET expires_at = 1"))
+        db.connection.commit()
+    finally:
+        db.close()
+    r = client.get("/api/v1/admin/storage/telegram-session/floodwait",
+                   headers=admin)
+    body = r.json()
+    assert body["active"] is False
+    assert body["remaining_seconds"] == 0
+    assert body["last"]["scope"] == "send_code"
+
+    # Any authenticated role may read the status.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.get("/api/v1/admin/storage/telegram-session/floodwait",
+                      headers=viewer).status_code == 200

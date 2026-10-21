@@ -1122,3 +1122,38 @@ def test_prometheus_metrics(authenv):
         db.close()
     body = client.get("/api/v1/metrics", headers=admin).text
     assert 'teledrive_telegram_session_authorized{account="weird\\"account"}' in body
+
+
+def test_storage_strategy_endpoint(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    # The sessions list reports the active cross-account strategy.
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    assert r.status_code == 200
+    assert r.json()["strategy"] in ("single", "round_robin", "failover",
+                                    "parallel")
+
+    # Operator/admin may set it; the change persists in the config.
+    r = client.put("/api/v1/admin/storage/strategy",
+                   headers={**admin, **CSRF},
+                   json={"strategy": "failover"})
+    assert r.status_code == 200 and r.json()["strategy"] == "failover"
+    cfg = client.get("/api/v1/config", headers=admin).json()
+    assert cfg["storage"]["strategy"] == "failover"
+    r = client.get("/api/v1/admin/storage/telegram-sessions", headers=admin)
+    assert r.json()["strategy"] == "failover"
+
+    # Invalid values and viewer role are rejected.
+    assert client.put("/api/v1/admin/storage/strategy",
+                      headers={**admin, **CSRF},
+                      json={"strategy": "wild"}).status_code == 400
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.put("/api/v1/admin/storage/strategy",
+                      headers={**viewer, **CSRF},
+                      json={"strategy": "parallel"}).status_code == 403
+
+    # Restore the default for other tests.
+    assert client.put("/api/v1/admin/storage/strategy",
+                      headers={**admin, **CSRF},
+                      json={"strategy": "round_robin"}).status_code == 200

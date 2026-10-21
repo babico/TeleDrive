@@ -158,8 +158,11 @@ come from simply authorizing more accounts.
       objects on a chosen account) and per-account soft quotas.
 - [ ] Account health probes: periodic `is_authorized` check per session,
       dead/expired session detection with a UI warning and re-login hint.
-- [ ] Strategy control from the UI (switch round_robin/failover/parallel
-      without editing the config file).
+- [x] Strategy control from the UI: one cross-account routing selector
+      in the accounts card (PUT /api/v1/admin/storage/strategy) with an
+      immediate runtime hot-reload. The runtime also reloads after
+      session add/delete and channel activation, so new accounts take
+      effect without a container restart.
 
 ---
 

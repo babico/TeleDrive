@@ -892,6 +892,8 @@ async def lifespan(_: FastAPI):
         await mtproto_storage_runtime.start()
     except Exception as exc:
         _log(_scrub_text(f"user session warning: {exc}"), "storage")
+    global _main_event_loop
+    _main_event_loop = asyncio.get_running_loop()
     try:
         conn = db_connect()
         conn.close()
@@ -1097,6 +1099,35 @@ def _assert_not_last_admin(conn, current_role: str,
     )).scalar()
     if admin_count <= 1:
         raise HTTPException(409, "cannot remove the last admin")
+
+
+_main_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _reload_storage_runtime() -> None:
+    """Restart the USER MTProto runtime on the main event loop.
+
+    New sessions, a changed routing strategy or a different write channel
+    only take effect after a restart; the Telethon clients are bound to
+    the running loop, so this must run there, never in a worker thread.
+    """
+    try:
+        await mtproto_storage_runtime.stop()
+    except Exception as exc:
+        _log("runtime reload stop: " + type(exc).__name__, "storage")
+    try:
+        await mtproto_storage_runtime.start()
+        _log("storage runtime reloaded", "storage")
+    except Exception as exc:
+        _log(_scrub_text(f"user session warning: {exc}"), "storage")
+
+
+def _schedule_storage_runtime_reload() -> None:
+    """Thread-safe handoff of a runtime reload to the main event loop."""
+    if _main_event_loop is None or _main_event_loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(
+        _reload_storage_runtime(), _main_event_loop)
 
 
 def storage_transport(conn):
@@ -1928,7 +1959,14 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
             "authorized": None if authorized is None else bool(authorized),
             "health_checked_at": checked,
         })
-    return {"sessions": sessions, "count": len(sessions)}
+    try:
+        active_strategy = str(((read_raw_config() or {})
+                               .get("storage") or {})
+                               .get("strategy") or "round_robin")
+    except Exception:
+        active_strategy = "round_robin"
+    return {"sessions": sessions, "count": len(sessions),
+            "strategy": active_strategy}
 
 
 @app.delete("/api/v1/admin/storage/telegram-sessions/{account}",
@@ -1973,6 +2011,7 @@ def delete_telegram_session_account(account: str, request: Request,
         conn.close()
     _log(f"telegram session deleted: account={account} rows={deleted}",
          "storage")
+    _schedule_storage_runtime_reload()
     return {"ok": True, "deleted": deleted, "account": account}
 
 
@@ -2372,6 +2411,7 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
         pass
 
     _log(f"session verified and saved: account={account} user_id={me.id} channel={channel}", "telegram-session")
+    _schedule_storage_runtime_reload()
     return {
         "ok": True,
         "account": account,
@@ -2392,6 +2432,7 @@ def delete_telegram_session(request: Request, _: None = Depends(require_auth)):
         conn.connection.commit()
     finally:
         conn.close()
+    _schedule_storage_runtime_reload()
     return {"ok": True}
 
 
@@ -2470,6 +2511,31 @@ def delete_telegram_channel(channel_id: int, request: Request,
     return {"ok": True}
 
 
+@app.put("/api/v1/admin/storage/strategy", tags=["Storage jobs"],
+         summary="Set the cross-account upload routing strategy")
+def set_storage_strategy(request: Request, payload: dict = Body(...),
+                         _: None = Depends(require_auth)):
+    _same_origin(request)
+    strategy = str(payload.get("strategy", "")).strip().lower()
+    if strategy not in ("single", "round_robin", "failover", "parallel"):
+        raise HTTPException(400, "Strategy must be one of single, "
+                                 "round_robin, failover, parallel")
+    cfg = read_raw_config()
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "Configuration is not readable")
+    # Surgical single-key update: a full config validation would also
+    # demand an existing upload source_dir, which is unrelated to the
+    # routing strategy. The value itself is whitelisted above.
+    cfg.setdefault("storage", {})["strategy"] = strategy
+    tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    _secure_write(tmp, yaml.safe_dump(cfg, sort_keys=False))
+    os.replace(tmp, CONFIG_PATH)
+    _reload_service_settings()
+    _log(f"storage strategy set: {strategy} (runtime reloaded)", "config")
+    _schedule_storage_runtime_reload()
+    return {"ok": True, "strategy": strategy}
+
+
 @app.post("/api/v1/admin/storage/channels/{channel_id}/activate",
           tags=["Storage jobs"], summary="Set the active write channel")
 def activate_telegram_channel(channel_id: int, request: Request,
@@ -2488,6 +2554,7 @@ def activate_telegram_channel(channel_id: int, request: Request,
         conn.connection.commit()
     finally:
         conn.close()
+    _schedule_storage_runtime_reload()
     return {"ok": True}
 
 

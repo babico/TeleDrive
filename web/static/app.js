@@ -51,6 +51,7 @@ function app(){
     tgSessionStatus: 'Not checked',
     tgSessions: [],
     tgChecking: '',
+    strategySel: 'round_robin',
     tgSessionError: '',
     floodActive: false,
     floodLast: null,
@@ -310,10 +311,20 @@ function app(){
       try {
         const r = await this.api('/api/v1/admin/storage/telegram-sessions');
         this.tgSessions = r.sessions||[];
+        if(r.strategy) this.strategySel = r.strategy;
         this.tgSessionStatus = this.tgSessions.length
           ? this.tgSessions.length+' account(s) authorized'
           : 'No session configured.';
       } catch(e){ this.tgSessionStatus = 'Error: '+e.message; }
+    },
+    async saveStrategy(){
+      try {
+        await this.api('/api/v1/admin/storage/strategy',{method:'PUT',body:JSON.stringify({strategy:this.strategySel})});
+        this.toast('Strategy saved: '+this.strategySel);
+      } catch(e){
+        this.toast(e.message,true);
+        await this.refreshTgSessionStatus();
+      }
     },
     async checkTgSession(account){
       this.tgChecking = account;

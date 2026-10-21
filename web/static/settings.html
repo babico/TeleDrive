@@ -53,6 +53,9 @@ tailwind.config = {
   pre{white-space:pre-wrap;word-break:break-all;background:#0f172a;border:1px solid #1f2937;padding:12px;border-radius:8px;font-size:12px;max-height:300px;overflow:auto}
   h3{font-size:16px;font-weight:600;color:#f3f4f6;margin:0 0 4px}
   h4{font-size:13px;font-weight:600;color:#9ca3af;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.05em}
+  .hint{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:9999px;border:1px solid #4b5563;color:#9ca3af;font-size:10px;font-style:italic;cursor:help;position:relative;margin-left:5px;user-select:none;vertical-align:middle}
+  .hint:hover{border-color:#818cf8;color:#c7d2fe}
+  .hint:hover::after{content:attr(data-tip);position:absolute;left:50%;transform:translateX(-50%);bottom:24px;background:#1f2937;border:1px solid #374151;color:#e5e7eb;padding:8px 10px;border-radius:8px;font-size:12px;font-style:normal;width:270px;white-space:normal;z-index:60;box-shadow:0 4px 12px rgba(0,0,0,.5);text-align:left;line-height:1.4}
 </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()">
@@ -95,34 +98,40 @@ tailwind.config = {
 <section class="space-y-4">
   <div class="card">
     <h3>Upload</h3>
-    <div class="field"><label>Source directory</label><input x-model="config.upload.source_dir" class="input"></div>
-    <div class="field"><label>Send mode</label>
+    <div class="field"><label>Source directory<span class="hint" data-tip="Local folder scanned for new files to upload. The folder auto-sync on the Storage page watches this root; files outside it are ignored.">i</span></label><input x-model="config.upload.source_dir" class="input"></div>
+    <div class="field"><label>Send mode<span class="hint" data-tip="document: send every file as a Telegram document (original bytes, any type). media: send photos/videos as media. auto: let Telegram pick per file.">i</span></label>
       <select x-model="config.upload.send_mode" class="input"><option>document</option><option>media</option><option>auto</option></select>
     </div>
     <div class="grid grid-cols-2 gap-3">
-      <div class="field"><label>Max files / run</label><input x-model="config.upload.max_files_per_run" class="input" type="number"></div>
-      <div class="field"><label>Max files / day</label><input x-model="config.upload.max_files_per_day" class="input" type="number"></div>
-      <div class="field"><label>Sleep min (sec)</label><input x-model="config.upload.sleep_min_seconds" class="input" type="number"></div>
-      <div class="field"><label>Sleep max (sec)</label><input x-model="config.upload.sleep_max_seconds" class="input" type="number"></div>
-      <div class="field"><label>Retry attempts</label><input x-model="config.upload.retry_attempts" class="input" type="number"></div>
-      <div class="field"><label>Backoff base (sec)</label><input x-model="config.upload.backoff_base_seconds" class="input" type="number"></div>
-      <div class="field"><label>FloodWait buffer (sec)</label><input x-model="config.upload.floodwait_buffer_seconds" class="input" type="number"></div>
-      <div class="field"><label>Max file size MB (0=unlimited)</label><input x-model="config.upload.max_file_size_mb" class="input" type="number"></div>
+      <div class="field"><label>Max files / run<span class="hint" data-tip="Upper bound of files enqueued per scheduler pass. Keeps one run short even with a huge backlog.">i</span></label><input x-model="config.upload.max_files_per_run" class="input" type="number"></div>
+      <div class="field"><label>Max files / day<span class="hint" data-tip="Daily enqueue cap. Files beyond it stay queued until the next day.">i</span></label><input x-model="config.upload.max_files_per_day" class="input" type="number"></div>
+      <div class="field"><label>Sleep min (sec)<span class="hint" data-tip="Minimum pause between two Telegram sends. Randomized between min and max to stay under rate limits.">i</span></label><input x-model="config.upload.sleep_min_seconds" class="input" type="number"></div>
+      <div class="field"><label>Sleep max (sec)<span class="hint" data-tip="Maximum pause between two Telegram sends.">i</span></label><input x-model="config.upload.sleep_max_seconds" class="input" type="number"></div>
+      <div class="field"><label>Retry attempts<span class="hint" data-tip="How often a failed upload is retried before the job is marked failed.">i</span></label><input x-model="config.upload.retry_attempts" class="input" type="number"></div>
+      <div class="field"><label>Backoff base (sec)<span class="hint" data-tip="Wait time before the first retry; doubles on every further retry.">i</span></label><input x-model="config.upload.backoff_base_seconds" class="input" type="number"></div>
+      <div class="field"><label>FloodWait buffer (sec)<span class="hint" data-tip="Extra seconds added on top of every Telegram FloodWait, so a retry never lands right at the wait boundary.">i</span></label><input x-model="config.upload.floodwait_buffer_seconds" class="input" type="number"></div>
+      <div class="field"><label>Max file size MB (0=unlimited)<span class="hint" data-tip="Files larger than this are skipped and logged. 0 disables the limit.">i</span></label><input x-model="config.upload.max_file_size_mb" class="input" type="number"></div>
     </div>
-    <div class="field"><label>Caption template</label><input x-model="config.upload.caption_template" class="input"></div>
-    <div class="field"><label>Allowed extensions (comma)</label><input x-model="extensionsStr" class="input"></div>
+    <div class="field"><label>Caption template<span class="hint" data-tip="Caption text sent together with each uploaded file. Leave empty for no caption.">i</span></label><input x-model="config.upload.caption_template" class="input"></div>
+    <div class="field"><label>Allowed extensions (comma)<span class="hint" data-tip="Only files with these extensions are uploaded (e.g. jpg,png,pdf). Empty means every file type is allowed.">i</span></label><input x-model="extensionsStr" class="input"></div>
   </div>
 
   <div class="card">
     <h3>Database</h3>
-    <div class="field"><label>SQLAlchemy database URL</label><input x-model="config.state.database_url" class="input" placeholder="sqlite:////data/state.db"></div>
+    <div class="field"><label>SQLAlchemy database URL<span class="hint" data-tip="Address of the unified SQL catalog holding users, sessions, buckets and chunk manifests. Any synchronous SQLAlchemy dialect works (sqlite, PostgreSQL, ...).">i</span></label><input x-model="config.state.database_url" class="input" placeholder="sqlite:////data/state.db"></div>
     <p class="muted text-xs">No vendor whitelist. Any synchronous SQLAlchemy dialect works when its driver is installed.</p>
   </div>
 
   <div class="card">
     <h3>Automation</h3>
-    <div class="field"><label class="flex items-center gap-2"><input type="checkbox" x-model="config.app.auto_run" class="w-4 h-4"> Run upload batches automatically</label></div>
-    <div class="field"><label>Interval (minutes)</label><input x-model="config.app.run_interval_minutes" class="input" type="number"></div>
+    <div class="field"><label class="flex items-center gap-2"><input type="checkbox" x-model="config.app.auto_run" class="w-4 h-4"> Run upload batches automatically<span class="hint" data-tip="When on, the scheduler uploads queued files by itself. When off, uploads only start through the Queue page or the API.">i</span></label></div>
+    <div class="field"><label>Interval (minutes)<span class="hint" data-tip="Minutes between automatic upload batches.">i</span></label><input x-model="config.app.run_interval_minutes" class="input" type="number"></div>
+  </div>
+
+  <div class="card">
+    <h3>Storage</h3>
+    <div class="field"><label>Scratch directory<span class="hint" data-tip="Temporary staging area for chunked uploads. Must have free space for the largest file being uploaded; cleaned automatically after each upload.">i</span></label><input x-model="config.storage.scratch_dir" class="input" placeholder="/data/tmp"></div>
+    <p class="muted text-xs">The upload routing strategy and Telegram accounts are managed on the Storage page.</p>
   </div>
 
   <div class="flex gap-3">

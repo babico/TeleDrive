@@ -137,13 +137,6 @@ tailwind.config = {
         </template>
       </select>
     </div>
-    <div class="field"><label>Strategy</label>
-      <select x-model="config.storage.strategy" class="input">
-        <option value="round_robin">round_robin</option><option value="single">single</option>
-        <option value="failover">failover</option><option value="parallel">parallel</option>
-      </select>
-    </div>
-    <div class="field"><label>Scratch directory</label><input x-model="config.storage.scratch_dir" class="input"></div>
   </div>
   </template>
 
@@ -176,17 +169,26 @@ tailwind.config = {
     </div>
     <div class="card mt-4" x-show="tgSessions.length" x-cloak>
       <h3>Authorized accounts (<span x-text="tgSessions.length"></span>)</h3>
-      <p class="muted">Uploads are distributed across accounts by the configured strategy (round_robin / failover / parallel). A FloodWait on one account automatically fails over to the others. Add another account by logging in above with a different phone number.</p>
+      <div class="row" style="align-items:flex-end">
+        <div class="field" style="flex:0 0 320px">
+          <label>Upload routing strategy (applies to ALL accounts)</label>
+          <select class="input" x-model="strategySel" @change="saveStrategy()" :disabled="!canWrite">
+            <option value="round_robin">round_robin — alternate between accounts</option>
+            <option value="single">single — always the first account</option>
+            <option value="failover">failover — stay on current until flood, then next</option>
+            <option value="parallel">parallel — all accounts simultaneously</option>
+          </select>
+        </div>
+        <p class="muted text-xs" style="flex:1;margin:0">Takes effect immediately (runtime reloads). A FloodWait on one account automatically fails over to the others. Add another account by logging in above with a different phone number.</p>
+      </div>
       <table>
-        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Channel</th><th>Strategy</th><th>Objects</th><th>Size</th><th>Flood</th><th>Health</th><th>Updated</th><th></th></tr></thead>
+        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Objects</th><th>Size</th><th>Flood</th><th>Health</th><th>Updated</th><th></th></tr></thead>
         <tbody>
           <template x-for="s in tgSessions" :key="s.account">
             <tr>
               <td class="font-mono" x-text="s.account"></td>
               <td x-text="s.phone"></td>
               <td x-text="s.api_id"></td>
-              <td x-text="s.channel||'-'"></td>
-              <td x-text="s.strategy"></td>
               <td x-text="s.objects"></td>
               <td x-text="fmtBytes(s.bytes)"></td>
               <td>

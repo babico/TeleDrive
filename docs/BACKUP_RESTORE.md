@@ -30,7 +30,7 @@ python scripts/ops/backup_metadata.py \
   --output /secure-backups/teledrive-YYYY-MM-DD.db
 ~~~
 
-The command uses SQLite's online backup API, checks `PRAGMA integrity_check`, restricts output to `0600` and refuses to overwrite an existing backup. Save the printed SHA-256 **independently**.
+The command uses SQLite's online backup API, checks `PRAGMA integrity_check`, restricts output to `0600` and refuses to overwrite an existing backup. Save the printed SHA-256 **independently**. The runtime caches SQLAlchemy engines per database URL in a bounded LRU cache and runs a WAL checkpoint (`TRUNCATE`) when a shared engine closes, so the SQLite database file stays self-contained rather than depending on a live `-wal` file; the online backup API additionally works against a running service.
 
 Validate the saved copy without touching the live database:
 

@@ -34,7 +34,7 @@ git clone https://github.com/babico/TeleDrive.git
 cd TeleDrive
 mkdir -p config data uploads
 cp .env.example .env
-cp ../config.example.yaml config/config.yaml   # optional tidy template
+cp config.example.yaml config/config.yaml   # optional tidy template
 chmod 600 .env config/config.yaml
 python3 -m venv .venv
 . .venv/bin/activate
@@ -48,7 +48,13 @@ chmod 600 config/mtproto-user.session
 
 Obtain API credentials from [my.telegram.org/apps](https://my.telegram.org/apps).
 Generate the session **before** starting a configured TeleDrive container;
-the script refuses to overwrite an existing session. The service creates
+the script refuses to overwrite an existing session. Alternatively, create
+the session interactively from the WebUI **Storage** page after startup:
+it posts the API credentials to
+`POST /api/v1/admin/storage/telegram-session/request-code`, asks for the
+Telegram sign-in code and optional 2FA, and verifies the resulting
+authorized session against the configured channel. Phone codes and 2FA
+passwords are used once interactively and never stored. The service creates
 `config/config.yaml` with safe defaults on first start; add your credentials
 under the **`storage:`** section as an `apis:` list there (do not commit it):
 
@@ -115,10 +121,11 @@ recoverable. Back up first and test an isolated restore.
 ## 4. Read-only history and original-media disaster recovery
 
 With a connected owner USER session, the authenticated admin can inspect
-bounded history pages:
+bounded history pages (the example uses the Bearer session token from
+`POST /api/v1/auth/login`; the browser UI relies on the httpOnly cookie):
 
 ```bash
-curl -u admin \
+curl -H "Authorization: Bearer $TOKEN" \
   'http://127.0.0.1:8080/api/v1/admin/storage/channel-history?limit=100&include_external_markers=true'
 ```
 
@@ -160,12 +167,13 @@ catalog); see [Backup and Restore](BACKUP_RESTORE.md).
 
 ## 5. Status, CI and unfinished safety gates
 
-The exact-source 9-workflow baseline
-[`a430212`](https://github.com/babico/TeleDrive/commit/a4302122ff80d0f5d05bab8a362e1983a5910235)
-passed Security, REST/S3, Databases, Docker fault injection, live
-USER MTProto, live Bot **historical-compatibility** E2E, live Multiworker
-PostgreSQL and release gate. Check [Actions](https://github.com/babico/TeleDrive/actions)
-for any newer commit; PR tests alone do not certify production recovery.
+The current matrix is **seven mandatory workflows** plus the manually
+dispatched endurance soak (see [CI and Test Guide](CI_WORKFLOWS.md)):
+Quality/Security, REST & S3, Databases, Docker fault injection, live
+USER MTProto E2E, live Multiworker PostgreSQL and the release gate —
+historical Bot-compatibility E2E was retired with the Bot layer. Check
+[Actions](https://github.com/babico/TeleDrive/actions)
+for the exact commit; PR tests alone do not certify production recovery.
 
 **Still open:** independently archived media bytes and real restore;
 unknown-history reconciliation without invented metadata; complete

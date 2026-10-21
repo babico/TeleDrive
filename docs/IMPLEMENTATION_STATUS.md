@@ -22,7 +22,10 @@
 
 ### P0: implementation boundaries
 
-- **State and durability:** SQLAlchemy with SQLite/PostgreSQL/MySQL integration testing, immutable object/chunk manifests, SHA-256 verification, ranged reads, fencing and persistent job history.
+- **State and durability:** SQLAlchemy with SQLite/PostgreSQL/MySQL integration testing, immutable object/chunk manifests, SHA-256 verification, ranged reads, fencing and persistent job history. Engines are cached per database URL in a bounded LRU cache; a WAL checkpoint on shared-engine close keeps SQLite files self-contained.
+- **Authentication and RBAC:** token-based login (`POST /api/v1/auth/login`) with an httpOnly `teledrive_session` cookie for the browser UI (no token in browser storage), SHA-256-hashed session tokens, salted PBKDF2 password hashes with transparent legacy-hash migration, login throttling, and a central admin/operator/viewer role policy enforced on `/api/v1/admin/*`. HTTP Basic (`web.user`/`web.password`) remains only a backward-compat fallback for scripts.
+- **API namespace:** canonical `/api/v1/auth/*`, `/api/v1/config`, `/api/v1/logs` and `/api/v1/admin/*` endpoints; the legacy `/api/auth/*`, `/api/config` and `/api/logs` paths keep working as undocumented aliases. `GET /api/logs` returns only structured `entries` (no `lines` duplicate).
+- **Quotas:** optional per-bucket quotas (`max_size_bytes`/`max_objects`) enforced server-side on REST and S3 uploads (simple PUT, POST policy and multipart completion), managed via the admin quota API or the WebUI S3 page.
 - **API and credentials:** separately scoped REST Bearer credentials and S3 SigV4 credentials, signed request checks, conditional writes, restricted administrative operations and fail-closed unsupported inputs.
 - **Supported S3 subset:** object/bucket operations, a bounded multipart implementation, conditional operations, selected versioning (including safe always-Enabled controls), fixed all-private Public Access Block, tags, copies, CORS and presigned requests. Tested clients include boto3, AWS CLI and rclone.
 - **Not complete S3:** arbitrary AWS lifecycle and bucket policy behavior, SSE, every checksum mode, full delete-marker semantics and untested client combinations are not warranted.
@@ -43,9 +46,9 @@ The default [`docker-compose.yml`](../docker-compose.yml) creates **one `teledri
 
 | Interface | Local endpoint | Auth model | Storage |
 | --- | --- | --- | --- |
-| WebUI and REST v1 | `http://127.0.0.1:8080` | Basic admin + scoped REST Bearer tokens | Shared SQL catalog and Telegram object engine |
+| WebUI and REST v1 | `http://127.0.0.1:8080` | Token login with admin/operator/viewer RBAC (httpOnly cookie or Bearer token; HTTP Basic is a script-only backward-compat fallback) + scoped REST Bearer keys | Shared SQL catalog and Telegram object engine |
 | S3-compatible API | `http://127.0.0.1:9000` | Scoped S3 credentials with SigV4 | **Same** SQL catalog and Telegram object engine |
-| Local-folder durable jobs | Admin job API on 8080 | Basic admin + CSRF | **Same** catalog; files under allowed read-only mount are explicitly queued |
+| Local-folder durable jobs | Admin job API on 8080 | Authenticated session + CSRF | **Same** catalog; files under allowed read-only mount are explicitly queued |
 
 **Read-only channel recovery visibility:** The admin-only `GET /api/v1/admin/storage/channel-history` uses the connected user MTProto session, with bounded `limit` (1–1,000), exclusive `before_message_id` pagination, and optional `include_external_markers=true` for explicitly unverified other-sender marker hints. It neither downloads media nor updates SQL, never infers bucket/key/whole SHA, and requires the connected USER session. An original mapping still needs independently verified metadata and full payload restoration before publication.
 
@@ -197,4 +200,4 @@ Only SQL-only incomplete-multipart lifecycle abort is now supported, applied by 
 - [ ] Implement and independently rehearse the complete physical GC safety/rollback alternative before authorizing deletion.
 - [ ] Complete unknown-history discovery, additional S3 parity tests and long-duration real-environment capacity profiling.
 
-Use [TODO.md](../TODO.md) for the short working checklist. Update this file when the verified *behavior or acceptance boundary* changes; do not paste every transient CI run log here. Separate per-version Markdown release notes are intentionally not maintained; use [GitHub Releases](https://github.com/babico/TeleDrive/releases).
+Use [TODO.md](../TODO.md) as the single prioritized plan document — completed milestones, roadmap phases, the S3 parity track and the owner gates. Update this file when the verified *behavior or acceptance boundary* changes; do not paste every transient CI run log here. Separate per-version Markdown release notes are intentionally not maintained; use [GitHub Releases](https://github.com/babico/TeleDrive/releases).

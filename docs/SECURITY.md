@@ -11,7 +11,7 @@ Do **not** submit active credentials, session files, database connection URLs, T
 
 ## 2. Threat model and trusted components
 
-TeleDrive is primarily a **single-administrator** application. The WebUI can manage Telegram accounts, target channels, local source paths, credential issuance and metadata state. Treat this authority as sensitive.
+TeleDrive is primarily a **single-owner or small-team** application with server-enforced admin, operator and viewer roles. The WebUI can manage Telegram accounts, target channels, local source paths, credential issuance and metadata state. Treat this authority as sensitive.
 
 The host OS administrator, Docker daemon, host user managing mounted files, SQL server administrator, reviewed Python/database drivers and Telegram itself are **trusted boundaries**. TeleDrive does not sandbox a malicious host administrator who can modify mounts or binaries while the service runs.
 
@@ -24,7 +24,7 @@ Treat all of the following as secrets:
 | Secret | Consequence if exposed |
 | --- | --- |
 | Telethon `*.session`, Telegram API ID/hash, login codes and 2FA | User-account and channel access |
-| `config.yaml`, `.env`, Web password | Administrative control and deployment information |
+| `config.yaml`, `.env`, WebUI user passwords | Administrative control and deployment information |
 | SQL URL and SQL backups | Object manifests, references, jobs and potentially encrypted credential metadata |
 | `config/s3-master.key` and S3 access keys | S3 key decryption and object API access |
 
@@ -32,18 +32,37 @@ Store secrets in protected volumes or a secrets manager with restrictive file pe
 
 ## 4. Network exposure
 
-The default Docker Compose deployment uses **one container with two loopback-bound listeners**:
+The default Docker Compose deployment uses **one container with two loopback-bound host mappings** (the service itself binds `0.0.0.0` inside the container):
 
 | Interface | Default host binding | Authentication |
 | --- | --- | --- |
-| WebUI / REST | `127.0.0.1:8080` | Basic admin and scoped REST Bearer tokens |
+| WebUI / REST | `127.0.0.1:8080` | Token login (admin/operator/viewer) via httpOnly cookie or Bearer token; scoped REST Bearer API keys |
 | S3 | `127.0.0.1:9000` | Scoped S3 SigV4 access/secret keys |
 
-Do not expose either endpoint over untrusted plaintext HTTP. For remote access, use an HTTPS reverse proxy or VPN, set `TELEDRIVE_ALLOWED_HOSTS` appropriately, use a unique Web password of at least 16 characters, and restrict firewall access.
+Do not expose either endpoint over untrusted plaintext HTTP. For remote access, use an HTTPS reverse proxy or VPN, set `web.allowed_hosts` appropriately in `config/config.yaml`, use strong unique passwords, and restrict firewall access.
+
+`.env` can override the host-side mapping with `TELEDRIVE_BIND_ADDRESS`, `TELEDRIVE_WEB_PORT` and `TELEDRIVE_S3_PORT`. Setting `TELEDRIVE_BIND_ADDRESS=0.0.0.0` publishes the WebUI/REST and S3 listeners on the LAN; this is acceptable **only on trusted private networks** — every host on that network can then reach the login page and the S3 gateway. On untrusted networks keep the default loopback binding and tunnel.
 
 The unified server dispatches by its actual socket-local listener port, **not** by client-supplied Host or forwarding headers. REST Bearer tokens are not interchangeable with S3 SigV4 keys. S3 master-key material must not be embedded in URLs or requests.
 
-## 5. Database, files and runtime defenses
+## 5. WebUI authentication model
+
+- **Cookie-only browser sessions:** the browser UI authenticates exclusively with the httpOnly, SameSite=Lax `teledrive_session` cookie set by `POST /api/v1/auth/login`; no session token is stored in `localStorage` or other browser storage. The cookie carries the `Secure` flag whenever TLS is configured (`web.ssl_certfile`), and sessions expire after seven days.
+- **Hashed session tokens:** session tokens are persisted only as SHA-256 digests; a database leak does not directly expose usable tokens.
+- **Password hashing:** WebUI passwords are stored as salted PBKDF2-HMAC-SHA256 hashes (260,000 iterations). Legacy salt+SHA-256 hashes still verify and are transparently upgraded to PBKDF2 on the next successful login.
+- **Login throttling:** repeated failed logins (per username and client) are throttled using `web.auth_failure_limit` and `web.auth_failure_window_seconds` (default 5 failures per 300 seconds).
+- **Role-based access control:** enforced server-side on all `/api/v1/admin/*` endpoints:
+
+| Capability | admin | operator | viewer |
+| --- | --- | --- | --- |
+| Read listings, redacted config and logs | Yes | Yes | Yes |
+| Storage/job operations, channels, versions, recovery | Yes | Yes | No |
+| User management, API keys, S3 credentials, config writes, quotas | Yes | No | No |
+
+- **CSRF protection:** state-changing endpoints (login/logout, configuration, user, credential, storage-job and session management) require the `X-TeleDrive-CSRF: 1` header plus a same-origin `Origin` check, regardless of whether the caller authenticated with the session cookie or the legacy HTTP Basic fallback.
+- **Default administrator:** first start creates `admin`/`admin`; change it immediately (the default is public knowledge). HTTP Basic (`web.user`/`web.password`) exists only as a backward-compat fallback for scripts and always maps to the admin role.
+
+## 6. Database, files and runtime defenses
 
 `state.database_url` accepts synchronous SQLAlchemy dialects without a hardcoded vendor whitelist. Review and pin additional driver packages, use database TLS where available, and scope the SQL principal to the intended schema/database. Initial schema creation/migrations may need DDL privileges; reduce privileges after migrations when operationally feasible.
 
@@ -51,8 +70,8 @@ The Docker default includes non-root execution, dropped Linux capabilities, `no-
 
 A SQL snapshot alone cannot restore lost Telegram payloads or S3 master keys. Independent originals and rehearsed recovery are required. Physical Telegram garbage collection remains disabled pending the [production recovery and safety controls](IMPLEMENTATION_STATUS.md#41-physical-telegram-garbage-collection-disabled).
 
-## 6. Security testing and release evidence
+## 7. Security testing and release evidence
 
-The [Security and Regression workflow](../.github/workflows/quality-security.yml) covers Python compilation/regression, `pip check`, Bandit, `pip-audit`, Docker image build, Trivy and application listener smoke tests. GitHub Actions are pinned to immutable revisions; Dependabot monitors Python, Docker and Actions dependencies.
+The [Security and Regression workflow](../.github/workflows/quality-security.yml) covers Python compilation/regression, `pip check`, Bandit, `pip-audit`, Docker image build, Trivy and application listener smoke tests. The WebUI authentication and RBAC contract (`tests/web/test_auth_rbac.py`: cookie sessions, hashed tokens, PBKDF2 with legacy migration, throttling, role policy, CSRF) is part of that regression suite. GitHub Actions are pinned to immutable revisions; Dependabot monitors Python, Docker and Actions dependencies.
 
 A successful scanner run is **not** permission to expose the administration UI publicly or a substitute for owner-approved production penetration testing. Consult the [CI and Test Guide](CI_WORKFLOWS.md) and distinguish test-channel E2E from actual production data.

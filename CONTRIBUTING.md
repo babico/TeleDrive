@@ -1,6 +1,6 @@
 # Contributing to TeleDrive
 
-> **Audience:** maintainers and external contributors. This fork includes a single-container WebUI/REST/S3 service, a Telegram uploader and an Astro marketing site.
+> **Audience:** maintainers and external contributors. This fork is a single-container WebUI/REST/S3 service with a Telegram-backed storage engine; there is no desktop app, website or separate uploader CLI.
 
 ## 1. Before changing code
 
@@ -14,7 +14,7 @@
 ~~~bash
 python -m pip install -r requirements.txt pytest
 python -m pytest -q
-python -m compileall -q teledrive web app tests
+python -m compileall -q teledrive web tests
 docker compose config --quiet
 ~~~
 
@@ -24,7 +24,7 @@ Run the dedicated [Docker fault-injection acceptance](docs/CI_WORKFLOWS.md) when
 bash scripts/dev/run_docker_fault_injection.sh
 ~~~
 
-For the command-line uploader, use the existing test suite and the [Docker fault-injection acceptance](docs/CI_WORKFLOWS.md) above.
+Folder ingestion is served by the admin `import-legacy` endpoint through the durable job queue; there is no separate command-line uploader. Use the existing test suite and the [Docker fault-injection acceptance](docs/CI_WORKFLOWS.md) above when changing that path.
 
 Live Telegram tests require the private test channel and secrets described in the [CI and Test Guide](docs/CI_WORKFLOWS.md); never point the test workflow at production media.
 
@@ -33,7 +33,7 @@ Live Telegram tests require the private test channel and secrets described in th
 - Write all public Markdown documentation in **English**.
 - Use one `#` title per file, a short purpose statement, and an ordered set of sections.
 - Put user installation and examples in [README](README.md); test details in [CI and Test Guide](docs/CI_WORKFLOWS.md); status/scope/production approval in [Project Status](docs/IMPLEMENTATION_STATUS.md); backup procedures in [Backup and Restore](docs/BACKUP_RESTORE.md).
-- Keep [TODO.md](TODO.md) to actionable checkboxes; record release notes on [GitHub Releases](https://github.com/babico/TeleDrive/releases), not in duplicate versioned Markdown files.
+- [TODO.md](TODO.md) is the single prioritized plan document — completed milestones, roadmap phases, the S3 parity track and the owner gates; keep its entries as actionable checkboxes and record release notes on [GitHub Releases](https://github.com/babico/TeleDrive/releases), not in duplicate versioned Markdown files.
 - Update references when renaming files. Ensure relative Markdown links resolve and do not assert that a CI skip equals a passing live test.
 
 ## 4. Review and security

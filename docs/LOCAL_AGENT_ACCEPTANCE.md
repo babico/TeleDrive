@@ -27,7 +27,7 @@ umask 077
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt pytest boto3
-python -m compileall -q teledrive web app tests
+python -m compileall -q teledrive web tests
 python -m pytest -q
 docker compose config --quiet
 bash scripts/dev/run_docker_fault_injection.sh
@@ -41,9 +41,13 @@ Provision test-only configuration from `README.md` section 1 and 4. **Check exis
 cp -n .env.example .env
 chmod 600 .env
 mkdir -p config data uploads
-# Set a unique long TELEDRIVE_WEB_PASSWORD, PUID/PGID, and ONLY
-# disposable TELEDRIVE_STORAGE_BOT_TOKEN / TELEDRIVE_STORAGE_BOT_CHAT_ID.
-# Create config/config.yaml and config/s3-master.key according to README.
+# .env holds only PUID/PGID/TZ and host-side port/bind mapping.
+# All service settings — including the web admin credentials — live in
+# config/config.yaml (config.example.yaml is the template). The first
+# start creates a default admin/admin account: change that password
+# immediately. Create the Telethon USER session via the WebUI Storage
+# page or scripts/dev/create_storage_user_session.py, and the S3 master
+# key per README section 4.
 docker compose up -d --build
 docker compose ps
 docker compose logs --tail=120 teledrive
@@ -126,4 +130,4 @@ Do not fabricate a release tag or publish binaries. For a new release candidate 
 Create an English `docs/LOCAL_AGENT_ACCEPTANCE_RESULTS.md` **template** in the working branch (redacted, never real secrets) and a private `$EVIDENCE_DIR/report.json` with:
 `release_sha`, `host_identity_redacted`, `compose_topology`, `fixture_seed`, `fixtures[{size,sha256,version_id_redacted}]`, `test_command`, `tests_passed`, `tests_failed`, `failure_reasons`, `sql_backup_sha256`, `payload_backup_sha256`, `restoration_verified`, `gates`, `blocked_owner_actions` and `garbage_collection_enabled:false`.
 
-For each item in `TODO.md` **outside Advanced S3**, add evidence links and change `[ ]` to `[x]` **only after the exact acceptance criterion genuinely passes**. If evidence is missing, preserve the checkbox and append a specific blocker and safest next action. Submit reviewed code/tests/docs through one PR; do not merge failing CI or secretly change production policy. End with a table for every original TODO item: `PASS`, `FAIL`, `BLOCKED_OWNER_ACTION` or `NOT_APPLICABLE_ATTESTED`, evidence path and exact SHA.
+[TODO.md](../TODO.md) is now the single merged plan document: completed milestones, roadmap phases 0–4, the Advanced S3 parity track, the owner gates and the release decision rules. For each applicable checkbox in the **roadmap phases, owner gates and release decision rules sections** (the Advanced S3 parity track is tracked through the [S3 Specifications](S3_SPECS.md) matrix), add evidence links and change `[ ]` to `[x]` **only after the exact acceptance criterion genuinely passes**. If evidence is missing, preserve the checkbox and append a specific blocker and safest next action. Submit reviewed code/tests/docs through one PR; do not merge failing CI or secretly change production policy. End with a table for every original TODO item: `PASS`, `FAIL`, `BLOCKED_OWNER_ACTION` or `NOT_APPLICABLE_ATTESTED`, evidence path and exact SHA.

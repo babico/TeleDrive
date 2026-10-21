@@ -37,9 +37,11 @@ Python 3.11+, the appropriate dependencies, and optional Docker Engine/Compose v
 ~~~bash
 python -m pip install -r requirements.txt pytest
 python -m pytest -q
-python -m compileall -q teledrive web app tests
+python -m compileall -q teledrive web tests
 docker compose config --quiet
 ~~~
+
+Python 3.11+ is required locally; the CI workflows themselves run on Python 3.12.
 
 Docker integration jobs install the tools and database services they need inside disposable runners; they do not require a pre-existing TeleDrive deployment.
 
@@ -137,3 +139,5 @@ For feature status and production release boundaries, see [Project Status](IMPLE
 **Multipart listing parity:** `tests/s3/test_s3_multipart.py` verifies scoped SQL-bounded ListParts/ListMultipartUploads cursors, sparse/replaced part metadata, timestamps, grouping, URL encoding, invalid requests and actual boto3 over live HTTP. These are developer/test-channel gates; physical GC, recovery and owner sign-off use [Local Agent Acceptance](LOCAL_AGENT_ACCEPTANCE.md).
 
 **ListBuckets pagination contract:** `tests/s3/test_s3_bucket_listing.py` exercises SigV4/boto3 end-to-end, SQL creation dates, 1–10,000 page bounds, prefix and region filters, cursor integrity and credential scoping. Quality and REST/S3 workflows both require it.
+
+**Web authentication and RBAC contract:** `tests/web/test_auth_rbac.py` verifies the token login flow, the httpOnly cookie session, hashed session tokens, PBKDF2 password hashing with legacy migration, login throttling, the admin/operator/viewer role policy on `/api/v1/admin/*` and the CSRF header requirement. It is required by the three workflows that enumerate test files: Quality, REST & S3, and the Release Gate.

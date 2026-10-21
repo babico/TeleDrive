@@ -1,8 +1,8 @@
 # TeleDrive
 
-**Telegram-backed personal file storage and automation** with a single-container Web UI/REST/S3 service and a command-line uploader.
+**Telegram-backed personal file storage and automation** with a single-container Web UI/REST/S3 service and an S3-compatible gateway.
 
-TeleDrive stores object payloads in Telegram and keeps object metadata, upload state, and references in a local or external SQL database. This fork supports multiple Telegram accounts for the original folder uploader and a unified USER MTProto-backed object catalog for REST, S3, and durable local-file jobs.
+TeleDrive stores object payloads in Telegram and keeps object metadata, upload state, and references in a local or external SQL database. This fork supports multiple Telegram accounts through the `storage.apis` rotation list and a unified USER MTProto-backed object catalog for REST, S3, and durable local-file jobs.
 
 > **Security:** ordinary Telegram cloud chats and Saved Messages are **not end-to-end encrypted**. Encrypt sensitive content before uploading if it must be confidential from Telegram.
 >
@@ -20,7 +20,7 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 | [Contributing](CONTRIBUTING.md) | Development workflow and documentation rules |
 | [S3 Compatibility Matrix](docs/S3_SPECS.md) | 116-operation status matrix, supported limits and P2 advanced implementation roadmap |
 | [Local Agent Acceptance Mission](docs/LOCAL_AGENT_ACCEPTANCE.md) | Docker test installation, real bytes, independent recovery and GC safety acceptance, with owner-only gates |
-| [Working Checklist](TODO.md) | Short, actionable outstanding tasks |
+| [TODO and Roadmap](TODO.md) | The single prioritized plan: completed milestones, roadmap phases, S3 parity track and owner gates |
 
 **Contents:** [Quick start](#1-quick-start-docker) · [Architecture](#2-storage-architecture) · [REST API](#3-rest-api) · [S3 gateway](#4-s3-compatible-api) · [Local jobs](#5-local-file-upload-jobs) · [CLI](#6-command-line-usage) · [Databases](#7-database-configuration) · [Security](#8-security-and-operational-limits) · [Development](#9-development-and-testing).
 
@@ -37,7 +37,7 @@ cp config.example.yaml config/config.yaml   # optional tidy template
 chmod 600 .env config/config.yaml
 ~~~
 
-Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. The YAML file keeps **all** service settings; `.env` only holds `PUID`/`PGID`/`TZ`/port mappings. Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session with the instructions in [Section 4](#4-s3-compatible-api) **before** starting Docker. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
+Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. The YAML file keeps **all** service settings; `.env` only holds `PUID`/`PGID`/`TZ` and the host-side port/bind mapping (`TELEDRIVE_WEB_PORT`, `TELEDRIVE_S3_PORT`, `TELEDRIVE_BIND_ADDRESS`). Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session before or after starting Docker: either run the interactive helper in [Section 4](#4-s3-compatible-api) on a trusted host, or use the **Storage** page in the WebUI, which walks through the Telegram code request/verification interactively. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
 
 ~~~bash
 docker compose up -d --build
@@ -52,7 +52,7 @@ docker compose logs -f teledrive
 
 **One service, one container, one Python process.** Both listeners use the **same SQL catalog and Telegram object engine**. You do not need `docker compose --profile s3` and there is no second S3 container.
 
-The service binds `0.0.0.0` inside the container; the Compose host mapping stays loopback by default. For remote access, use an SSH tunnel, private VPN, or an HTTPS reverse proxy (see `scripts/ops/generate_ssl.py` for TLS); never expose login credentials, session tokens or S3 secrets over untrusted plaintext HTTP.
+The service binds `0.0.0.0` inside the container; the Compose host mapping stays loopback by default. To publish the ports on a trusted private network, set `TELEDRIVE_BIND_ADDRESS=0.0.0.0` in `.env` (and optionally `TELEDRIVE_WEB_PORT`/`TELEDRIVE_S3_PORT` for custom host ports); this is only acceptable on networks you trust, since the listeners are then reachable from every host on that network. For access over untrusted networks, use an SSH tunnel, private VPN, or an HTTPS reverse proxy (see `scripts/ops/generate_ssl.py` for TLS); never expose login credentials, session tokens or S3 secrets over untrusted plaintext HTTP.
 
 | Host folder | Container path | Purpose |
 | --- | --- | --- |
@@ -95,16 +95,16 @@ The SQL catalog stores object heads, generations, checksums, version references,
 
 ### Telegram USER account and transport
 
-The original uploader accepts Telegram user accounts through MTProto/Telethon; a user account can use Saved Messages (`me`), channel usernames, or supported numeric target IDs. Each account has its own session and optional API/target overrides.
+Credential sets are configured as an `apis:` list under `storage:` in `config/config.yaml`; each set has its own session file and optional account label, and every set must resolve the same dedicated channel. The `storage.strategy` setting controls how sends rotate across the sets:
 
 | Strategy | Behavior |
 | --- | --- |
 | `single` | Use the first enabled account |
-| `round_robin` | Rotate preferred sending accounts between files |
+| `round_robin` | Rotate preferred sending accounts between files (default) |
 | `failover` | Try configured accounts in priority order |
 | `parallel` | Independent account-affine workers with fallback |
 
-**Unified storage never uses Saved Messages or Bot API**: select a private broadcast channel that the authorized user can post to. The old standalone uploader still has historical `me` settings; they are not enabled in REST/S3. Respect Telegram rate limits, and never reuse a writable session among independent uploader processes.
+**Unified storage never uses Saved Messages or Bot API**: select a private broadcast channel that the authorized user can post to. Historical `me` (Saved Messages) settings from the retired standalone uploader are not enabled in REST/S3. Respect Telegram rate limits, and never reuse a writable session among independent uploader processes.
 
 The **REST/S3/local-job engine requires USER MTProto**: it fails closed without an authorized user session. No Bot credentials exist in the runtime. The same SQL catalog and bounded chunk engine are retained. Existing `api-bot` objects are readable using the authorized USER session only when the original **same channel** is accessible and the immutable SQL manifest retains real message IDs; full checksums are still verified. Old objects in inaccessible channels require a separately verified migration and backup. No existing media is automatically deleted.
 
@@ -120,11 +120,11 @@ The Web listener publishes an authenticated interface at:
 
 ### Authentication
 
-Authentication is token-based. Log in at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) (or `POST /api/auth/login`) with a username and password; the response returns a Bearer session token and sets an httpOnly `teledrive_session` cookie valid for seven days.
+Authentication is token-based. Log in at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) (or `POST /api/v1/auth/login`) with a username and password; the response returns a Bearer session token and sets an httpOnly `teledrive_session` cookie valid for seven days. The canonical API namespace is `/api/v1/auth/*`, `/api/v1/config`, `/api/v1/logs` and `/api/v1/admin/*`; the older `/api/auth/*`, `/api/config` and `/api/logs` paths remain working but undocumented aliases. **The browser UI uses only the httpOnly cookie** — no session token is kept in browser storage.
 
 ~~~bash
 # Log in (default admin/admin on first start — change it immediately):
-curl -fsS -X POST http://127.0.0.1:8080/api/auth/login \
+curl -fsS -X POST http://127.0.0.1:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"YOUR_PASSWORD"}'
 # => {"token":"td_sess_...","user":{...},"expires_at":...}
@@ -132,7 +132,7 @@ curl -fsS -X POST http://127.0.0.1:8080/api/auth/login \
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/openapi.json
 ~~~
 
-Roles are enforced server-side on `/api/v1/admin/*` endpoints: **admin** has full access, **operator** may run storage/job operations and read logs, and **viewer** is read-only. Use an authenticated session for administrative API key issuance/rotation/revocation and include `X-TeleDrive-CSRF: 1` on administrative mutations. REST object calls use separately issued, scoped Bearer API keys; those are **not** S3 Access Key IDs.
+Roles are enforced server-side on `/api/v1/admin/*` endpoints: **admin** has full access, **operator** may run storage/job operations and read logs, and **viewer** is read-only. Use an authenticated session for administrative API key issuance/rotation/revocation and include `X-TeleDrive-CSRF: 1` on administrative mutations. REST object calls use separately issued, scoped Bearer API keys; those are **not** S3 Access Key IDs. Session tokens are persisted only as SHA-256 digests, passwords are stored as salted PBKDF2 hashes, and repeated login failures are throttled.
 
 HTTP Basic authentication (`web.user`/`web.password` in `config/config.yaml`) is retained **only** as a backward-compatibility fallback for scripts and API clients; it always authenticates as the admin user and is not the primary authentication path.
 
@@ -172,7 +172,7 @@ python scripts/dev/create_storage_user_session.py --output config/mtproto-user.s
 chmod 600 config/mtproto-user.session
 ~~~
 
-Run this interactively on a trusted host with Python dependencies installed, before the first Docker startup. Ensure the resulting `0600` file is readable by the configured container `PUID`/`PGID`. The API ID/hash are from [my.telegram.org](https://my.telegram.org/apps). The script prompts for the real user's Telegram sign-in code and optional 2FA and refuses to overwrite an existing session. Its MTProto application/device metadata identifies the TeleDrive client accurately; it does **not** masquerade as an official Telegram Desktop/Android app. Choose a channel username or a numeric channel ID present in this user's dialogs. If selecting a numeric private channel, it must be visible among the user's first 5,000 dialogs. No user account => no user-only history access.
+Run this interactively on a trusted host with Python dependencies installed, before the first Docker startup. Alternatively, create the session after startup from the WebUI **Storage** page (code request/verification against the configured channel; see [Telethon USER Storage](docs/TELETHON_STORAGE.md)). Ensure the resulting `0600` file is readable by the configured container `PUID`/`PGID`. The API ID/hash are from [my.telegram.org](https://my.telegram.org/apps). The script prompts for the real user's Telegram sign-in code and optional 2FA and refuses to overwrite an existing session. Its MTProto application/device metadata identifies the TeleDrive client accurately; it does **not** masquerade as an official Telegram Desktop/Android app. Choose a channel username or a numeric channel ID present in this user's dialogs. If selecting a numeric private channel, it must be visible among the user's first 5,000 dialogs. No user account => no user-only history access.
 
 1. Save one or more authorized user StringSessions under `./config/` (mode 0600) using the interactive command below, then list them with their API credentials and the shared channel in the `storage:` section of `config/config.yaml` ([Telethon USER Storage](docs/TELETHON_STORAGE.md)). The user needs posting rights in that private **broadcast channel**, not Saved Messages. Existing installations from the pre-switch era must configure a user session before further uploads; **do not delete original media or SQL backups**.
 2. Generate a persistent master encryption key once, on the trusted host:
@@ -269,15 +269,15 @@ Background automation is configured through `jobs.auto_run` in `config/config.ya
 ### Telegram account setup
 
 1. Get a Telegram `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org/apps).
-2. Choose `me`, a permitted channel username, or an appropriate numeric chat ID as the user-account uploader destination.
-3. Authenticate with the Telegram code and, if enabled, 2FA password.
-4. Test a small scan/upload and confirm readback before enabling scheduling.
+2. Choose a dedicated private broadcast channel (username or numeric ID visible in the user's dialogs) where the user can post.
+3. Authenticate with the Telegram code and, if enabled, 2FA password — via the WebUI **Storage** page or `scripts/dev/create_storage_user_session.py`.
+4. Test a small upload and confirm readback before enabling scheduled jobs.
 
 A BotFather token is not used by the unified storage runtime. Historical Bot messages can be read through a USER session only when the original channel and exact message IDs remain accessible. Never commit user sessions, API hashes or other secrets.
 
 ## 7. Database configuration
 
-Configure `state.database_url` in the YAML configuration or Web UI. SQLite needs no external server; the server image includes drivers for the tested PostgreSQL and MySQL/MariaDB integrations. Other synchronous SQLAlchemy dialects may work with separately reviewed drivers but are **not certified merely by accepting their URLs**.
+Configure `state.database_url` in the YAML configuration or Web UI. SQLite needs no external server; the server image includes drivers for the tested PostgreSQL and MySQL/MariaDB integrations. Other synchronous SQLAlchemy dialects may work with separately reviewed drivers but are **not certified merely by accepting their URLs**. Engines are cached per database URL in a bounded LRU cache so repeated requests reuse pooled connections, and a WAL checkpoint on close keeps SQLite files self-contained.
 
 ~~~yaml
 state:
@@ -295,7 +295,7 @@ For additional reviewed packages, set `TELEDRIVE_DB_EXTRA_PACKAGES` in `.env` (s
 
 ## 8. Security and operational limits
 
-- Keep WebUI/REST/S3 on loopback unless protected by an HTTPS reverse proxy or VPN.
+- Keep WebUI/REST/S3 on the default loopback binding unless you publish them on a trusted private network (`TELEDRIVE_BIND_ADDRESS=0.0.0.0` in `.env`) or protect them with an HTTPS reverse proxy or VPN.
 - Treat session files, `.env`, historical Bot tokens, `config.yaml`, the S3 master key and SQL backups as secrets.
 - Docker defaults include non-root execution, a read-only filesystem, capability drops and a read-only source mount.
 - Never assume a successful database-only restore is proof of original Telegram media recovery.

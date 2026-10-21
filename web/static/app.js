@@ -111,7 +111,7 @@ function app(){
       const token = localStorage.getItem('teledrive_token');
       const headers = {'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})};
       if(token) headers['Authorization'] = 'Bearer '+token;
-      const r = await fetch(url, {headers, ...opt});
+      const r = await fetch(url, {credentials:'include', headers, ...opt});
       if(!r.ok) throw new Error(await r.text() || r.statusText);
       return r.json();
     },

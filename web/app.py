@@ -984,7 +984,11 @@ def index(_: None = Depends(require_auth)):
 
 @app.get("/{page_name}.html", include_in_schema=False)
 def page_html(page_name: str, request: Request):
-    require_auth(request)
+    try:
+        require_auth(request)
+    except HTTPException:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/login", status_code=302)
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)
@@ -1001,7 +1005,11 @@ def page_route(page_name: str, request: Request):
     if page_name in {"api", "static", "openapi.json", "docs", "redoc",
                      "__health", "favicon.ico"}:
         raise HTTPException(404, "Not found")
-    require_auth(request)
+    try:
+        require_auth(request)
+    except HTTPException:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/login", status_code=302)
     candidate = STATIC_DIR / f"{page_name}.html"
     if candidate.is_file():
         return FileResponse(candidate)

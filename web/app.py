@@ -306,7 +306,9 @@ def _get_current_user(request: Request) -> dict | None:
     else:
         token = request.cookies.get("teledrive_session")
     if not token:
+        _log(f"_get_current_user: no token (cookies={dict(request.cookies)})", "auth")
         return None
+    _log(f"_get_current_user: token={token[:12]}...", "auth")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text

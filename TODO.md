@@ -208,14 +208,13 @@ come from simply authorizing more accounts.
       checkpoint need more than the default 10s).
 
 ### Open — ordered by priority
-- [ ] S3 request logging bug: S3-port traffic (even failed browser/S3
-      client connection attempts) never reaches the logs page. The S3
-      ASGI app has no logging middleware — add one that mirrors the web
-      http log format (redacted, throttled).
-- [ ] Route/page restructure with nested paths: /settings/general,
-      /settings/telegram (today's /storage, renamed Telegram),
-      /s3/credentials, /s3/buckets. Old paths (/settings, /storage, /s3)
-      redirect for compatibility. Nav gains sub-menus everywhere.
+- [x] S3 request logging bug FIXED (b56e264): outermost audit
+      middleware on the S3 app; unsigned probes, failed signatures and
+      browser attempts all land on the logs page with the SigV4 access
+      key id as the user. Verified live on the S3 port.
+- [x] Route/page restructure DONE (b56e264): nested paths with legacy
+      redirects; one shared dynamic nav (grouped sub-menus) on every
+      page; S3 credentials moved to their own page.
 - [ ] S3 SSL from scratch, two deployment modes:
       a) direct TLS on the S3 listener (env-provided cert/key, or
          auto-generated self-signed for LAN use), verified with
@@ -223,15 +222,14 @@ come from simply authorizing more accounts.
       b) behind a reverse proxy: proxy terminates TLS, service stays
          plain HTTP — handle X-Forwarded-* / Host preservation for
          SigV4 verification and correct https endpoint URLs in the UI.
-- [ ] Checkboxes do not match the dark theme — style them
-      (accent-color + dark scheme) consistently on every page.
+- [x] Checkboxes themed (accent-color) on every page.
 - [ ] S3 + API permission UI modernization: replace the current
       permission-granting controls; add viewing existing S3 credential
       SECRETS and editing access keys.
 - [ ] S3 sub-menu: bucket browser moves under the S3 menu
       (/s3/buckets), detailed and verified end to end.
-- [ ] API management page: link the API docs references (OpenAPI
-      /docs, /redoc, S3 compat matrix).
+- [x] API management: documentation card with /docs, /redoc,
+      openapi.json, GitHub docs and the S3 compatibility matrix.
 - [ ] Dashboard enrichment: more detail (per-account usage, quota
       bars, job throughput, session health at a glance).
 - [ ] CI overhaul: fresh naming scheme, one consistent convention,

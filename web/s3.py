@@ -55,7 +55,8 @@ from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.manifest import ManifestStore, objects
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 import web.app as _webapp
-from web.app import db_connect, storage_transport, _secure_mkdir
+from web.app import (db_connect, storage_transport, _secure_mkdir,
+                     _enforce_bucket_quota)
 
 NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 app = FastAPI(title="TeleDrive S3 (initial compatibility subset)", docs_url=None,
@@ -77,6 +78,21 @@ def _error(code: str, message: str, status: int) -> Response:
     ET.SubElement(root, "Message").text = message
     return Response(ET.tostring(root, encoding="utf-8", xml_declaration=True),
                     media_type="application/xml", status_code=status)
+
+
+def _quota_guard(db, bucket: str, key: str, size: int) -> Response | None:
+    """Enforce TeleDrive per-bucket quotas on S3-path uploads.
+
+    Returns an S3-style 413 error response when the upload would exceed the
+    configured quota, or None when the upload may proceed. The REST upload
+    path enforces the same policy inside web.app.
+    """
+    from fastapi import HTTPException as _HTTPException
+    try:
+        _enforce_bucket_quota(db, bucket, key, size)
+    except _HTTPException as exc:
+        return _error("EntityTooLarge", str(exc.detail), 413)
+    return None
 
 
 def _headers(item, etag: str | None = None,
@@ -779,6 +795,9 @@ async def _handle(request: Request):
                     os.fsync(dest.fileno())
                 transport = storage_transport(db)
                 await transport.verify_target()
+                quota_error = _quota_guard(db, bucket, post_key, len(payload))
+                if quota_error is not None:
+                    return quota_error
                 obj = await TelegramObjectStorage(
                     post_catalog.manifests, transport,
                     chunk_size=RECOMMENDED_CHUNK_SIZE,
@@ -1356,6 +1375,25 @@ async def _handle(request: Request):
                 transport = storage_transport(db)
                 scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
                 _secure_mkdir(scratch)
+                # Enforce bucket quota using the total selected part size
+                # before any assembly/publish work begins. Query the parts
+                # table directly: list_parts() enforces upload ownership and
+                # would reject the idempotent repeat of an already-completed
+                # upload.
+                from teledrive.s3.multipart import parts as _parts_table
+                selected_numbers = {number for number, _ in selected}
+                part_rows = db.connection.execute(
+                    select(_parts_table.c.number, _parts_table.c.size).where(
+                        _parts_table.c.upload_id == upload_id
+                    )
+                ).all()
+                selected_size = sum(
+                    size for number, size in part_rows
+                    if number in selected_numbers
+                )
+                quota_error = _quota_guard(db, bucket, key, selected_size)
+                if quota_error is not None:
+                    return quota_error
                 engine = TelegramObjectStorage(
                     catalog.manifests, transport,
                     chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
@@ -1648,6 +1686,11 @@ async def _handle(request: Request):
                     request, digest.digest(), md5_digest=md5.digest(),
                     sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
                 )
+                # Enforce bucket quota (same TeleDrive-level policy as the
+                # REST upload path) before any Telegram upload work starts.
+                quota_error = _quota_guard(db, bucket, key, length)
+                if quota_error is not None:
+                    return quota_error
                 checksum_crc = request.headers.get("x-amz-checksum-crc32")
                 if checksum_crc and checksum_crc != base64.b64encode((crc & 0xffffffff).to_bytes(4, "big")).decode():
                     return _error("BadDigest", "CRC32 checksum mismatch", 400)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import hmac
 import copy
-import sys
+import secrets
 import tempfile
 import os
 import gzip
@@ -20,12 +22,11 @@ from typing import Any
 
 import yaml
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
-from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 from typing import Literal
-from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 
 from teledrive import uploader
@@ -47,7 +48,6 @@ from teledrive.storage.history_inventory import inventory_channel
 from teledrive.storage.mtproto_rate_guard import MtprotoRateGuard
 mtproto_storage_runtime = UserSessionRuntime()
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 REDACTED = "__REDACTED__"
@@ -59,7 +59,7 @@ WEB_USER = "admin"
 WEB_PASSWORD = ""
 WEB_PASSWORD_FILE = ""
 ALLOW_INSECURE = False
-MAX_REQUEST_BYTES = 1048576
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
 AUTH_DIR = Path("/data/auth")
 STORAGE_SCRATCH_DIR = "/data/tmp"
@@ -159,12 +159,32 @@ class RotatingCompressedFileHandler(RotatingFileHandler):
 
 def _extract_user(request: Request) -> str:
     """Extract the authenticated user identity from the request (best-effort)."""
-    # Basic auth
     auth = request.headers.get("authorization", "")
+    # Session token (cookie or Bearer) — resolve to the WebUI username.
+    token = None
+    if auth.lower().startswith("bearer ") and auth[7:].strip().startswith("td_sess_"):
+        token = auth[7:].strip()
+    elif request.cookies.get("teledrive_session"):
+        token = request.cookies.get("teledrive_session")
+    if token:
+        try:
+            conn = db_connect()
+            try:
+                from sqlalchemy import text as _text
+                row = conn.connection.execute(_text(
+                    "SELECT u.username FROM user_sessions s "
+                    "JOIN users u ON u.id = s.user_id WHERE s.token = :t"
+                ), {"t": _session_token_digest(token)}).fetchone()
+                if row:
+                    return row[0]
+            finally:
+                conn.close()
+        except Exception:
+            pass
+    # Basic auth
     if auth.lower().startswith("basic "):
         try:
-            import base64 as _b64
-            decoded = _b64.b64decode(auth[6:]).decode("utf-8", "replace")
+            decoded = base64.b64decode(auth[6:]).decode("utf-8", "replace")
             username = decoded.split(":", 1)[0]
             if username:
                 return username
@@ -174,7 +194,6 @@ def _extract_user(request: Request) -> str:
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
         try:
-            from teledrive.api_keys import ApiKeyStore
             conn = db_connect()
             try:
                 name = ApiKeyStore(conn).name_for_token(token)
@@ -205,16 +224,13 @@ def _log(msg: str, source: str = "web", user: str = "system") -> None:
             _FILE_LOG_HANDLER.emit(record)
     except Exception:
         pass
-PROMPT_RE = re.compile(r"Please enter the (code|password) for account '([^']+)':", re.I)
 _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:password|passwd|pwd|token|access_token|secret|api_key|apikey)=)[^&#\s]+"
 )
 
-security = HTTPBasic(auto_error=False)
 bearer_auth = HTTPBearer(auto_error=False)
 AUTH_FAILURES: dict[str, deque[float]] = {}
 _FILE_LOG_HANDLER = None
-TELEGRAM_SESSION_PENDING: dict[str, dict[str, Any]] = {}
 
 
 def _secure_mkdir(path: Path) -> None:
@@ -264,18 +280,63 @@ def _same_origin(request: Request) -> None:
         raise HTTPException(403, "Cross-origin state change rejected")
 
 
+_PBKDF2_ITERATIONS = 260_000
+# Pre-computed hash for timing-safe login checks when the user does not exist.
+_DUMMY_PASSWORD_HASH = None
+
+
 def _hash_password(password: str) -> str:
-    import hashlib as _hl, secrets as _sec
-    salt = _sec.token_hex(16)
-    return salt + ":" + _hl.sha256((salt + password).encode()).hexdigest()
+    """Salted PBKDF2-HMAC-SHA256 password hash (format: pbkdf2_sha256$iter$salt$digest)."""
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt.encode(), _PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt}${digest.hex()}"
 
 
 def _verify_password(password: str, stored: str) -> bool:
-    import hashlib as _hl
-    if ":" not in stored:
+    """Verify PBKDF2 hashes; legacy salt:sha256 hashes still verify (migrated on login)."""
+    try:
+        if stored.startswith("pbkdf2_sha256$"):
+            _, iterations, salt, hexdigest = stored.split("$", 3)
+            digest = hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), salt.encode(), int(iterations))
+            return hmac.compare_digest(digest.hex(), hexdigest)
+        if ":" in stored:  # legacy format
+            salt, digest = stored.split(":", 1)
+            return hmac.compare_digest(
+                digest, hashlib.sha256((salt + password).encode()).hexdigest())
+    except Exception:
         return False
-    salt, digest = stored.split(":", 1)
-    return hmac.compare_digest(digest, _hl.sha256((salt + password).encode()).hexdigest())
+    return False
+
+
+def _dummy_password_hash() -> str:
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        _DUMMY_PASSWORD_HASH = _hash_password("teledrive-invalid-password")
+    return _DUMMY_PASSWORD_HASH
+
+
+def _session_token_digest(token: str) -> str:
+    """Session tokens are stored hashed in the DB (like API keys)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _auth_throttle_check(key: str) -> None:
+    """Reject authentication attempts after repeated failures (brute-force guard)."""
+    now = time.time()
+    window = max(1, int(AUTH_FAILURE_WINDOW_SECONDS))
+    limit = max(1, int(AUTH_FAILURE_LIMIT))
+    failures = AUTH_FAILURES.get(key)
+    if failures:
+        while failures and failures[0] <= now - window:
+            failures.popleft()
+        if len(failures) >= limit:
+            raise HTTPException(429, "Too many failed attempts; try again later")
+
+
+def _auth_failure_record(key: str) -> None:
+    AUTH_FAILURES.setdefault(key, deque()).append(time.time())
 
 
 def _create_default_admin() -> None:
@@ -291,8 +352,10 @@ def _create_default_admin() -> None:
                 "VALUES (:u, :ph, 'admin', :now, :now)"
             ), {"u": "admin", "ph": _hash_password("admin"), "now": now})
             conn.connection.commit()
-    except Exception:
-        pass
+            _log("default admin account 'admin' created with password 'admin' — "
+                 "change this password immediately", "startup")
+    except Exception as exc:
+        _log(f"default admin creation failed: {type(exc).__name__}", "startup")
     finally:
         conn.close()
 
@@ -306,58 +369,99 @@ def _get_current_user(request: Request) -> dict | None:
     else:
         token = request.cookies.get("teledrive_session")
     if not token:
-        _log(f"_get_current_user: no token (cookies={dict(request.cookies)})", "auth")
         return None
-    _log(f"_get_current_user: token={token[:12]}... len={len(token)}", "auth")
+    digest = _session_token_digest(token)
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
-        _log(f"_get_current_user: db_url={conn.url}", "auth")
         row = conn.connection.execute(_text(
-            "SELECT u.id, u.username, u.role, s.expires_at "
+            "SELECT u.id, u.username, u.role, s.expires_at, u.enabled "
             "FROM user_sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.token = :token"
-        ), {"token": token}).fetchone()
-        _log(f"_get_current_user: row={row}", "auth")
+        ), {"token": digest}).fetchone()
         if row is None:
             return None
-        if int(time.time()) > int(row[3]):
-            # Expired — clean up
+        if not row[4]:
+            # Disabled users must not hold live sessions.
             conn.connection.execute(_text(
-                "DELETE FROM user_sessions WHERE token = :token"
-            ), {"token": token})
+                "DELETE FROM user_sessions WHERE user_id = :uid"
+            ), {"uid": row[0]})
             conn.connection.commit()
             return None
-        _log(f"_get_current_user: returning user {row[1]}", "auth")
+        if int(time.time()) > int(row[3]):
+            # Expired — clean up.
+            conn.connection.execute(_text(
+                "DELETE FROM user_sessions WHERE token = :token"
+            ), {"token": digest})
+            conn.connection.commit()
+            return None
         return {"id": row[0], "username": row[1], "role": row[2]}
-    except Exception as exc:
-        _log(f"_get_current_user error: {type(exc).__name__}: {exc}", "auth")
+    except Exception:
         return None
     finally:
         conn.close()
 
 
+_ROLE_ADMIN = frozenset({"admin"})
+_ROLE_WRITE = frozenset({"admin", "operator"})
+
+
+def _required_roles(method: str, path: str) -> frozenset[str] | None:
+    """Central role policy for the admin API. None = any authenticated role.
+
+    - viewer: read-only access to listings, config (redacted) and logs
+    - operator: additionally all storage operations (jobs, channels, versions, recovery)
+    - admin: additionally user management, API keys, S3 credentials, config and quotas
+    """
+    if path.startswith("/api/v1/admin/users"):
+        return _ROLE_ADMIN
+    if method == "GET":
+        return None
+    if path == "/api/config":
+        return _ROLE_ADMIN
+    if path.startswith("/api/v1/admin/keys"):
+        return _ROLE_ADMIN
+    if path.startswith("/api/v1/admin/s3-credentials"):
+        return _ROLE_ADMIN
+    if path.startswith("/api/v1/admin/storage/buckets") and path.endswith("/quota"):
+        return _ROLE_ADMIN
+    return _ROLE_WRITE
+
+
+def _enforce_role_policy(request: Request, user: dict) -> None:
+    roles = _required_roles(request.method, request.url.path)
+    if roles is not None and user.get("role") not in roles:
+        _log(f"denied: user={user.get('username')} role={user.get('role')} "
+             f"{request.method} {request.url.path}", "auth")
+        raise HTTPException(403, "Insufficient permissions for this action")
+
+
 def require_auth(request: Request) -> None:
-    # Try Bearer token first (new auth mechanism).
+    # Session token (Bearer header or httpOnly cookie) is the primary mechanism.
     user = _get_current_user(request)
     if user is not None:
         request.state.user = user
+        _enforce_role_policy(request, user)
         return
 
     # Fall back to HTTP Basic auth (backward compat for tests/API clients).
     if WEB_PASSWORD:
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("basic "):
-            import base64 as _b64
+            client = request.client.host if request.client else "-"
+            throttle_key = f"basic:{client}"
+            _auth_throttle_check(throttle_key)
             try:
-                decoded = _b64.b64decode(auth[6:]).decode("utf-8", "replace")
+                decoded = base64.b64decode(auth[6:]).decode("utf-8", "replace")
                 u, p_ = decoded.split(":", 1)
-                if (hmac.compare_digest(u, WEB_USER)
-                        and hmac.compare_digest(p_, WEB_PASSWORD)):
-                    request.state.user = {"id": 0, "username": u, "role": "admin"}
-                    return
             except Exception:
-                pass
+                u, p_ = "", ""
+            if (hmac.compare_digest(u, WEB_USER)
+                    and hmac.compare_digest(p_, WEB_PASSWORD)):
+                request.state.user = {"id": 0, "username": u, "role": "admin"}
+                _enforce_role_policy(request, request.state.user)
+                return
+            _auth_failure_record(throttle_key)
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -447,6 +551,9 @@ def read_raw_config() -> dict[str, Any]:
 
 def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(raw)
+    web_cfg = result.get("web", {})
+    if isinstance(web_cfg, dict) and web_cfg.get("password"):
+        web_cfg["password"] = REDACTED
     tg = result.get("telegram", {})
     if tg.get("api_hash"):
         tg["api_hash"] = REDACTED
@@ -463,6 +570,10 @@ def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
 
 def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(candidate)
+    new_web = result.setdefault("web", {})
+    old_web = current.get("web", {})
+    if isinstance(new_web, dict) and new_web.get("password") == REDACTED:
+        new_web["password"] = old_web.get("password", "")
     new_tg = result.setdefault("telegram", {})
     old_tg = current.get("telegram", {})
     if new_tg.get("api_hash") == REDACTED:
@@ -533,11 +644,14 @@ def db_connect():
     return uploader.connect_db(cfg.db_path)
 
 
+_SCHEDULER_IDLE_NOTICE: dict = {"message": None}
+
+
 async def upload_job_scheduler_loop() -> None:
     """Opt-in durable job worker; SQL leases prevent duplicate claims.
 
-    Disabled unless TELEDRIVE_JOB_AUTO_RUN=1. Every cycle gets its own
-    connection; failures retain job metadata for explicit operator retry.
+    Disabled unless jobs.auto_run is enabled in config. Every cycle gets its
+    own connection; failures retain job metadata for explicit operator retry.
     """
     while True:
         conn = None
@@ -554,9 +668,18 @@ async def upload_job_scheduler_loop() -> None:
                 storage_transport(conn), allowed_root=root,
                 scratch_directory=scratch, chunk_size=RECOMMENDED_CHUNK_SIZE,
             )
+            _SCHEDULER_IDLE_NOTICE["message"] = None
             await asyncio.sleep(2 if result else 10)
         except asyncio.CancelledError:
             raise
+        except HTTPException as exc:
+            # Expected while no Telegram session or source root is configured;
+            # log the state change once instead of spamming every cycle.
+            message = f"scheduler idle: {exc.detail}"
+            if _SCHEDULER_IDLE_NOTICE["message"] != message:
+                _log(message, "scheduler")
+                _SCHEDULER_IDLE_NOTICE["message"] = message
+            await asyncio.sleep(60)
         except Exception as exc:
             # Do not log source paths, credentials or Telegram tokens.
             _log("durable upload job scheduler: " + type(exc).__name__, "scheduler")
@@ -640,6 +763,7 @@ async def lifespan(_: FastAPI):
     if WEB_PASSWORD and len(WEB_PASSWORD) < 16:
         raise RuntimeError("config.yaml web.password must be at least 16 characters")
     if DB_EXTRA_PACKAGES:
+        from teledrive.settings import install_db_extra_packages
         install_db_extra_packages(DB_EXTRA_PACKAGES, "/data/site-packages")
     # Permit a new unconfigured installation to serve health/configuration;
     # writes fail closed until a USER session connects.
@@ -670,7 +794,9 @@ app = FastAPI(
     description=(
         "Authenticated management API for Telegram upload accounts, queue/history, "
         "application configuration, execution and Telegram login challenges. "
-        "Use HTTP Basic credentials and set X-TeleDrive-CSRF: 1 for state-changing requests. "
+        "Authenticate via POST /api/auth/login (session token + httpOnly cookie); "
+        "role-based access control applies (admin/operator/viewer). "
+        "Set X-TeleDrive-CSRF: 1 for state-changing requests. "
         "Protect access with HTTPS or a trusted VPN."
     ),
     openapi_tags=[
@@ -692,7 +818,7 @@ async def _trusted_host_middleware(request: Request, call_next):
     # request instead of capturing the import-time default.
     host = (request.headers.get("host") or "").split(":")[0]
     if host and host not in ALLOWED_HOSTS:
-        raise HTTPException(400, "Invalid host header")
+        return JSONResponse(status_code=400, content={"detail": "Invalid host header"})
     return await call_next(request)
 
 
@@ -828,6 +954,19 @@ class VersionIndexRequest(BaseModel):
 class BucketCreateRequest(BaseModel):
     name: str = Field(min_length=3, max_length=63)
 
+def _assert_not_last_admin(conn, current_role: str,
+                            new_role: str | None = None) -> None:
+    """Refuse role changes or deletion that would remove the last admin."""
+    if current_role != "admin" or new_role == "admin":
+        return
+    from sqlalchemy import text as _text
+    admin_count = conn.connection.execute(_text(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+    )).scalar()
+    if admin_count <= 1:
+        raise HTTPException(409, "cannot remove the last admin")
+
+
 def storage_transport(conn):
     """Build the live USER-MTProto transport for REST/S3/local-job payload I/O.
 
@@ -907,23 +1046,49 @@ def redoc_docs(_: None = Depends(require_auth)):
 
 @app.post("/api/auth/login", tags=["Authentication"], summary="Login with username and password")
 def login(payload: dict, request: Request):
+    _same_origin(request)
     username = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))
     if not username or not password:
         raise HTTPException(400, "username and password are required")
+    client = request.client.host if request.client else "-"
+    throttle_key = f"login:{username}:{client}"
+    _auth_throttle_check(throttle_key)
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
         row = conn.connection.execute(_text(
-            "SELECT id, username, password_hash, role FROM users WHERE username = :u"
+            "SELECT id, username, password_hash, role, enabled FROM users "
+            "WHERE username = :u"
         ), {"u": username}).fetchone()
     finally:
         conn.close()
-    if row is None or not _verify_password(password, row[2]):
+    # Always run a hash comparison so response timing never reveals
+    # whether the username exists.
+    stored_hash = row[2] if row is not None else _dummy_password_hash()
+    valid = _verify_password(password, stored_hash)
+    if row is None or not valid:
+        _auth_failure_record(throttle_key)
         raise HTTPException(401, "Invalid credentials")
-    import secrets as _sec, time as _t
-    token = "td_sess_" + _sec.token_urlsafe(32)
-    now = int(_t.time())
+    if not row[4]:
+        _auth_failure_record(throttle_key)
+        raise HTTPException(403, "Account is disabled")
+    if not stored_hash.startswith("pbkdf2_sha256$"):
+        # Transparently upgrade legacy password hashes on successful login.
+        conn = db_connect()
+        try:
+            from sqlalchemy import text as _text
+            conn.connection.execute(_text(
+                "UPDATE users SET password_hash = :ph, updated_at = :now "
+                "WHERE id = :id"
+            ), {"ph": _hash_password(password), "now": int(time.time()),
+                "id": row[0]})
+            conn.connection.commit()
+        finally:
+            conn.close()
+    AUTH_FAILURES.pop(throttle_key, None)
+    token = "td_sess_" + secrets.token_urlsafe(32)
+    now = int(time.time())
     expires = now + 7 * 86400  # 7 days
     conn = db_connect()
     try:
@@ -931,7 +1096,8 @@ def login(payload: dict, request: Request):
         conn.connection.execute(_text(
             "INSERT INTO user_sessions (token, user_id, created_at, expires_at) "
             "VALUES (:token, :uid, :now, :exp)"
-        ), {"token": token, "uid": row[0], "now": now, "exp": expires})
+        ), {"token": _session_token_digest(token), "uid": row[0],
+            "now": now, "exp": expires})
         conn.connection.execute(_text(
             "UPDATE users SET last_login = :now WHERE id = :id"
         ), {"now": now, "id": row[0]})
@@ -939,31 +1105,35 @@ def login(payload: dict, request: Request):
     finally:
         conn.close()
     _log(f"login: username={username}", "auth")
-    from fastapi.responses import JSONResponse
     resp = JSONResponse(content={"token": token, "user": {"id": row[0], "username": row[1], "role": row[3]},
-                                 "expires_at": expires})
+                                  "expires_at": expires})
     resp.set_cookie(key="teledrive_session", value=token, httponly=True,
-                    max_age=7*86400, samesite="lax", path="/")
+                    max_age=7 * 86400, samesite="lax", path="/",
+                    secure=bool(SSL_CERTFILE))
     return resp
 
 
 @app.post("/api/auth/logout", tags=["Authentication"], summary="Logout and revoke session")
 def logout(request: Request):
+    _same_origin(request)
     user = _get_current_user(request)
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
+    else:
+        token = request.cookies.get("teledrive_session")
+    if token:
+        # Revoke the server-side session for BOTH Bearer and cookie clients.
         conn = db_connect()
         try:
             from sqlalchemy import text as _text
             conn.connection.execute(_text(
                 "DELETE FROM user_sessions WHERE token = :token"
-            ), {"token": token})
+            ), {"token": _session_token_digest(token)})
             conn.connection.commit()
         finally:
             conn.close()
     _log(f"logout: user={user['username'] if user else 'unknown'}", "auth")
-    from fastapi.responses import JSONResponse
     resp = JSONResponse(content={"ok": True})
     resp.delete_cookie(key="teledrive_session", path="/")
     return resp
@@ -977,22 +1147,11 @@ def me(request: Request):
     return {"user": user}
 
 
-@app.get("/", include_in_schema=False)
-def index(request: Request):
+def _serve_static_page(page_name: str, request: Request):
+    """Serve a static UI page; unauthenticated visitors are sent to /login."""
     try:
         require_auth(request)
     except HTTPException:
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/login", status_code=302)
-    return FileResponse(STATIC_DIR / "index.html")
-
-
-@app.get("/{page_name}.html", include_in_schema=False)
-def page_html(page_name: str, request: Request):
-    try:
-        require_auth(request)
-    except HTTPException:
-        from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/login", status_code=302)
     if page_name == "dashboard":
         page_name = "index"
@@ -1000,6 +1159,16 @@ def page_html(page_name: str, request: Request):
     if candidate.is_file():
         return FileResponse(candidate)
     raise HTTPException(404, "Page not found")
+
+
+@app.get("/", include_in_schema=False)
+def index(request: Request):
+    return _serve_static_page("index", request)
+
+
+@app.get("/{page_name}.html", include_in_schema=False)
+def page_html(page_name: str, request: Request):
+    return _serve_static_page(page_name, request)
 
 
 @app.get("/login", include_in_schema=False)
@@ -1012,17 +1181,7 @@ def page_route(page_name: str, request: Request):
     if page_name in {"api", "static", "openapi.json", "docs", "redoc",
                      "__health", "favicon.ico"}:
         raise HTTPException(404, "Not found")
-    try:
-        require_auth(request)
-    except HTTPException:
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/login", status_code=302)
-    if page_name == "dashboard":
-        page_name = "index"
-    candidate = STATIC_DIR / f"{page_name}.html"
-    if candidate.is_file():
-        return FileResponse(candidate)
-    raise HTTPException(404, "Page not found")
+    return _serve_static_page(page_name, request)
 
 
 @app.get("/api/config", tags=["Configuration"], summary="Read configuration (secrets redacted)")
@@ -1106,10 +1265,8 @@ def change_user_password(user_id: int, request: Request, payload: dict,
     new_pw = str(payload.get("password", ""))
     if len(new_pw) < 8:
         raise HTTPException(400, "password must be at least 8 characters")
-    import hashlib as _hl, secrets as _sec, time as _t
-    salt = _sec.token_hex(16)
-    pw_hash = salt + ":" + _hl.sha256((salt + new_pw).encode()).hexdigest()
-    now = int(_t.time())
+    pw_hash = _hash_password(new_pw)
+    now = int(time.time())
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
@@ -1148,13 +1305,7 @@ def change_user_role(user_id: int, request: Request, payload: dict,
         ), {"id": user_id}).fetchone()
         if row is None:
             raise HTTPException(404, "user not found")
-        # Prevent removing last admin
-        if row[1] == "admin" and role != "admin":
-            admin_count = conn.connection.execute(_text(
-                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
-            )).scalar()
-            if admin_count <= 1:
-                raise HTTPException(409, "cannot demote the last admin")
+        _assert_not_last_admin(conn, row[1], role)
         conn.connection.execute(_text(
             "UPDATE users SET role = :role, updated_at = :now WHERE id = :id"
         ), {"role": role, "now": int(time.time()), "id": user_id})
@@ -1213,13 +1364,9 @@ def update_user(user_id: int, request: Request, payload: dict,
         role = payload.get("role")
         enabled = payload.get("enabled")
 
-        # Prevent removing last admin
-        if role is not None and role != "admin" and row[1] == "admin":
-            admin_count = conn.connection.execute(_text(
-                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
-            )).scalar()
-            if admin_count <= 1:
-                raise HTTPException(409, "cannot demote the last admin")
+        # Prevent removing the last admin (row[2] is the current role).
+        if role is not None:
+            _assert_not_last_admin(conn, row[2], role)
 
         if username is not None:
             if not username or len(username) > 128:
@@ -1461,14 +1608,12 @@ def restore_published_version(
 def get_telegram_session(_: None = Depends(require_auth)):
     conn = db_connect()
     try:
-        from sqlalchemy import select
-        row = conn.connection.execute(
-            __import__("sqlalchemy").text(
-                "SELECT id, api_id, phone, account, channel, strategy, "
-                "created_at, updated_at FROM telegram_sessions "
-                "ORDER BY id DESC LIMIT 1"
-            )
-        ).fetchone()
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT id, api_id, phone, account, channel, strategy, "
+            "created_at, updated_at FROM telegram_sessions "
+            "ORDER BY id DESC LIMIT 1"
+        )).fetchone()
         if row is None:
             return {"configured": False, "session": None}
         return {
@@ -1497,7 +1642,7 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
                                  request: Request,
                                  _: None = Depends(require_auth)):
     _same_origin(request)
-    _log(f"request-code: api_id={payload.api_id} phone={payload.phone} channel={payload.channel}", "telegram-session")
+    _log(f"request-code: api_id={payload.api_id} channel={payload.channel}", "telegram-session")
     if payload.api_id <= 0 or not payload.api_hash or not payload.phone:
         raise HTTPException(400, "api_id, api_hash and phone are required")
     import secrets as _secrets
@@ -1577,7 +1722,7 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                                 request: Request,
                                 _: None = Depends(require_auth)):
     _same_origin(request)
-    _log(f"verify-code: token={payload.token[:8]}... code={payload.code}", "telegram-session")
+    _log(f"verify-code: token={payload.token[:8]}...", "telegram-session")
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
@@ -1612,12 +1757,17 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             client = TelegramClient(StringSession(), api_id, api_hash,
                                     receive_updates=False, flood_sleep_threshold=0)
             await client.connect()
+            from telethon.errors import SessionPasswordNeededError
             try:
                 await client.sign_in(phone, code=payload.code,
                                      phone_code_hash=phone_code_hash,
                                      password=payload.password or None)
+            except SessionPasswordNeededError:
+                # 2FA is required but no/incorrect password was supplied;
+                # do NOT blindly retry without it (masks real errors).
+                raise
             except Exception:
-                # Fall back to password-less / code-only sign-in.
+                # Fall back to code-only sign-in when no password is needed.
                 await client.sign_in(phone, code=payload.code,
                                      phone_code_hash=phone_code_hash)
             if not await client.is_user_authorized():
@@ -1852,7 +2002,8 @@ def get_active_channel(_: None = Depends(require_auth)):
         conn.close()
 
 @app.get("/api/logs", tags=["System"], summary="Read recent redacted activity logs")
-def logs(limit: int = 1000, _: None = Depends(require_auth)):
+def logs(limit: int = Query(default=1000, ge=1, le=1500),
+         _: None = Depends(require_auth)):
     combined = list(LOG_BUFFER)[-limit:]
     combined = list(reversed(combined))
     entries = []
@@ -1904,10 +2055,8 @@ def create_user(request: Request, payload: UserCreateRequest,
         raise HTTPException(400, "role must be admin, operator or viewer")
     if len(payload.password) < 8:
         raise HTTPException(400, "password must be at least 8 characters")
-    import hashlib as _hl, secrets as _sec, time as _t
-    salt = _sec.token_hex(16)
-    pw_hash = salt + ":" + _hl.sha256((salt + payload.password).encode()).hexdigest()
-    now = int(_t.time())
+    pw_hash = _hash_password(payload.password)
+    now = int(time.time())
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
@@ -1935,17 +2084,12 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
-        # Prevent deleting the last admin
-        admin_count = conn.connection.execute(_text(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin'"
-        )).scalar()
         row = conn.connection.execute(_text(
             "SELECT username, role FROM users WHERE id = :id"
         ), {"id": user_id}).fetchone()
         if row is None:
             raise HTTPException(404, "user not found")
-        if row[1] == "admin" and admin_count <= 1:
-            raise HTTPException(409, "cannot delete the last admin")
+        _assert_not_last_admin(conn, row[1])
         conn.connection.execute(_text(
             "DELETE FROM users WHERE id = :id"
         ), {"id": user_id})
@@ -1975,13 +2119,10 @@ def admin_list_buckets(_: None = Depends(require_auth)):
             ), {"b": b}).fetchone()
             count = row[0] if row else 0
             size = row[1] if row else 0
-            # Get quota
-            qrow = conn.connection.execute(_text(
-                "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
-            ), {"b": b}).fetchone()
+            max_size, max_objects = _bucket_quota(conn, b)
             quota = None
-            if qrow:
-                quota = {"max_size_bytes": qrow[0], "max_objects": qrow[1]}
+            if max_size is not None or max_objects is not None:
+                quota = {"max_size_bytes": max_size, "max_objects": max_objects}
             result.append({"name": b, "object_count": count,
                            "total_size": size, "quota": quota})
         return {"buckets": result}
@@ -1991,8 +2132,9 @@ def admin_list_buckets(_: None = Depends(require_auth)):
 
 @app.get("/api/v1/admin/storage/buckets/{bucket}/objects", tags=["Object catalog"],
          summary="List objects in a bucket (WebUI)")
-def admin_list_objects(bucket: str, prefix: str = "",
-                       limit: int = 100,
+def admin_list_objects(bucket: str,
+                       prefix: str = Query("", max_length=1024),
+                       limit: int = Query(100, ge=1, le=1000),
                        _: None = Depends(require_auth)):
     conn = db_connect()
     try:
@@ -2010,9 +2152,10 @@ def admin_list_objects(bucket: str, prefix: str = "",
 
 @app.delete("/api/v1/admin/storage/buckets/{bucket}/objects", tags=["Object catalog"],
             summary="Delete an object (WebUI)")
-def admin_delete_object(bucket: str, key: str,
+def admin_delete_object(bucket: str, request: Request,
+                        key: str = Query(..., min_length=1, max_length=1024),
                         _: None = Depends(require_auth)):
-    from fastapi import Query as _Q
+    _same_origin(request)
     conn = db_connect()
     try:
         try:
@@ -2029,18 +2172,52 @@ class BucketQuotaRequest(BaseModel):
     max_objects: int | None = None
 
 
+def _bucket_quota(conn, bucket: str) -> tuple[int | None, int | None]:
+    """Return (max_size_bytes, max_objects) for a bucket; (None, None) if unset."""
+    from sqlalchemy import text as _text
+    row = conn.connection.execute(_text(
+        "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
+    ), {"b": bucket}).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _enforce_bucket_quota(conn, bucket: str, key: str, incoming_size: int) -> None:
+    """TeleDrive-level per-bucket quota enforcement (S3 has no native quota).
+
+    Raises HTTPException 413 when the upload would exceed the configured
+    maximum total size or object count. Overwrites of an existing key do not
+    count against the object limit.
+    """
+    max_size_q, max_objects_q = _bucket_quota(conn, bucket)
+    if max_size_q is None and max_objects_q is None:
+        return
+    from sqlalchemy import text as _text
+    if max_size_q is not None:
+        cur_size = conn.connection.execute(_text(
+            "SELECT COALESCE(SUM(size),0) FROM storage_objects "
+            "WHERE bucket = :b AND is_current = 1"
+        ), {"b": bucket}).scalar() or 0
+        if cur_size + incoming_size > max_size_q:
+            raise HTTPException(413, "Upload exceeds bucket quota (max size)")
+    if max_objects_q is not None:
+        cur_count = conn.connection.execute(_text(
+            "SELECT COUNT(*) FROM storage_objects WHERE bucket = :b AND is_current = 1"
+        ), {"b": bucket}).scalar() or 0
+        existing = conn.connection.execute(_text(
+            "SELECT COUNT(*) FROM storage_objects "
+            "WHERE bucket = :b AND key = :k AND is_current = 1"
+        ), {"b": bucket, "k": key}).scalar() or 0
+        if existing == 0 and cur_count >= max_objects_q:
+            raise HTTPException(413, "Upload exceeds bucket quota (max objects)")
+
+
 @app.get("/api/v1/admin/storage/buckets/{bucket}/quota", tags=["Object catalog"],
          summary="Get bucket quota")
 def admin_get_quota(bucket: str, _: None = Depends(require_auth)):
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
-        ), {"b": bucket}).fetchone()
-        if row is None:
-            return {"bucket": bucket, "max_size_bytes": None, "max_objects": None}
-        return {"bucket": bucket, "max_size_bytes": row[0], "max_objects": row[1]}
+        max_size, max_objects = _bucket_quota(conn, bucket)
+        return {"bucket": bucket, "max_size_bytes": max_size, "max_objects": max_objects}
     finally:
         conn.close()
 
@@ -2662,29 +2839,7 @@ async def put_object_content(
             sink.flush()
             os.fsync(sink.fileno())
         # Enforce bucket quota (TeleDrive-level; S3 has no native quota).
-        from sqlalchemy import text as _text
-        qrow = conn.connection.execute(_text(
-            "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
-        ), {"b": bucket}).fetchone()
-        if qrow:
-            max_size_q, max_objects_q = qrow
-            if max_size_q is not None:
-                cur_size = conn.connection.execute(_text(
-                    "SELECT COALESCE(SUM(size),0) FROM storage_objects "
-                    "WHERE bucket = :b AND is_current = 1"
-                ), {"b": bucket}).scalar() or 0
-                if cur_size + transferred > max_size_q:
-                    raise HTTPException(413, "Upload exceeds bucket quota (max size)")
-            if max_objects_q is not None:
-                cur_count = conn.connection.execute(_text(
-                    "SELECT COUNT(*) FROM storage_objects WHERE bucket = :b AND is_current = 1"
-                ), {"b": bucket}).scalar() or 0
-                # Check if this is a new object (not an overwrite)
-                existing = conn.connection.execute(_text(
-                    "SELECT COUNT(*) FROM storage_objects WHERE bucket = :b AND key = :k AND is_current = 1"
-                ), {"b": bucket, "k": key}).scalar() or 0
-                if existing == 0 and cur_count >= max_objects_q:
-                    raise HTTPException(413, "Upload exceeds bucket quota (max objects)")
+        _enforce_bucket_quota(conn, bucket, key, transferred)
         engine = TelegramObjectStorage(manifests, transport,
                                        chunk_size=RECOMMENDED_CHUNK_SIZE,
                                        scratch_directory=stage_root)

@@ -1231,3 +1231,30 @@ def test_bucket_cors_management(authenv):
     viewer = _bearer(client, "viewuser", "viewer-password-1")
     assert client.put(base, headers={**viewer, **CSRF},
                       json={"rules": []}).status_code == 403
+
+
+def test_logs_websocket_stream(authenv):
+    """Live log stream: cookie-authenticated sockets receive the backlog
+    and new entries; unauthenticated ones close with 4401."""
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    web.LOG_BUFFER.clear()
+    with client.websocket_connect(
+            "/api/v1/logs/stream",
+            cookies={"teledrive_session": client.cookies.get(
+                "teledrive_session", "")}) as ws:
+        # A fresh entry must arrive on the stream (bounded drain loop in
+        # case anything was logged between clear and connect).
+        web._log("ws-probe-message", "test")
+        pushed = ""
+        for _ in range(50):
+            pushed = ws.receive_text()
+            if "ws-probe-message" in pushed:
+                break
+        assert "ws-probe-message" in pushed
+
+    # Unauthenticated handshake: close code 4401 before accept.
+    with pytest.raises(Exception):
+        with client.websocket_connect("/api/v1/logs/stream") as ws:
+            ws.receive_text()

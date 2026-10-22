@@ -21,7 +21,8 @@ from urllib.parse import urlsplit
 from typing import Any
 
 import yaml
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import (Body, Depends, FastAPI, HTTPException, Query, Request,
+                     WebSocket, WebSocketDisconnect, status)
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from pydantic import BaseModel, Field
@@ -156,6 +157,8 @@ def _reload_service_settings() -> None:
     os.environ["TELEDRIVE_LOCK_DIR"] = settings.lock_dir
     os.environ["TELEDRIVE_S3_MASTER_KEY_FILE"] = settings.s3_master_key_file
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
+# Live log subscribers: asyncio queues fed by _log (thread-safe handoff).
+_LOG_WAITERS: set = set()
 
 
 class RotatingCompressedFileHandler(RotatingFileHandler):
@@ -224,7 +227,16 @@ def _extract_user(request: Request) -> str:
 def _log(msg: str, source: str = "web", user: str = "system") -> None:
     """Append a timestamped, user-tagged, source-tagged entry to LOG_BUFFER."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    LOG_BUFFER.append(f"[{ts}] [{user}] [{source}] {msg}")
+    entry = f"[{ts}] [{user}] [{source}] {msg}"
+    LOG_BUFFER.append(entry)
+    # Push to live WebSocket subscribers. _log can run in worker threads,
+    # so the handoff to the main event loop must be thread-safe.
+    if _LOG_WAITERS and _main_event_loop is not None and not _main_event_loop.is_closed():
+        try:
+            for waiter in list(_LOG_WAITERS):
+                _main_event_loop.call_soon_threadsafe(waiter.put_nowait, entry)
+        except RuntimeError:
+            pass
     try:
         import logging as _logging
         record = _logging.LogRecord(
@@ -2646,6 +2658,45 @@ def get_active_channel(_: None = Depends(require_auth)):
                            "strategy": row[3], "scratch_dir": row[4]}}
     finally:
         conn.close()
+
+@app.websocket("/api/v1/logs/stream")
+async def logs_stream(websocket: WebSocket):
+    """Live log stream: the initial backlog plus every new entry.
+
+    Authentication mirrors the REST API (session cookie on the
+    handshake, Bearer via query is NOT offered — tokens must not live
+    in URLs). Unauthenticated sockets close before accepting.
+    """
+    token = websocket.cookies.get("teledrive_session") if websocket.cookies else None
+    user = None
+    if token:
+        class _Shim:
+            headers = {}
+            cookies = {"teledrive_session": token}
+        user = _get_current_user(_Shim())  # type: ignore[arg-type]
+    if user is None:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    # Bootstrap the main-loop reference when lifespan did not run (e.g.
+    # test harnesses): the push path in _log needs it for the
+    # thread-safe handoff.
+    global _main_event_loop
+    if _main_event_loop is None:
+        _main_event_loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    _LOG_WAITERS.add(queue)
+    try:
+        for entry in list(LOG_BUFFER)[-200:]:
+            await websocket.send_text(entry)
+        while True:
+            entry = await queue.get()
+            await websocket.send_text(entry)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _LOG_WAITERS.discard(queue)
+
 
 @app.get("/api/v1/logs", tags=["System"], summary="Read recent redacted activity logs")
 @app.get("/api/logs", tags=["System"], include_in_schema=False)

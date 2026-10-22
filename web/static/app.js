@@ -766,10 +766,49 @@ function app(){
       this.logLive = !this.logLive;
       if(this.logLive){
         this.loadLogs();
-        this._logTimer = setInterval(()=>this.loadLogs(), 3000);
+        this._startLogStream();
       } else {
-        if(this._logTimer){ clearInterval(this._logTimer); this._logTimer=null; }
+        this._stopLogStream();
       }
+    },
+
+    _startLogStream(){
+      // Live logs over WebSocket; falls back to 3s polling when the
+      // socket cannot be established (proxy without WS support).
+      this._stopLogStream();
+      try {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(proto + '//' + location.host + '/api/v1/logs/stream');
+        this._logWs = ws;
+        ws.onmessage = (ev)=>{
+          // "[ts] [user] [source] message" — same pipeline as loadLogs.
+          const m = ev.data.match(/^\[(.+)\] \[(.*)\] \[(.*)\] (.*)$/);
+          if(m) this._ingestLogEntries([{ts:m[1], user:m[2], source:m[3], message:m[4]}], true);
+        };
+        ws.onclose = ()=>{
+          if(this.logLive && this._logWs === ws){
+            this._logWs = null;
+            if(!this._logTimer) this._logTimer = setInterval(()=>this.loadLogs(), 3000);
+          }
+        };
+      } catch(e){
+        this._logTimer = setInterval(()=>this.loadLogs(), 3000);
+      }
+    },
+
+    _stopLogStream(){
+      if(this._logWs){ try{ this._logWs.close(); }catch(e){} this._logWs = null; }
+      if(this._logTimer){ clearInterval(this._logTimer); this._logTimer=null; }
+    },
+
+    _ingestLogEntries(entries, append){
+      let list = append ? this.logEntries.concat(entries) : entries;
+      this.logHiddenCount = this.logHideNoise
+        ? list.filter(e => e.source==='http' && LOG_NOISE_RE.test(e.message)).length : 0;
+      if(this.logHideNoise) list = list.filter(e => !(e.source==='http' && LOG_NOISE_RE.test(e.message)));
+      const filter = (this.logFilter||'').trim().toLowerCase();
+      if(filter) list = list.filter(e => (e.ts+' '+e.user+' '+e.source+' '+e.message).toLowerCase().includes(filter));
+      this.logEntries = list.slice(-(this.logLimit||1000));
     },
 
     async loadUsers(){

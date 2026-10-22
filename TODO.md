@@ -114,7 +114,12 @@
       text exposition format — job states, bucket quotas+usage, Telegram
       session health, flood observations and live cooldowns; scrape with
       the same HTTP auth as any API route).
-- [ ] WebSocket live logs and live job progress (replace polling).
+- [x] WebSocket live logs DONE: /api/v1/logs/stream pushes the backlog
+      plus every new entry (thread-safe queue handoff from _log, with
+      main-loop bootstrap for lifespan-less harnesses);
+      cookie-authenticated handshake, unauthenticated close 4401. The
+      logs page Live mode uses the socket and falls back to 3s polling
+      automatically when WS is unavailable (e.g. proxy without upgrade).
 - [ ] Two-person approval for destructive actions (owner gate #4).
 - [ ] UploadPartCopy (S3 P2-E): server-side part copy for efficient
       rclone/boto3 large-object copies.

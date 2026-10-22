@@ -18,7 +18,7 @@
 
 **Published release:** [v1.0.7](https://github.com/babico/TeleDrive/releases/tag/v1.0.7), source SHA `747747652cd1ca36878453d49daf627d8c0a60ad`. Published release contents are not automatically updated when new development commits reach `main`. Release notes and binaries belong on [GitHub Releases](https://github.com/babico/TeleDrive/releases), not in a separate per-version Markdown file.
 
-**Verified newer development baseline:** `c2b76880b4ada3d61d47a7926ea819244047fa33`; all nine normal CI workflows completed successfully on that exact SHA. Its guarded delivery job also removed seven merged PR branches; only `main` remained. Since then the matrix has become **seven workflows** (the Bot E2E and Desktop workflows were removed with their features). For any *later* source SHA, read its own [Actions runs](https://github.com/babico/TeleDrive/actions) before making a CI claim. A cancelled, pending or fully skipped required workflow is not evidence of successful live acceptance.
+**Verified engineering checkpoint (2026-10-22):** `main` `3aa70d18dc227ff06d9a0d735785ced0e46cfccf` had **5/6** required workflows green; **CI 2 Integration failed** because a storage-jobs test assumed the retired `TELEDRIVE_JOB_SOURCE_ROOT` environment variable controlled configuration and expected 503 where an out-of-root file correctly yielded 422. The audit PR fixes this stale test and checks both negative cases. It must be independently rechecked at its own SHA before any release. The current matrix is **six main-push workflows** and one separately dispatched endurance workflow; historical Bot E2E and Desktop workflows are retired. A previous green SHA is not evidence for a later commit. See [Verification Report](VERIFICATION_2026-10-22.md) and [Actions](https://github.com/babico/TeleDrive/actions).
 
 ### P0: implementation boundaries
 
@@ -42,7 +42,7 @@ A production installation, original legacy files, signed operator approval, an h
 
 ### A single service deployment
 
-The default [`docker-compose.yml`](../docker-compose.yml) creates **one `teledrive` container** and one Python process with two local listeners. There is no desktop application, no Bot API transport and no separate S3 container. One or more Telegram API credential sets are configured as an **`apis:` list** in `config/config.yaml` (`{api_id, api_hash, session_file, account}` entries sharing the same dedicated channel) with `round_robin` (default) or `failover` flood-rejection rotation; env comma-lists remain a legacy fallback.
+The default [`docker-compose.yml`](../docker-compose.yml) creates **one `teledrive` container** and one Python process with two local listeners. There is no desktop application, no Bot API transport and no separate S3 container. One or more Telegram API credential sets are configured as an **`apis:` list** in `config/config.yaml` (`{api_id, api_hash, session_file, account}` entries sharing the same dedicated channel) with `single`, `round_robin` (default), `failover` or `parallel` routing; environment comma-lists are no longer an authoritative settings source.
 
 | Interface | Local endpoint | Auth model | Storage |
 | --- | --- | --- | --- |
@@ -194,7 +194,7 @@ Only SQL-only incomplete-multipart lifecycle abort is now supported, applied by 
 - [x] Publish bounded v1.0.7 development milestone with separate release artifacts and evidence.
 - [x] Implement disposable 13-gate Docker validation and distinct live test-channel User/Multiworker workflows (historical Bot exercises retired with the Bot layer).
 - [x] Implement fail-closed recovery guards, owner-proofed isolated one/multi-object rebuild and an offline dual-approval evidence verifier.
-- [x] Verify nine normal workflows on the newer `aa44bd6` development baseline (not the published v1.0.7 SHA). The current matrix has **seven workflows**: Security, REST & S3, Databases, Docker Fault Injection, User MTProto E2E, Multiworker PostgreSQL E2E and the Release Gate. Release packaging now ships the single-container Docker image instead of desktop installers.
+- [x] Verify nine normal workflows on the newer `aa44bd6` development baseline (not the published v1.0.7 SHA). The current matrix has **six workflows**: Security, REST & S3, Databases, Docker Fault Injection, User MTProto E2E, Multiworker PostgreSQL E2E and the Release Gate. Release packaging now ships the single-container Docker image instead of desktop installers.
 - [ ] Verify **every required workflow on the exact SHA** of any subsequent release candidate.
 - [x] Native PostgreSQL restore drill performed on 192.168.21.2 (source teledrivetest -> restored teledriverestoredrill): pg_dump -Fc exit 0, pg_restore exit 0, 20 tables + row counts identical, TeleDrive container healthy against restored DB. Evidence in .opencode/teledrive-handoff/progress.md.
 - [ ] Implement and independently rehearse the complete physical GC safety/rollback alternative before authorizing deletion.

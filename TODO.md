@@ -226,9 +226,14 @@ come from simply authorizing more accounts.
       declarations, and three hardcoded /data paths that broke
       non-Docker deployments.
 - [x] Checkboxes themed (accent-color) on every page.
-- [ ] S3 + API permission UI modernization: replace the current
-      permission-granting controls; add viewing existing S3 credential
-      SECRETS and editing access keys.
+- [x] S3 credential SECRET VIEWING DONE: GET /api/v1/admin/
+      s3-credentials/{id}/secret (admin-only, audit-logged) decrypts and
+      returns the secret on demand; credentials page gained a Show
+      secret button with a confirm + warning box. Revoked credentials
+      and unknown ids are rejected; master-key changes surface as a
+      clear error.
+- [ ] Permission UI modernization (remaining): replace the raw
+      permission-checkbox grid with grouped, explained actions.
 - [x] S3 credential EDITING DONE: PUT /api/v1/admin/s3-credentials/{id}
       edits name, permission set and expiry of ACTIVE credentials
       (revoked ones are immutable; access key and secret never change —

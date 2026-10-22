@@ -124,3 +124,33 @@ def test_credential_editing(admin):
     assert client.put("/api/v1/admin/s3-credentials/nope",
                       auth=auth, headers=csrf,
                       json={"name": "x"}).status_code == 422
+
+
+def test_credential_secret_reveal(admin):
+    """GET /admin/s3-credentials/{id}/secret: admin-only, audit-logged."""
+    client, url, master = admin
+    auth = ("testadmin", "secure-auth-password")
+    csrf = {"X-TeleDrive-CSRF": "1"}
+
+    r = client.post("/api/v1/admin/s3-credentials", auth=auth, headers=csrf,
+                    json={"name": "reveal-me",
+                          "permissions": ["s3:GetObject"]})
+    created = r.json()
+
+    # The revealed secret matches the one shown at creation.
+    r = client.get(f"/api/v1/admin/s3-credentials/{created['id']}/secret",
+                   auth=auth)
+    assert r.status_code == 200
+    revealed = r.json()
+    assert revealed["access_key"] == created["access_key"]
+    assert revealed["secret_key"] == created["secret_key"]
+
+    # Unknown identifier and revoked credentials are rejected.
+    assert client.get("/api/v1/admin/s3-credentials/nope/secret",
+                      auth=auth).status_code == 422
+    client.delete(f"/api/v1/admin/s3-credentials/{created['id']}",
+                  auth=auth, headers=csrf)
+    r = client.get(f"/api/v1/admin/s3-credentials/{created['id']}/secret",
+                   auth=auth)
+    assert r.status_code == 422
+    assert "Revoked" in r.json()["detail"]

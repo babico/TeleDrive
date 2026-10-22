@@ -79,6 +79,7 @@ function app(){
     selectedS3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:PutObject','s3:DeleteObject'],
     s3Keys: [],
     s3Edit: null,
+    revealedS3: null,
     createdS3: null,
 
     // Logs
@@ -460,6 +461,12 @@ function app(){
       catch(e){ this.toast(e.message,true); }
     },
 
+    async revealS3Secret(k){
+      if(!confirm('Reveal the secret for '+k.name+'? This action is audit-logged.')) return;
+      try {
+        this.revealedS3 = await this.api('/api/v1/admin/s3-credentials/'+k.id+'/secret');
+      } catch(e){ this.toast(e.message,true); }
+    },
     startS3Edit(k){
       this.s3Edit = {id: k.id, access_key: k.access_key, name: k.name,
                      permissions: [...(k.permissions||[])]};

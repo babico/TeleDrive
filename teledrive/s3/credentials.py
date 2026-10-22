@@ -130,6 +130,28 @@ class S3CredentialStore:
         except (InvalidToken, ValueError, UnicodeError):
             return None
 
+    def reveal(self, identifier: str) -> dict:
+        """Decrypt and return an ACTIVE credential's secret (admin only).
+
+        Secrets are encrypted at rest and shown on demand; every reveal
+        must be audit-logged by the caller.
+        """
+        row = self.db.connection.execute(select(
+            credentials.c.id, credentials.c.access_key,
+            credentials.c.encrypted_secret, credentials.c.revoked,
+        ).where((credentials.c.id == identifier)
+                | (credentials.c.access_key == identifier))).first()
+        if not row:
+            raise ValueError("Unknown credential")
+        if row[3]:
+            raise ValueError("Revoked credentials have no active secret")
+        try:
+            secret = self.cipher.decrypt(row[2].encode()).decode()
+        except (InvalidToken, ValueError, UnicodeError):
+            raise ValueError("Credential secret cannot be decrypted "
+                             "(master key changed?)") from None
+        return {"id": row[0], "access_key": row[1], "secret_key": secret}
+
     def update(self, identifier: str, *, name: str | None = None,
                permissions: list[str] | None = None,
                expires_at: int | None = None,

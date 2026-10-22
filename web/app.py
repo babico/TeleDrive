@@ -3644,6 +3644,27 @@ def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
         conn.close()
 
 
+@app.get("/api/v1/admin/s3-credentials/{identifier}/secret",
+         tags=["API keys"],
+         summary="Reveal an S3 credential secret (admin only, audit-logged)")
+def reveal_s3_credential_secret(identifier: str,
+                                _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        try:
+            revealed = S3CredentialStore(
+                conn, load_master_key()).reveal(identifier)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        _log(f"s3 credential secret revealed: id={identifier} "
+             f"access={revealed['access_key']}", "security")
+        return revealed
+    finally:
+        conn.close()
+
+
 @app.put("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
          summary="Edit an active S3 credential (name, permissions, expiry)")
 def update_s3_credentials(request: Request, identifier: str,

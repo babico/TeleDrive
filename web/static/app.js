@@ -378,6 +378,23 @@ function app(){
         await this.refreshTgSessionStatus();
       }
     },
+    quotaEditAccount: null,
+    quotaEditBytes: '',
+    async editAccountQuota(s){
+      this.quotaEditAccount = s.account;
+      this.quotaEditBytes = s.soft_quota_bytes || '';
+    },
+    async saveAccountQuota(){
+      const raw = String(this.quotaEditBytes).trim();
+      const value = raw === '' ? null : Number(raw);
+      try {
+        await this.api('/api/v1/admin/storage/telegram-sessions/'+encodeURIComponent(this.quotaEditAccount)+'/quota',
+          {method:'PUT', body: JSON.stringify({soft_quota_bytes: value})});
+        this.toast('Soft quota saved');
+        this.quotaEditAccount = null;
+        await this.refreshTgSessionStatus();
+      } catch(e){ this.toast(e.message,true); }
+    },
     async checkTgSession(account){
       this.tgChecking = account;
       try {

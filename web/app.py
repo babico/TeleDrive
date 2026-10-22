@@ -1967,6 +1967,44 @@ async def telegram_session_health_loop() -> None:
         await asyncio.sleep(1800)
 
 
+@app.put("/api/v1/admin/storage/telegram-sessions/{account}/quota",
+         tags=["Storage jobs"],
+         summary="Set an account's soft quota (preferred routing headroom)")
+def set_telegram_session_quota(account: str, request: Request,
+                               payload: dict = Body(...),
+                               _: None = Depends(require_auth)):
+    _same_origin(request)
+    account = account.strip()
+    if not account:
+        raise HTTPException(400, "account is required")
+    raw = payload.get("soft_quota_bytes")
+    if raw is not None:
+        try:
+            quota = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "soft_quota_bytes must be an integer "
+                                     "or null") from None
+        if not 0 <= quota <= 2**63 - 1:
+            raise HTTPException(422, "soft_quota_bytes out of range")
+    else:
+        quota = None
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        changed = conn.connection.execute(_text(
+            "UPDATE telegram_sessions SET soft_quota_bytes = :q, "
+            "updated_at = :now WHERE account = :account"
+        ), {"q": quota, "now": int(time.time()), "account": account}).rowcount
+        conn.connection.commit()
+    finally:
+        conn.close()
+    if not changed:
+        raise HTTPException(404, "Unknown Telegram session account")
+    _log(f"account soft quota set: account={account} "
+         f"quota={quota if quota is not None else 'unlimited'}", "storage")
+    return {"ok": True, "account": account, "soft_quota_bytes": quota}
+
+
 @app.post("/api/v1/admin/storage/telegram-sessions/{account}/health-check",
           tags=["Storage jobs"],
           summary="Probe one Telegram session for authorization now")
@@ -1989,8 +2027,8 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
         from sqlalchemy import text as _text
         rows = conn.connection.execute(_text(
             "SELECT account, api_id, phone, channel, strategy, created_at, "
-            "updated_at, authorized, health_checked_at FROM "
-            "telegram_sessions ORDER BY account")).fetchall()
+            "updated_at, authorized, health_checked_at, soft_quota_bytes "
+            "FROM telegram_sessions ORDER BY account")).fetchall()
         # Usage, cooldowns and flood observations live in the storage
         # catalog tables; degrade gracefully when this deployment's web
         # database does not carry them.
@@ -2022,7 +2060,7 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
         conn.close()
     sessions = []
     for account, api_id, phone, channel, strategy, created, updated, \
-            authorized, checked in rows:
+            authorized, checked, soft_quota in rows:
         objects, total = usage.get(str(account), (0, 0))
         remaining_ms = max(0, cooldowns.get(str(account), 0) - now_ms)
         sessions.append({
@@ -2035,6 +2073,7 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
             "flood_observations": floods.get(str(account), 0),
             "authorized": None if authorized is None else bool(authorized),
             "health_checked_at": checked,
+            "soft_quota_bytes": soft_quota,
         })
     try:
         active_strategy = str(((read_raw_config() or {})
@@ -3329,11 +3368,23 @@ def prometheus_metrics(_: None = Depends(require_auth)):
                 "1 = authorized, 0 = expired/revoked.",
                 "# TYPE teledrive_telegram_session_authorized gauge",
             ]
+        quotas = conn.connection.execute(_text(
+            "SELECT account, soft_quota_bytes FROM telegram_sessions"
+        )).fetchall()
         for account, authorized in sessions:
             label = 'account="%s"' % _prom_escape(account)
             if authorized is not None:
                 lines.append("teledrive_telegram_session_authorized{%s} %d"
                              % (label, int(authorized)))
+        if quotas:
+            lines += ["# HELP teledrive_telegram_session_soft_quota_bytes "
+                      "Configured soft quota (omitted = unlimited).",
+                      "# TYPE teledrive_telegram_session_soft_quota_bytes gauge"]
+            for account, quota in quotas:
+                if quota is not None:
+                    lines.append('teledrive_telegram_session_soft_quota_bytes'
+                                 '{account="%s"} %d'
+                                 % (_prom_escape(account), int(quota)))
 
         # Rate-guard tables live in the storage catalog; degrade quietly
         # when this deployment's web database does not carry them.

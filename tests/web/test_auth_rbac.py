@@ -1308,3 +1308,43 @@ def test_storage_usage_series(authenv):
     viewer = _bearer(client, "viewuser", "viewer-password-1")
     assert client.get("/api/v1/admin/storage/usage",
                       headers=viewer).status_code == 200
+
+
+def test_account_soft_quota(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "quota-user")
+    finally:
+        db.close()
+
+    # Set, read back through the sessions list.
+    r = client.put(
+        "/api/v1/admin/storage/telegram-sessions/quota-user/quota",
+        headers={**admin, **CSRF}, json={"soft_quota_bytes": 1073741824})
+    assert r.status_code == 200
+    body = client.get("/api/v1/admin/storage/telegram-sessions",
+                      headers=admin).json()
+    entry = next(s for s in body["sessions"]
+                 if s["account"] == "quota-user")
+    assert entry["soft_quota_bytes"] == 1073741824
+
+    # Unlimited via null; validation and 404 paths.
+    assert client.put(
+        "/api/v1/admin/storage/telegram-sessions/quota-user/quota",
+        headers={**admin, **CSRF},
+        json={"soft_quota_bytes": None}).status_code == 200
+    assert client.put(
+        "/api/v1/admin/storage/telegram-sessions/quota-user/quota",
+        headers={**admin, **CSRF},
+        json={"soft_quota_bytes": "garbage"}).status_code == 422
+    assert client.put(
+        "/api/v1/admin/storage/telegram-sessions/ghost/quota",
+        headers={**admin, **CSRF},
+        json={"soft_quota_bytes": 1}).status_code == 404
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.put(
+        "/api/v1/admin/storage/telegram-sessions/quota-user/quota",
+        headers={**viewer, **CSRF},
+        json={"soft_quota_bytes": 1}).status_code == 403

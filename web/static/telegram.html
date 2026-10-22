@@ -172,7 +172,17 @@ tailwind.config = {
       <button class="btn btn-primary" @click="sendTgCode()">Send code</button>
       <span class="muted" x-text="tgSessionStatus"></span>
     </div>
-    <div class="card mt-4" x-show="tgSessions.length" x-cloak>
+    <div class="card bg-gray-900 mt-3" x-show="quotaEditAccount" x-cloak>
+    <h4 x-text="'Soft quota — ' + quotaEditAccount"></h4>
+    <p class="muted text-xs">Preferred routing keeps this account under its soft quota. Empty = unlimited. Enforcement (routing) is the next increment; today it is monitored here, in metrics and in health checks.</p>
+    <div class="row" style="align-items:flex-end">
+      <div class="field" style="flex:0 0 240px"><label>Soft quota (bytes)</label><input x-model="quotaEditBytes" class="input" type="number" placeholder="unlimited"></div>
+      <button class="btn btn-primary btn-sm" @click="saveAccountQuota()">Save</button>
+      <button class="btn btn-sm" @click="quotaEditAccount=null">Cancel</button>
+    </div>
+  </div>
+
+  <div class="card mt-4" x-show="tgSessions.length" x-cloak>
       <h3>Authorized accounts (<span x-text="tgSessions.length"></span>)</h3>
       <div class="row" style="align-items:flex-end">
         <div class="field" style="flex:0 0 320px">
@@ -187,7 +197,7 @@ tailwind.config = {
         <p class="muted text-xs" style="flex:1;margin:0">Takes effect immediately (runtime reloads). A FloodWait on one account automatically fails over to the others. Add another account by logging in above with a different phone number.</p>
       </div>
       <table>
-        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Objects</th><th>Size</th><th>Flood</th><th>Health</th><th>Updated</th><th></th></tr></thead>
+        <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Objects</th><th>Size</th><th>Soft quota</th><th>Flood</th><th>Health</th><th>Updated</th><th></th></tr></thead>
         <tbody>
           <template x-for="s in tgSessions" :key="s.account">
             <tr>
@@ -196,6 +206,12 @@ tailwind.config = {
               <td x-text="s.api_id"></td>
               <td x-text="s.objects"></td>
               <td x-text="fmtBytes(s.bytes)"></td>
+              <td>
+                <span x-show="s.soft_quota_bytes" x-text="fmtBytes(s.soft_quota_bytes)" :class="s.bytes > s.soft_quota_bytes ? 'text-red-400 font-bold' : ''"
+                      :title="s.bytes > s.soft_quota_bytes ? 'OVER soft quota (' + fmtBytes(s.bytes) + ' used)' : fmtBytes(s.bytes) + ' used'"></span>
+                <span x-show="!s.soft_quota_bytes" class="muted">unlimited</span>
+                <button class="btn btn-sm ml-1" x-show="isAdmin" @click="editAccountQuota(s)">Set</button>
+              </td>
               <td>
                 <span x-show="s.cooldown_remaining_s>0" class="text-red-400" x-text="'cooldown '+Math.ceil(s.cooldown_remaining_s/60)+'m'"></span>
                 <span x-show="!s.cooldown_remaining_s" class="text-green-400">OK</span>

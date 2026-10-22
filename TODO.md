@@ -167,8 +167,13 @@ come from simply authorizing more accounts.
       api_id, channel, strategy, objects, size, flood status, updated)
       with per-account delete. Adding another account = logging in with
       a different phone number in the session card.
-- [ ] Placement policies: bucket→account pinning (store a bucket's
-      objects on a chosen account) and per-account soft quotas.
+- [x] Per-account SOFT QUOTAS (monitoring increment) DONE:
+      telegram_sessions.soft_quota_bytes + PUT .../telegram-sessions/
+      {account}/quota; the accounts table shows used-vs-quota with an
+      OVER badge, Prometheus exposes the gauge.
+- [ ] Placement policies enforcement (routing): prefer accounts under
+      their soft quota during upload selection; bucket→account pinning
+      (store a bucket's objects on a chosen account).
 - [ ] Account health probes: periodic `is_authorized` check per session,
       dead/expired session detection with a UI warning and re-login hint.
 - [x] Strategy control from the UI: one cross-account routing selector

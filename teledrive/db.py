@@ -70,6 +70,10 @@ telegram_sessions = Table(
     # 0 = expired/revoked/unusable.
     Column("authorized", Integer),
     Column("health_checked_at", BigInteger),
+    # Soft quota: preferred routing keeps accounts under this; NULL =
+    # unlimited. Monitored in UI/metrics; routing enforcement is a
+    # separate increment (see TODO).
+    Column("soft_quota_bytes", BigInteger),
 )
 
 telegram_channels = Table(
@@ -462,6 +466,7 @@ def _setup_schema(engine: Engine) -> None:
     for name, column in (
         ("authorized", Column("authorized", Integer)),
         ("health_checked_at", Column("health_checked_at", BigInteger)),
+        ("soft_quota_bytes", Column("soft_quota_bytes", BigInteger)),
     ):
         if name not in session_cols:
             preparer = engine.dialect.identifier_preparer

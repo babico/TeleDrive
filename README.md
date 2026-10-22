@@ -17,6 +17,7 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 | [Project Status and Acceptance](docs/IMPLEMENTATION_STATUS.md) | P0/P1/P2 capabilities, release boundaries, original-data production acceptance and recovery risks |
 | [Backup and Restore](docs/BACKUP_RESTORE.md) | Database backup commands, isolation and restore checks |
 | [Security Policy](docs/SECURITY.md) | Responsible disclosure, trusted components, credentials and network isolation |
+| [Reverse Proxy](docs/REVERSE_PROXY.md) | nginx/Caddy/Traefik TLS termination, SigV4 Host rules, bucket path-style vs virtual-hosted, upload size limits |
 | [Contributing](CONTRIBUTING.md) | Development workflow and documentation rules |
 | [S3 Compatibility Matrix](docs/S3_SPECS.md) | 116-operation status matrix, supported limits and P2 advanced implementation roadmap |
 | [Local Agent Acceptance Mission](docs/LOCAL_AGENT_ACCEPTANCE.md) | Docker test installation, real bytes, independent recovery and GC safety acceptance, with owner-only gates |

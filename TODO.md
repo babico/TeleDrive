@@ -171,9 +171,16 @@ come from simply authorizing more accounts.
       telegram_sessions.soft_quota_bytes + PUT .../telegram-sessions/
       {account}/quota; the accounts table shows used-vs-quota with an
       OVER badge, Prometheus exposes the gauge.
-- [ ] Placement policies enforcement (routing): prefer accounts under
-      their soft quota during upload selection; bucket→account pinning
-      (store a bucket's objects on a chosen account).
+- [x] Placement SOFT-QUOTA ENFORCEMENT DONE: the transport's account
+      selection prefers under-quota accounts when the strategy's choice
+      is over its soft quota (60s usage cache, best-effort — all-over
+      or DB errors keep the strategy choice; uploads never fail on
+      monitoring). Unit tests cover preference, all-over, single-label
+      and degradation paths.
+- [ ] Bucket→account pinning: store a bucket's objects on a chosen
+      account — needs bucket context threaded from the engine into the
+      transport selection (signature change across the transport
+      interface).
 - [ ] Account health probes: periodic `is_authorized` check per session,
       dead/expired session detection with a UI warning and re-login hint.
 - [x] Strategy control from the UI: one cross-account routing selector

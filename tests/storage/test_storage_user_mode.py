@@ -322,3 +322,53 @@ def test_production_storage_uses_only_user_mtproto_even_with_stale_bot_secrets(s
         assert unavailable.value.status_code == 503
     finally:
         conn.close()
+
+
+def test_soft_quota_preferred_routing():
+    """_select prefers under-quota accounts when the choice is over."""
+    import asyncio
+
+    from teledrive.storage.user_mode import UnifiedUserTransport
+
+    class _Runtime:
+        account = "over-account"
+        strategy = "round_robin"
+
+        def __init__(self):
+            self.advances = 0
+
+        def advance(self):
+            self.advances += 1
+
+    runtime = _Runtime()
+    journal = type("J", (), {"db": None})()
+    transport = UnifiedUserTransport(runtime, journal, rate=object())
+    # No DB access in the test: stub the quota check directly.
+    transport._account_over_quota = lambda account: account == "over-account"
+
+    labels = ["over-account", "under-account"]
+    chosen = asyncio.run(transport._select(
+        strategy="round_robin", labels=labels, advance=runtime.advance))
+    assert chosen == "under-account"
+
+    # All accounts over quota: the strategy's original choice stands.
+    transport._account_over_quota = lambda account: True
+    chosen = asyncio.run(transport._select(
+        strategy="round_robin", labels=labels, advance=runtime.advance))
+    assert chosen == "over-account"
+
+    # Single-label runtimes never consult quotas.
+    transport._account_over_quota = lambda account: (_ for _ in ()).throw(
+        AssertionError("must not be called"))
+    chosen = asyncio.run(transport._select(
+        strategy="round_robin", labels=["only-account"], advance=None))
+    # Single-label runtimes return the runtime's own account; quotas
+    # were never consulted (the lambda would have raised).
+    assert chosen == runtime.account
+
+    # Degradation: quota errors keep the strategy choice.
+    transport._account_over_quota = lambda account: (_ for _ in ()).throw(
+        RuntimeError("db down"))
+    chosen = asyncio.run(transport._select(
+        strategy="round_robin", labels=labels, advance=runtime.advance))
+    assert chosen == "over-account"

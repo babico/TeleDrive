@@ -577,6 +577,39 @@ class UnifiedUserTransport:
         self.min_upload_interval = min_upload_interval
         self._next_upload = 0.0
         self._select_lock = asyncio.Lock()
+        # account -> (monotonic_ts, over_quota) cache; soft quotas are
+        # best-effort routing hints, never hard blocks.
+        self._quota_cache: dict[str, tuple[float, bool]] = {}
+
+    def _account_over_quota(self, account: str) -> bool:
+        """Soft-quota check with a 60s cache; False on any error.
+
+        Reads the account's soft_quota_bytes (telegram_sessions) and its
+        current usage (storage_chunks). Table absence or DB errors
+        degrade to 'not over' — uploads must never fail on monitoring.
+        """
+        now = time.monotonic()
+        cached = self._quota_cache.get(account)
+        if cached is not None and now - cached[0] < 60:
+            return cached[1]
+        over = False
+        try:
+            from sqlalchemy import text as _text
+            conn = self.journal.db
+            quota = conn.connection.execute(_text(
+                "SELECT soft_quota_bytes FROM telegram_sessions "
+                "WHERE account = :account"
+            ), {"account": account}).scalar_one_or_none()
+            if quota is not None:
+                used = conn.connection.execute(_text(
+                    "SELECT COALESCE(SUM(size), 0) FROM storage_chunks "
+                    "WHERE account = :account"
+                ), {"account": account}).scalar() or 0
+                over = int(used) >= int(quota)
+        except Exception:
+            over = False
+        self._quota_cache[account] = (now, over)
+        return over
 
     async def verify_target(self):
         self.runtime.require()
@@ -603,6 +636,18 @@ class UnifiedUserTransport:
             if (strategy in ("round_robin", "parallel")
                     and len(labels) > 1 and callable(advance)):
                 advance()
+        # Soft-quota preference (best effort): when the selected account
+        # is over its soft quota and an alternative is under quota,
+        # prefer the alternative. All-over or unknown states keep the
+        # strategy's original choice.
+        if labels and len(labels) > 1:
+            try:
+                if self._account_over_quota(account):
+                    for label in labels:
+                        if label != account and not self._account_over_quota(label):
+                            return label
+            except Exception:
+                pass
         return account
 
     async def upload(self, path: Path, *, object_id: str, ordinal: int,

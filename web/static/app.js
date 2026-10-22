@@ -741,6 +741,7 @@ function app(){
       return 'binary';
     },
     async previewObject(bucket, key){
+      if(this.isEncKey(bucket, key)){ this.toast('Client-side encrypted object — download it to decrypt (no inline preview).', true); return; }
       this.previewBucket = bucket; this.previewKey = key;
       this.previewKind = this.previewKindFor(key);
       this.previewText = '';
@@ -814,29 +815,78 @@ function app(){
     },
     handleDrop(ev){ this.dropHover = false; this.uploadFiles(this.currentBucket, ev.dataTransfer.files); },
     handleFileInput(ev){ this.uploadFiles(this.currentBucket, ev.target.files); ev.target.value = ''; },
-    uploadFiles(bucket, files){
+    encEnabled: false,
+    encPass: '',
+    encKeys(){ try { return JSON.parse(localStorage.getItem('teledrive-enc-keys')||'[]'); } catch(e){ return []; } },
+    rememberEncKey(bucket, key){
+      const id = bucket + '/' + key;
+      const list = this.encKeys();
+      if(!list.includes(id)){ list.push(id); localStorage.setItem('teledrive-enc-keys', JSON.stringify(list)); }
+    },
+    isEncKey(bucket, key){ return this.encKeys().includes(bucket + '/' + key); },
+    async uploadFiles(bucket, files){
       const list = Array.from(files||[]);
       if(!list.length) return;
-      // Sequential XHR uploads so progress is visible per file.
-      const uploadNext = (i) => {
+      if(this.encEnabled && !this.encPass){
+        this.encPass = prompt('Encryption passphrase for these files (cannot be recovered if lost):') || '';
+        if(!this.encPass){ this.toast('Upload cancelled — passphrase required', true); return; }
+      }
+      // Sequential uploads so progress is visible per file.
+      const uploadNext = async (i) => {
         if(i >= list.length){ this.uploading = false; this.browseBucket(bucket).then(()=>this.refreshBuckets()); return; }
         const file = list[i];
-        this.uploading = true; this.uploadName = file.name; this.uploadPct = 0;
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', this.contentUrl(bucket, file.name));
-        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-        xhr.setRequestHeader('X-TeleDrive-CSRF', '1');
-        xhr.withCredentials = true;
-        xhr.upload.onprogress = (ev) => { if(ev.lengthComputable) this.uploadPct = Math.round(100*ev.loaded/ev.total); };
-        xhr.onload = () => {
-          if(xhr.status === 201){ this.toast('Uploaded ' + file.name); }
-          else { this.toast('Upload failed: ' + (xhr.responseText||xhr.status), true); }
-          uploadNext(i+1);
-        };
-        xhr.onerror = () => { this.toast('Upload failed: ' + file.name, true); uploadNext(i+1); };
-        xhr.send(file);
+        this.uploading = true; this.uploadName = file.name + (this.encEnabled ? ' (encrypting…)' : ''); this.uploadPct = 0;
+        try {
+          let body = file;
+          if(this.encEnabled){
+            const plain = new Uint8Array(await file.arrayBuffer());
+            body = await TeledriveCrypto.encryptBytes(this.encPass, plain);
+            this.uploadName = file.name + ' (encrypted)';
+          }
+          await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('PUT', this.contentUrl(bucket, file.name));
+            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+            xhr.setRequestHeader('X-TeleDrive-CSRF', '1');
+            xhr.withCredentials = true;
+            xhr.upload.onprogress = (ev) => { if(ev.lengthComputable) this.uploadPct = Math.round(100*ev.loaded/ev.total); };
+            xhr.onload = () => (xhr.status === 201) ? resolve() : reject(new Error('Upload failed: ' + (xhr.responseText||xhr.status)));
+            xhr.onerror = () => reject(new Error('Upload failed: ' + file.name));
+            xhr.send(body);
+          });
+          if(this.encEnabled) this.rememberEncKey(bucket, file.name);
+          this.toast('Uploaded ' + file.name + (this.encEnabled ? ' (encrypted)' : ''));
+        } catch(e){ this.toast(e.message, true); }
+        uploadNext(i+1);
       };
       uploadNext(0);
+    },
+    async downloadObject(bucket, key){
+      try {
+        const r = await fetch(this.contentUrl(bucket, key), {credentials:'include'});
+        if(!r.ok) throw new Error('Download failed: ' + r.status);
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        if(TeledriveCrypto.isEncrypted(bytes)){
+          const pass = prompt('This object is client-side encrypted. Passphrase:') || '';
+          if(!pass){ this.toast('Download cancelled', true); return; }
+          let plain;
+          try { plain = await TeledriveCrypto.decryptBytes(pass, bytes); }
+          catch(e){ this.toast(e.message, true); return; }
+          this.saveBlob(new Blob([plain]), key.split('/').pop() || 'download');
+          this.toast('Decrypted and downloaded');
+          return;
+        }
+        this.saveBlob(new Blob([bytes]), key.split('/').pop() || 'download');
+      } catch(e){ this.toast(e.message, true); }
+    },
+    saveBlob(blob, filename){
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 5000);
     },
     async refreshBuckets(){
       try { const r = await this.api('/api/v1/admin/storage/buckets'); this.buckets = r.buckets||[]; }

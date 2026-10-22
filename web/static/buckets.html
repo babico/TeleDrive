@@ -114,7 +114,7 @@ tailwind.config = {
       <div class="scroll">
         <table><thead><tr><th>Bucket</th><th>Key</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody><template x-for="o in searchResults" :key="o.id"><tr>
-          <td x-text="o.bucket"></td><td x-text="o.key"></td><td x-text="fmtBytes(o.size)"></td><td x-text="fmtTs(o.created_at)"></td>
+          <td x-text="o.bucket"></td><td><span x-text="o.key"></span> <span x-show="isEncKey(o.bucket,o.key)" title="Client-side encrypted">🔒</span></td><td x-text="fmtBytes(o.size)"></td><td x-text="fmtTs(o.created_at)"></td>
           <td class="whitespace-nowrap"><button class="btn btn-sm" @click="downloadObject(o.bucket,o.key)">Download</button> <button class="btn btn-sm" @click="previewObject(o.bucket,o.key)">Preview</button></td>
         </tr></template></tbody></table>
       </div>
@@ -126,6 +126,13 @@ tailwind.config = {
       <span class="muted" x-text="uploading ? 'Uploading ' + uploadName + ' — ' + uploadPct + '%' : 'Drop files here to upload to ' + currentBucket + ' (or click)'"
             @click="$refs.fileInput.click()"></span>
       <input type="file" multiple x-ref="fileInput" class="hidden" @change="handleFileInput($event)">
+      <div class="row mt-2 justify-center" style="align-items:center">
+        <label class="text-xs" style="display:flex;align-items:center;gap:6px;margin:0">
+          <input type="checkbox" x-model="encEnabled"> Encrypt before upload (client-side, zero-knowledge)
+        </label>
+        <input x-show="encEnabled" x-model="encPass" class="input" type="password" placeholder="passphrase" style="width:200px;padding:.25rem .5rem" autocomplete="new-password">
+      </div>
+      <p class="muted text-xs mt-1" x-show="encEnabled" x-cloak>AES-256-GCM in your browser — the passphrase never leaves this device and cannot be recovered if lost. Encrypted objects are not previewable and other clients see only ciphertext.</p>
     </div>
     <div class="mt-2" x-show="showNewBucket">
       <div class="row">
@@ -159,7 +166,7 @@ tailwind.config = {
         <table><thead><tr><th x-show="canWrite"></th><th>Key</th><th>Size</th><th>SHA-256</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody><template x-for="o in bucketObjects" :key="o.id"><tr>
           <td x-show="canWrite"><input type="checkbox" :value="o.key" x-model="selectedKeyList" @change="syncSelectedKeys()"></td>
-          <td><a href="#" @click.prevent="previewObject(currentBucket,o.key)" class="text-brand-400 hover:underline" x-text="o.key"></a></td>
+          <td><a href="#" @click.prevent="previewObject(currentBucket,o.key)" class="text-brand-400 hover:underline" x-text="o.key"></a> <span x-show="isEncKey(currentBucket,o.key)" title="Client-side encrypted">🔒</span></td>
           <td x-text="fmtBytes(o.size)"></td><td class="text-xs text-gray-500" x-text="(o.sha256||'').substring(0,12)+'…'"></td>
           <td x-text="fmtTs(o.created_at)"></td>
           <td class="whitespace-nowrap">
@@ -309,4 +316,5 @@ tailwind.config = {
 </div>
 
 <script src="/static/app.js"></script>
+<script src="/static/teledrive-crypto.js"></script>
 </body></html>

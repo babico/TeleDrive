@@ -145,9 +145,22 @@
 
 ## 6. Phase 4 — Strategic bets
 
-- [ ] **Client-side end-to-end encryption** (zero-knowledge): WebCrypto
-      AES-GCM before upload; per-object keys wrapped by a passphrase-derived
-      master key; opt-in per bucket. Design key-recovery UX first.
+- [x] **Client-side end-to-end encryption** (zero-knowledge) DONE:
+      `web/static/teledrive-crypto.js` — WebCrypto AES-256-GCM in the
+      browser before upload; PBKDF2-SHA256 (310k iterations,
+      per-encryption random salt + IV) derives a non-extractable key
+      from the user's passphrase. The blob is self-describing
+      ("TDENC1" magic + version + iterations + salt + IV 39-byte
+      header) so the server needs ZERO changes and sees only opaque
+      bytes — true zero-knowledge, no key material ever transmitted.
+      Opt-in per upload batch (checkbox + passphrase in the drop
+      zone); download auto-detects encrypted blobs, prompts and
+      decrypts client-side; 🔒 badges (localStorage) on known-encrypted
+      objects; preview is blocked for them. Wrong passphrase and
+      tampered bytes fail closed (GCM authentication). Key-recovery
+      UX: an explicit unrecoverable-passphrase warning before upload —
+      by design there is nothing to recover. Node-verified round-trip
+      test suite (tests/web/test_e2e_crypto.py, CI 1 + release gate).
 - [x] **Content-addressed deduplication** DONE: `put_file` performs one
       local hashing pass before uploading; an identical READY object
       (matched by full sha256) turns the upload into a fresh alias

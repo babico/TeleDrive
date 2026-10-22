@@ -78,6 +78,7 @@ function app(){
     s3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:GetObjectAttributes','s3:GetObjectTagging','s3:PutObjectTagging','s3:DeleteObjectTagging','s3:GetBucketTagging','s3:GetBucketCORS','s3:PutBucketCORS','s3:PutBucketTagging','s3:DeleteBucketTagging','s3:PutObject','s3:DeleteObject','s3:CreateBucket','s3:DeleteBucket'],
     selectedS3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:PutObject','s3:DeleteObject'],
     s3Keys: [],
+    s3Edit: null,
     createdS3: null,
 
     // Logs
@@ -459,6 +460,20 @@ function app(){
       catch(e){ this.toast(e.message,true); }
     },
 
+    startS3Edit(k){
+      this.s3Edit = {id: k.id, access_key: k.access_key, name: k.name,
+                     permissions: [...(k.permissions||[])]};
+    },
+    async saveS3Edit(){
+      try {
+        await this.api('/api/v1/admin/s3-credentials/'+this.s3Edit.id,
+          {method:'PUT', body: JSON.stringify({name: this.s3Edit.name.trim(),
+            permissions: this.s3Edit.permissions})});
+        this.toast('Credential updated');
+        this.s3Edit = null;
+        await this.refreshS3Keys();
+      } catch(e){ this.toast(e.message,true); }
+    },
     async refreshS3Keys(){
       try { const r = await this.api('/api/v1/admin/s3-credentials'); this.s3Keys = r.credentials||[]; }
       catch(e){ this.toast(e.message,true); }

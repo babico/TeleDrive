@@ -83,3 +83,44 @@ def test_scope_validation_and_missing_master_key(admin, monkeypatch):
     missing = client.get(url, auth=auth)
     assert missing.status_code == 503
     assert "Missing S3 master key" in missing.text
+
+
+def test_credential_editing(admin):
+    """PUT /admin/s3-credentials/{id}: name + permission editing."""
+    client, url, master = admin
+    auth = ("testadmin", "secure-auth-password")
+    csrf = {"X-TeleDrive-CSRF": "1"}
+
+    r = client.post("/api/v1/admin/s3-credentials", auth=auth, headers=csrf,
+                    json={"name": "orig", "permissions": ["s3:GetObject",
+                                                         "s3:PutObject"]})
+    assert r.status_code == 201, r.text
+    created = r.json()
+
+    # Edit name and narrow the permissions.
+    r = client.put(f"/api/v1/admin/s3-credentials/{created['id']}",
+                   auth=auth, headers=csrf,
+                   json={"name": "renamed-key",
+                         "permissions": ["s3:GetObject", "s3:ListBucket"]})
+    assert r.status_code == 200, r.text
+    body = r.json()["credential"]
+    assert body["name"] == "renamed-key"
+    assert body["permissions"] == ["s3:GetObject", "s3:ListBucket"]
+
+    # Access key is unchanged; the edit is visible in the list.
+    creds = client.get("/api/v1/admin/s3-credentials", auth=auth).json()["credentials"]
+    again = [c for c in creds if c["id"] == created["id"]][0]
+    assert again["access_key"] == created["access_key"]
+    assert again["name"] == "renamed-key"
+
+    # Invalid permission set and empty updates are rejected.
+    assert client.put(f"/api/v1/admin/s3-credentials/{created['id']}",
+                      auth=auth, headers=csrf,
+                      json={"permissions": ["s3:Nonsense"]}).status_code == 422
+    assert client.put(f"/api/v1/admin/s3-credentials/{created['id']}",
+                      auth=auth, headers=csrf,
+                      json={}).status_code == 422
+    # Unknown identifier.
+    assert client.put("/api/v1/admin/s3-credentials/nope",
+                      auth=auth, headers=csrf,
+                      json={"name": "x"}).status_code == 422

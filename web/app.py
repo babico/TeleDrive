@@ -3619,6 +3619,32 @@ def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
         conn.close()
 
 
+@app.put("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
+         summary="Edit an active S3 credential (name, permissions, expiry)")
+def update_s3_credentials(request: Request, identifier: str,
+                          payload: dict = Body(...),
+                          _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        try:
+            store = S3CredentialStore(conn, load_master_key())
+            updated = store.update(
+                identifier,
+                name=payload.get("name"),
+                permissions=payload.get("permissions"),
+                expires_at=payload.get("expires_at"),
+                clear_expiry=payload.get("clear_expiry") is True,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"ok": True, "credential": updated}
+    finally:
+        conn.close()
+
+
 @app.delete("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
             summary="Revoke an S3 access key immediately")
 def revoke_s3_credentials(request: Request, identifier: str,

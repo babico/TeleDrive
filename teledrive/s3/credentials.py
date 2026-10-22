@@ -130,6 +130,47 @@ class S3CredentialStore:
         except (InvalidToken, ValueError, UnicodeError):
             return None
 
+    def update(self, identifier: str, *, name: str | None = None,
+               permissions: list[str] | None = None,
+               expires_at: int | None = None,
+               clear_expiry: bool = False) -> dict:
+        """Edit an ACTIVE credential's name, permissions and expiry.
+
+        The access key and secret never change: rotating the secret means
+        issuing a new credential, which keeps the audit trail honest.
+        """
+        row = self.db.connection.execute(select(
+            credentials.c.id, credentials.c.revoked,
+        ).where((credentials.c.id == identifier)
+                | (credentials.c.access_key == identifier))).first()
+        if not row:
+            raise ValueError("Unknown credential")
+        if row[1]:
+            raise ValueError("Revoked credentials cannot be edited")
+        values: dict = {}
+        if name is not None:
+            name = str(name).strip()
+            if not name or len(name) > 128:
+                raise ValueError("Invalid credential name")
+            values["name"] = name
+        if permissions is not None:
+            if (not isinstance(permissions, list)
+                    or not permissions
+                    or any(p not in PERMISSIONS for p in permissions)):
+                raise ValueError("Invalid permission set")
+            values["permissions"] = json.dumps(sorted(set(permissions)))
+        if expires_at is not None:
+            values["expires_at"] = int(expires_at)
+        elif clear_expiry:
+            values["expires_at"] = None
+        if not values:
+            raise ValueError("Nothing to update")
+        self.db.connection.execute(update(credentials).where(
+            credentials.c.id == row[0]).values(**values))
+        self.db.commit()
+        updated = [c for c in self.list() if c["id"] == row[0]]
+        return updated[0]
+
     def revoke(self, identifier: str) -> bool:
         changed = self.db.connection.execute(update(credentials).where(
             credentials.c.id == identifier, credentials.c.revoked.is_(False)

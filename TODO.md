@@ -232,8 +232,11 @@ come from simply authorizing more accounts.
       secret button with a confirm + warning box. Revoked credentials
       and unknown ids are rejected; master-key changes surface as a
       clear error.
-- [ ] Permission UI modernization (remaining): replace the raw
-      permission-checkbox grid with grouped, explained actions.
+- [x] Permission UI modernization DONE: the S3 credential grids
+      (create + edit) are grouped into explained categories (Read,
+      Write objects, Object tagging, Bucket administration,
+      Compatibility probes) with per-group tooltips and select-all
+      toggles; all 39 permissions verified covered by script.
 - [x] S3 credential EDITING DONE: PUT /api/v1/admin/s3-credentials/{id}
       edits name, permission set and expiry of ACTIVE credentials
       (revoked ones are immutable; access key and secret never change —

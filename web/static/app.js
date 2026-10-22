@@ -81,6 +81,30 @@ function app(){
     s3Keys: [],
     s3Edit: null,
     revealedS3: null,
+    // Permission groups for the S3 credential grids (create + edit).
+    s3PermGroups: [
+      {label: 'Read', hint: 'List buckets/objects and download content', perms: [
+        's3:ListAllMyBuckets', 's3:ListBucket', 's3:ListBucketVersions',
+        's3:GetBucketLocation', 's3:GetObject', 's3:GetObjectAttributes']},
+      {label: 'Write objects', hint: 'Upload, overwrite and delete objects', perms: [
+        's3:PutObject', 's3:DeleteObject']},
+      {label: 'Object tagging', hint: 'Read and manage object tags', perms: [
+        's3:GetObjectTagging', 's3:PutObjectTagging', 's3:DeleteObjectTagging']},
+      {label: 'Bucket administration', hint: 'Create/delete buckets and manage settings', perms: [
+        's3:CreateBucket', 's3:DeleteBucket', 's3:GetBucketTagging',
+        's3:PutBucketTagging', 's3:DeleteBucketTagging', 's3:GetBucketCORS',
+        's3:PutBucketCORS', 's3:GetBucketVersioning', 's3:PutBucketVersioning',
+        's3:GetLifecycleConfiguration', 's3:PutLifecycleConfiguration']},
+      {label: 'Compatibility probes (read-only)', hint: 'AWS-shaped read responses for client compatibility', perms: [
+        's3:GetBucketAcl', 's3:GetObjectAcl', 's3:GetOwnershipControls',
+        's3:GetBucketPolicy', 's3:GetBucketPolicyStatus',
+        's3:GetBucketPublicAccessBlock', 's3:PutBucketPublicAccessBlock',
+        's3:GetAccelerateConfiguration', 's3:GetBucketLogging',
+        's3:GetBucketNotification', 's3:GetBucketObjectLockConfiguration',
+        's3:GetBucketReplication', 's3:GetBucketRequestPayment',
+        's3:GetBucketWebsite', 's3:GetEncryptionConfiguration',
+        's3:GetObjectLegalHold', 's3:GetObjectRetention']},
+    ],
     createdS3: null,
 
     // Logs
@@ -473,6 +497,15 @@ function app(){
       try {
         this.revealedS3 = await this.api('/api/v1/admin/s3/credentials/'+k.id+'/secret');
       } catch(e){ this.toast(e.message,true); }
+    },
+    togglePermGroup(perms, editTarget){
+      const model = editTarget ? editTarget.permissions : this.selectedS3Perms;
+      const allOn = perms.every(p => model.includes(p));
+      for(const p of perms){
+        const i = model.indexOf(p);
+        if(allOn && i >= 0) model.splice(i, 1);
+        else if(!allOn && i < 0) model.push(p);
+      }
     },
     startS3Edit(k){
       this.s3Edit = {id: k.id, access_key: k.access_key, name: k.name,

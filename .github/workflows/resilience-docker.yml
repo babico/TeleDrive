@@ -1,4 +1,4 @@
-name: CI 3 · Image & Resilience — Docker fault injection
+name: CI 3 · Image & Resilience — build, scan, smoke, fault injection
 on:
   workflow_dispatch:
   push:
@@ -13,6 +13,107 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  image:
+    name: Image · build, smoke and Trivy scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Docker build
+        run: docker build --pull -t teledrive-security-ci .
+
+      - name: Single-container Web UI and S3 gateway smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -euo pipefail
+          mkdir -p /tmp/ci-config /tmp/ci-data
+          chmod 700 /tmp/ci-config /tmp/ci-data
+          cat > /tmp/ci-config/config.yaml <<'EOF'
+          web:
+            user: ci
+            password: ci-only-not-a-real-secret
+            allowed_hosts: "localhost,127.0.0.1,[::1]"
+          storage:
+            channel: ""
+            apis: []
+          state:
+            database_url: "sqlite:////data/state.db"
+          EOF
+          chmod 600 /tmp/ci-config/config.yaml
+          cid="$(docker run -d --rm \
+            --user "$(id -u):$(id -g)" \
+            -v /tmp/ci-config:/config \
+            -v /tmp/ci-data:/data \
+            -p 127.0.0.1:18080:8080 \
+            -p 127.0.0.1:19000:9000 \
+            teledrive-security-ci)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for i in $(seq 1 45); do
+            if curl -fsS -u ci:ci-only-not-a-real-secret \
+              http://127.0.0.1:18080/api/v1/admin/storage/health >/tmp/health.json \
+              && curl -fsS -u ci:ci-only-not-a-real-secret \
+              http://127.0.0.1:18080/api/v1/admin/storage/telegram-sessions >/tmp/sessions.json \
+              && curl -fsS http://127.0.0.1:19000/__health >/tmp/s3-health.json; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then docker logs "$cid" | tail -60; exit 1; fi
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/health.json", encoding="utf-8"))
+          assert "job_states" in data and "alerts" in data
+          sessions = json.load(open("/tmp/sessions.json", encoding="utf-8"))
+          assert "sessions" in sessions and "count" in sessions
+          assert json.load(open("/tmp/s3-health.json", encoding="utf-8")) == {"ok": True}
+          PY
+          curl -fsS -u ci:ci-only-not-a-real-secret \
+            http://127.0.0.1:18080/openapi.json >/tmp/openapi.json
+          python - <<'PY'
+          import json
+          schema=json.load(open("/tmp/openapi.json",encoding="utf-8"))
+          assert "/api/v1/auth/login" in schema["paths"]
+          PY
+          if curl -fsS http://127.0.0.1:18080/openapi.json >/dev/null; then
+            echo "Anonymous Web API unexpectedly available" >&2
+            exit 1
+          fi
+          if curl -fsS http://127.0.0.1:18080/__health >/dev/null; then
+            echo "S3 listener accidentally accessible through Web port" >&2
+            exit 1
+          fi
+          if curl -fsS http://127.0.0.1:19000/api/health >/dev/null; then
+            echo "Web listener accidentally accessible through S3 port" >&2
+            exit 1
+          fi
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: teledrive-security-ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Publish CI run summary
+        if: always()
+        shell: bash
+        run: |
+          echo '### CI 3 · Image — build, smoke, scan' >> "$GITHUB_STEP_SUMMARY"
+          echo '| Detail | Value |' >> "$GITHUB_STEP_SUMMARY"
+          echo '| --- | --- |' >> "$GITHUB_STEP_SUMMARY"
+          printf '| Image | teledrive:local |\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '| Commit | %s |\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf '| Result | %s |\n' "${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
   disposable-docker-fault-injection:
     name: Docker · 13 fault-injection checks
     runs-on: ubuntu-latest

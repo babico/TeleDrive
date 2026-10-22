@@ -26,9 +26,9 @@ EXPECTED = (
 
 
 DISPLAY_NAMES = {
-    "quality-security.yml": "CI 1 · Quality — static, security & regression",
+    "quality-security.yml": "CI 1 · Quality — static analysis, security & unit tests",
     "integration-storage.yml": "CI 2 · Integration — REST, S3 & Databases",
-    "resilience-docker.yml": "CI 3 · Image & Resilience — Docker fault injection",
+    "resilience-docker.yml": "CI 3 · Image & Resilience — build, scan, smoke, fault injection",
     "live-telegram-user.yml": "CI 4 · Live E2E — Telegram USER MTProto",
     "live-telegram-multiworker.yml": "CI 4 · Live E2E — Multiworker PostgreSQL",
     "delivery-release.yml": "CI 5 · Delivery — release gate & packages",
@@ -139,12 +139,16 @@ def test_security_includes_storage_and_api_tests():
         "tests/s3/test_s3_contract.py",
     ):
         assert path in scripts
-    for tool in ("pip-audit", "bandit", "docker build", "trivy"):
-        if tool == "trivy":
-            assert any("trivy-action@" in s.get("uses", "")
-                       for s in doc["jobs"]["security"]["steps"])
-        else:
-            assert tool in scripts
+    # Static/security tools stay in CI 1; image build + scan moved to
+    # the CI 3 image job (increment 2 of the CI content overhaul).
+    for tool in ("pip-audit", "bandit"):
+        assert tool in scripts
+    image = yaml.load(
+        (WORKFLOWS / "resilience-docker.yml").read_text(encoding="utf-8"),
+        Loader=yaml.SafeLoader)["jobs"]["image"]
+    image_scripts = "\n".join(s.get("run", "") for s in image["steps"])
+    assert "docker build" in image_scripts
+    assert any("trivy-action@" in s.get("uses", "") for s in image["steps"])
 
 
 def test_db_and_desktop_matrix_and_storage_contracts_are_present():
@@ -699,7 +703,7 @@ def test_reusable_docker_fault_injection_workflow_contract():
     """Independent Docker fault injection persists across roadmap phases."""
     assert sorted(p.name for p in WORKFLOWS.glob("*.yml")) == sorted([*EXPECTED, "endurance-capacity.yml"])
     doc = workflow("resilience-docker.yml")
-    assert doc["name"] == "CI 3 · Image & Resilience — Docker fault injection"
+    assert doc["name"] == "CI 3 · Image & Resilience — build, scan, smoke, fault injection"
     assert "workflow_dispatch" in doc["on"]
     assert "push" in doc["on"] and "pull_request" in doc["on"]
     assert "paths" not in doc["on"]["push"]

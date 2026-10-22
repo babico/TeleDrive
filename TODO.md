@@ -255,12 +255,14 @@ come from simply authorizing more accounts.
       active routing strategy and an unresolved-alerts badge; existing
       quota bars and job stats stay.
 - [ ] CI overhaul — CONTENT, not just names. Increment 1 DONE
-      (naming scheme applied everywhere + the two Integration workflows
-      genuinely merged into CI 2 with both jobs and their service
-      containers, meta tests and docs migrated, endurance workflow now
-      tracked). Remaining increments: split CI 1 Quality into
-      Static vs Image concerns, deduplicate the regression pytest
-      invocation shared by CI 1 and CI 5. Proposed target structure
+      (naming scheme + the two Integration workflows genuinely merged
+      into CI 2). Increment 2 DONE: the Docker build + single-container
+      smoke + Trivy scan moved out of CI 1 into a dedicated CI 3 image
+      job, leaving CI 1 as pure static analysis / security audit /
+      unit tests; meta tests migrated first. The CI 1 vs CI 5 pytest
+      overlap is INTENTIONAL and stays: CI 5 is the release gate and
+      must re-verify the exact tagged commit, not trust a main-branch
+      run. Proposed target structure
       (one concern per workflow, no overlap, consistent naming
       "CI N · <Area> — <Scope>"):
       1. CI 1 · Static — lint, compile, dependency audit, secret scan

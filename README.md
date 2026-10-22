@@ -14,6 +14,7 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 | --- | --- |
 | **[README](README.md)** | Installation, configuration, primary workflows and supported interfaces |
 | [CI and Test Guide](docs/CI_WORKFLOWS.md) | GitHub Actions, local tests, Docker fault injection and development acceptance |
+| [2026-10-22 Verification Report](docs/VERIFICATION_2026-10-22.md) | Exact baseline CI failure, fixes, outstanding development and owner gates |
 | [Project Status and Acceptance](docs/IMPLEMENTATION_STATUS.md) | P0/P1/P2 capabilities, release boundaries, original-data production acceptance and recovery risks |
 | [Backup and Restore](docs/BACKUP_RESTORE.md) | Database backup commands, isolation and restore checks |
 | [Security Policy](docs/SECURITY.md) | Responsible disclosure, trusted components, credentials and network isolation |

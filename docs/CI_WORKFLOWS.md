@@ -10,8 +10,6 @@ GitHub Actions does not support workflow folders in its sidebar. The numeric pre
 
 | Group | Workflow | Validates |
 | --- | --- | --- |
-| Group | Workflow | Validates |
-| --- | --- | --- |
 | CI 1 · Quality | [Static analysis, security & unit tests](../.github/workflows/quality-security.yml) | Compile, Bandit, pip-audit, offline regressions and Compose configuration |
 | CI 2 · Integration | [REST, S3 & Databases](../.github/workflows/integration-storage.yml) | **Two jobs**: signed REST/S3, actual AWS CLI and rclone with synthetic Telegram I/O; PostgreSQL/MySQL/restore validation |
 | CI 3 · Image & Resilience | [Build, scan, smoke & fault injection](../.github/workflows/resilience-docker.yml) | Docker image build, Trivy, single-container smoke, disposable SQL fault scenarios |

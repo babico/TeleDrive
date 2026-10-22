@@ -1107,3 +1107,30 @@ def test_merged_branch_cleanup_requires_exact_pr_merge_and_nonprotected_ref():
     ):
         assert required in script
     assert "branch -D" not in script and "git push --delete" not in script
+
+
+def test_operator_docs_match_live_six_workflow_layout_and_review_limits():
+    """Prevent a second outdated 7/9-workflow matrix in operator runbooks."""
+    main_docs = [
+        ROOT / "README.md",
+        ROOT / "docs/CI_WORKFLOWS.md",
+        ROOT / "docs/TELETHON_STORAGE.md",
+    ]
+    for path in main_docs:
+        body = path.read_text(encoding="utf-8")
+        assert "seven mandatory workflows" not in body.lower(), path
+        assert "nine normal github actions workflows" not in body.lower(), path
+        assert "six" in body.lower(), path
+    guide = (ROOT / "docs/CI_WORKFLOWS.md").read_text(encoding="utf-8")
+    for name in EXPECTED:
+        assert guide.count(f"../.github/workflows/{name}") == 1, name
+    assert guide.count("../.github/workflows/endurance-capacity.yml") == 1
+    assert "| Group | Workflow | Validates |" in guide
+    assert guide.count("| --- | --- | --- |") == 1
+    assert "**Six normal workflows**" in guide
+    report = (ROOT / "docs/VERIFICATION_2026-10-22.md").read_text(encoding="utf-8")
+    assert "3aa70d18dc227ff06d9a0d735785ced0e46cfccf" in report
+    assert "5 of 6" in report
+    assert "42 partial" in report and "63 unsupported" in report
+    assert "Physical Telegram deletion" in report or "physical Telegram deletion" in report
+    assert (ROOT / "teledrive/s3/operation_manifest.json").is_file()

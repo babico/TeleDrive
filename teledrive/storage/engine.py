@@ -344,9 +344,18 @@ class TelegramObjectStorage:
                     identifier, token, int(time.time()), self.writer_ttl_seconds
                 ):
                     raise ManifestError("Writer ownership lost before publication")
-                return self.manifests.finish(
+                result = self.manifests.finish(
                     identifier, full_sha.hexdigest(), int(time.time()), writer_token=token
                 )
+                # Content search: index text-extractable uploads from the
+                # still-local source (no Telegram round-trip). Best effort.
+                try:
+                    from .content_index import index_object_content
+                    index_object_content(
+                        self.manifests.db, result.id, source, key)
+                except Exception:
+                    pass
+                return result
             except BaseException as exc:
                 # Do not delete recorded Telegram chunks here. They form a
                 # recovery journal and may be needed by a later reconciler.

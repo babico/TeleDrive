@@ -100,8 +100,22 @@
       preview (8 KiB cap, extension-based type detection).
 - [x] Object actions: rename, cross-bucket move (metadata-level copy + delete),
       bulk select + delete, cross-bucket search.
-- [ ] Content search inside object bytes (key search shipped; FTS5/tsvector
-      only if key search proves insufficient).
+- [x] Content search inside object bytes DONE: full-text search over
+      text-extractable uploads (extension-gated, 512 KiB extraction
+      cap, NUL-byte binary rejection). teledrive/storage/
+      content_index.py is dialect-aware: FTS5 virtual table on SQLite,
+      generated tsvector ('simple', GIN index) + ts_headline on
+      PostgreSQL — both answer (object, snippet) pairs with consistent
+      [ ] match markers, and FTS5 query tokens are always quoted so
+      user input can never parse as operators. The engine indexes at
+      upload time from the still-local staged source (zero Telegram
+      round-trips); GET /api/v1/admin/storage/search?mode=content
+      returns matches joined to CURRENT heads (unlinked objects never
+      appear); POST .../search/reindex backfills existing objects
+      (downloads only the extraction cap per object, marks non-text
+      objects as examined). UI: In keys / In file contents mode select
+      with a Match snippet column and a Reindex button. Verified on
+      real PostgreSQL (teledrivetest) and SQLite.
 - [x] Folder auto-sync: periodic idempotent scan of the job source root
       (jobs.watch / jobs.watch_bucket / jobs.watch_interval_seconds).
 

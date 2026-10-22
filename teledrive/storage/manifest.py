@@ -76,6 +76,16 @@ replica_chunks = Table(
     Column("created_at", BigInteger, nullable=False),
 )
 
+# Content search: extracted plain text per object (FTS5/tsvector
+# structures live in teledrive.storage.content_index and are created
+# dialect-aware next to this table).
+content_index = Table(
+    "object_content_index", metadata,
+    Column("object_id", String(36), ForeignKey("storage_objects.id"), primary_key=True),
+    Column("text", Text, nullable=False),
+    Column("indexed_at", BigInteger, nullable=False),
+)
+
 Index("ix_storage_objects_bucket", objects.c.bucket)
 Index("ix_storage_objects_status", objects.c.status)
 
@@ -115,6 +125,9 @@ class ManifestStore:
     def __init__(self, database: Database):
         self.db = database
         metadata.create_all(database.engine)
+        # Dialect-aware FTS structures for content search (idempotent).
+        from .content_index import ensure_content_search
+        ensure_content_search(database)
 
     def begin(self, bucket: str, key: str, size: int, now: int) -> str:
         if not bucket or len(bucket) > 63 or not key or size < 0:

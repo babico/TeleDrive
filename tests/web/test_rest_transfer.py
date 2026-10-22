@@ -325,3 +325,60 @@ def test_share_public_route_rate_limit(service):
     token = r.json()["token"]
     codes = [client.get(f"/share/{token}").status_code for _ in range(70)]
     assert 429 in codes, codes[:5]
+
+
+# --- Content search ---------------------------------------------------------
+
+def test_content_search_and_reindex(service):
+    client, headers, _, _ = service
+    # A text upload is indexed automatically at upload time.
+    body = b"quarterly report with unique-zeta-marker figures"
+    assert put(client, headers, body, key="report-2026.txt").status_code in (200, 201)
+    # A binary upload is never indexed.
+    assert put(client, headers, b"\x00\x01\x02\x03",
+               key="blob.bin").status_code in (200, 201)
+
+    r = client.get("/api/v1/admin/storage/search",
+                   auth=ADMIN, params={"q": "unique-zeta-marker",
+                                       "mode": "content"})
+    assert r.status_code == 200
+    results = r.json()["objects"]
+    assert len(results) == 1
+    assert results[0]["key"] == "report-2026.txt"
+    assert "unique-zeta-marker" in results[0]["snippet"]
+
+    # Key mode is unchanged and does not match content.
+    r = client.get("/api/v1/admin/storage/search",
+                   auth=ADMIN, params={"q": "unique-zeta-marker"})
+    assert [o["key"] for o in r.json()["objects"]] == []
+
+    # Invalid mode is rejected.
+    assert client.get("/api/v1/admin/storage/search",
+                      auth=ADMIN,
+                      params={"q": "x", "mode": "wild"}).status_code == 422
+
+    # Reindex backfill: wiping the index makes the object searchable again.
+    db = webapp.db_connect()
+    try:
+        from sqlalchemy import text
+        db.connection.execute(text("DELETE FROM object_content_index"))
+        db.connection.execute(
+            text("DELETE FROM object_content_fts"))
+        db.commit()
+    finally:
+        db.close()
+    r = client.get("/api/v1/admin/storage/search",
+                   auth=ADMIN, params={"q": "unique-zeta-marker",
+                                       "mode": "content"})
+    assert r.json()["objects"] == []
+
+    r = client.post("/api/v1/admin/storage/search/reindex",
+                    auth=ADMIN, headers={"x-teledrive-csrf": "1"},
+                    json={"limit": 10})
+    assert r.status_code == 200, r.text
+    assert r.json()["indexed"] >= 1
+
+    r = client.get("/api/v1/admin/storage/search",
+                   auth=ADMIN, params={"q": "unique-zeta-marker",
+                                       "mode": "content"})
+    assert len(r.json()["objects"]) == 1

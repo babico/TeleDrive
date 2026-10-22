@@ -55,7 +55,7 @@ jobs:
           python -m pytest -q \
             tests/web/test_api_keys.py \
             tests/web/test_rest_api.py \
-            tests/web/test_rest_transfer.py tests/web/test_e2e_crypto.py tests/web/test_unified_service.py tests/web/test_auth_rbac.py \
+            tests/web/test_rest_transfer.py tests/storage/test_content_index.py tests/web/test_e2e_crypto.py tests/web/test_unified_service.py tests/web/test_auth_rbac.py \
             tests/storage/test_storage_engine.py \
             tests/storage/test_storage_user_mode.py \
             tests/storage/test_storage_recovery.py tests/storage/test_storage_rebuild.py tests/storage/test_telegram_inventory_reconcile.py \

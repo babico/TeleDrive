@@ -761,9 +761,16 @@ function app(){
       const q = (this.searchQuery||'').trim();
       if(!q){ this.searchResults = null; return; }
       try {
-        const r = await this.api('/api/v1/admin/storage/search?q='+encodeURIComponent(q));
+        const r = await this.api('/api/v1/admin/storage/search?'+new URLSearchParams({q, mode: this.searchMode||'key'}));
         this.searchResults = r.objects||[];
         if(!this.searchResults.length) this.toast('No objects matched');
+      } catch(e){ this.toast(e.message,true); }
+    },
+    searchMode: 'key',
+    async reindexContents(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/search/reindex',{method:'POST',body:JSON.stringify({limit:50})});
+        this.toast(r.indexed ? 'Indexed '+r.indexed+' object(s)' : 'Nothing left to index');
       } catch(e){ this.toast(e.message,true); }
     },
     syncSelectedKeys(){ this.selectedKeys = new Set(this.selectedKeyList); },

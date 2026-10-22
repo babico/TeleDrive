@@ -3399,22 +3399,46 @@ def admin_copy_object(bucket: str, request: Request,
 
 
 @app.get("/api/v1/admin/storage/search", tags=["Object catalog"],
-         summary="Search current object keys across all buckets")
+         summary="Search object keys or indexed file contents")
 def admin_search_objects(q: str = Query(..., min_length=1, max_length=256),
+                         mode: str = Query("key"),
                          limit: int = Query(100, ge=1, le=1000),
                          _: None = Depends(require_auth)):
-    """Case-insensitive key search over the unified catalog (all buckets)."""
+    """mode=key (default): case-insensitive key search over the unified
+    catalog. mode=content: full-text search over indexed file contents
+    (text-extractable uploads, FTS5/tsvector) with snippets."""
     from sqlalchemy import func, select as _select
     from teledrive.storage.manifest import objects as _objects
-    # Escape LIKE wildcards so user input cannot broaden the pattern.
-    escaped = (q.replace(chr(92), chr(92) * 2)
-                .replace("%", chr(92) + "%")
-                .replace("_", chr(92) + "_")).lower()
-    pattern = "%" + escaped + "%"
-    escape_char = chr(92)
     conn = db_connect()
     try:
         from teledrive.storage.catalog import heads as _heads
+        if mode == "content":
+            from teledrive.storage.content_index import search_content
+            matches = search_content(conn, q, limit)
+            if not matches:
+                return {"query": q, "mode": "content", "objects": []}
+            by_id = {object_id: snippet for object_id, snippet in matches}
+            rows = conn.connection.execute(
+                _select(_objects.c.id, _objects.c.bucket,
+                        _objects.c.object_key, _objects.c.size,
+                        _objects.c.sha256, _objects.c.created_at)
+                .select_from(_heads.join(
+                    _objects, _objects.c.id == _heads.c.object_id))
+                .where(_objects.c.id.in_(list(by_id)))
+                .limit(limit)
+            ).all()
+            return {"query": q, "mode": "content", "objects": [
+                {"id": r[0], "bucket": r[1], "key": r[2], "size": r[3],
+                 "sha256": r[4], "created_at": r[5],
+                 "snippet": by_id.get(r[0], "")} for r in rows]}
+        if mode != "key":
+            raise HTTPException(422, "mode must be key or content")
+        # Escape LIKE wildcards so user input cannot broaden the pattern.
+        escaped = (q.replace(chr(92), chr(92) * 2)
+                .replace("%", chr(92) + "%")
+                .replace("_", chr(92) + "_")).lower()
+        pattern = "%" + escaped + "%"
+        escape_char = chr(92)
         rows = conn.connection.execute(
             _select(_objects.c.id, _objects.c.bucket, _objects.c.object_key,
                     _objects.c.size, _objects.c.sha256, _objects.c.created_at)
@@ -3428,6 +3452,87 @@ def admin_search_objects(q: str = Query(..., min_length=1, max_length=256),
         return {"query": q, "objects": [
             {"id": r[0], "bucket": r[1], "key": r[2], "size": r[3],
              "sha256": r[4], "created_at": r[5]} for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/storage/search/reindex", tags=["Object catalog"],
+          summary="Index file contents of existing objects (backfill)")
+async def reindex_object_contents(request: Request,
+                                  payload: dict = Body(None),
+                                  _: None = Depends(require_auth)):
+    """Downloads the head of current, unindexed, text-extractable objects
+    and indexes their contents. Bounded per call; repeated calls make
+    progress until everything searchable is indexed."""
+    _same_origin(request)
+    try:
+        limit = int((payload or {}).get("limit", 25))
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 100))
+    conn = db_connect()
+    try:
+        from teledrive.storage.content_index import (
+            MAX_INDEX_BYTES, extract_text, index_object_content)
+        from sqlalchemy import text as _text
+        candidates = conn.connection.execute(_text(
+            "SELECT o.id, o.bucket, o.object_key FROM storage_objects o "
+            "JOIN storage_object_heads h ON h.object_id = o.id "
+            "WHERE o.status = 'ready' AND o.size > 0 "
+            "AND NOT EXISTS (SELECT 1 FROM object_content_index c "
+            "WHERE c.object_id = o.id) "
+            "AND (o.object_key LIKE '%.' || :txt OR o.object_key LIKE '%.' || :json "
+            "OR o.object_key LIKE '%.' || :csv OR o.object_key LIKE '%.' || :md "
+            "OR o.object_key LIKE '%.' || :log OR o.object_key LIKE '%.' || :yaml "
+            "OR o.object_key LIKE '%.' || :yml OR o.object_key LIKE '%.' || :xml "
+            "OR o.object_key LIKE '%.' || :py OR o.object_key LIKE '%.' || :conf) "
+            "LIMIT :n"
+        ), {"txt": "txt", "json": "json", "csv": "csv", "md": "md",
+            "log": "log", "yaml": "yaml", "yml": "yml", "xml": "xml",
+            "py": "py", "conf": "conf", "n": limit}).fetchall()
+        if not candidates:
+            return {"ok": True, "indexed": 0, "candidates": 0}
+        transport = storage_transport(conn)
+        await transport.verify_target()
+        manifests = ManifestStore(conn)
+        engine = TelegramObjectStorage(
+            manifests, transport, chunk_size=RECOMMENDED_CHUNK_SIZE,
+            scratch_directory=Path(STORAGE_SCRATCH_DIR))
+        indexed = 0
+        errors = []
+        for object_id, bucket, key in candidates:
+            scratch = Path(tempfile.mkdtemp(prefix="reindex-",
+                                            dir=STORAGE_SCRATCH_DIR))
+            try:
+                target = scratch / "head"
+                # Only the extraction cap is needed, never the whole file.
+                obj = manifests.get(object_id)
+                end = min(MAX_INDEX_BYTES, obj.size)
+                if end > 0:
+                    async for piece in engine.iter_bytes(
+                            object_id, start=0, end=end):
+                        with open(target, "ab") as out:
+                            out.write(piece)
+                if extract_text(target, key) is None:
+                    # Mark non-text objects as examined so they are not
+                    # retried forever: an empty index row.
+                    conn.connection.execute(_text(
+                        "INSERT OR IGNORE INTO object_content_index "
+                        "(object_id, text, indexed_at) VALUES (:i, '', :n)"),
+                        {"i": object_id, "n": int(time.time())})
+                    conn.commit()
+                    continue
+                if index_object_content(conn, object_id, target, key):
+                    indexed += 1
+            except Exception as exc:
+                errors.append({"object_id": object_id,
+                               "error": type(exc).__name__})
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+        _log(f"content reindex: indexed={indexed} candidates={len(candidates)}",
+             "storage")
+        return {"ok": True, "indexed": indexed, "candidates": len(candidates),
+                "errors": errors}
     finally:
         conn.close()
 

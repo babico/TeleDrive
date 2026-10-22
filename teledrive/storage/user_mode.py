@@ -280,6 +280,49 @@ def _credential_sets() -> list[tuple[str, int, str, str]]:
     return configured
 
 
+def _active_channel_from_db() -> str | None:
+    """The operator's active channel from the catalog (UI-managed).
+
+    The runtime must not die at startup just because config
+    storage.channel still holds a placeholder like 'me': channels are
+    activated in the UI (telegram_channels.is_active) and every session
+    row carries its channel. Either wins over the placeholder.
+    """
+    try:
+        from teledrive.db import connect_database
+        import yaml
+        cfg_path = os.environ.get("TELEDRIVE_CONFIG",
+                                  "config/config.yaml").strip()
+        if not cfg_path or not os.path.isfile(cfg_path):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(cfg_path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            document = yaml.safe_load(handle) or {}
+        state = document.get("state") or {}
+        db_url = state.get("database_url") or state.get("db_path")
+        if not db_url:
+            return None
+        conn = connect_database(str(db_url))
+        try:
+            from sqlalchemy import text as _text
+            row = conn.connection.execute(_text(
+                "SELECT channel_id FROM telegram_channels "
+                "WHERE is_active = 1 ORDER BY id LIMIT 1")).fetchone()
+            if row is None or not row[0]:
+                row = conn.connection.execute(_text(
+                    "SELECT channel FROM telegram_sessions "
+                    "WHERE channel IS NOT NULL AND channel != '' "
+                    "ORDER BY id LIMIT 1")).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            return str(row[0]).strip()
+    except Exception:
+        return None
+    return None
+
+
 class UserSessionRuntime:
     """One or more user-authorized clients owned by the ASGI lifespan.
 
@@ -319,6 +362,12 @@ class UserSessionRuntime:
         self.strategy = strategy
         target_id = str((storage_section or {}).get("channel", "")).strip()
         if (not target_id or target_id.lower() in ("me", "self", "saved messages")):
+            # Placeholder or unset in config: use the channel the operator
+            # activated in the UI (or the session's own channel). Without
+            # this fallback the runtime dies at startup and every upload
+            # 503s with 'session required' although the session is healthy.
+            target_id = _active_channel_from_db() or ""
+        if not target_id:
             raise RuntimeError("Invalid dedicated channel configuration")
         sets = _credential_sets()
         clients: list[tuple[str, Any]] = []
@@ -360,7 +409,23 @@ class UserSessionRuntime:
                             "Configured channel not found in authorized user's dialogs"
                         )
                 else:
-                    channel = await client.get_entity(target_id)
+                    try:
+                        channel = await client.get_entity(target_id)
+                    except Exception:
+                        channel = None
+                    if channel is None:
+                        # The UI accepts human channel names; get_entity
+                        # only resolves usernames/URLs. Match the dialog
+                        # TITLE as a last resort.
+                        wanted = target_id.casefold()
+                        async for dialog in client.iter_dialogs(limit=5000):
+                            if str(dialog.name or "").casefold() == wanted:
+                                channel = dialog.entity
+                                break
+                    if channel is None:
+                        raise RuntimeError(
+                            "Configured channel not found in authorized "
+                            "user's dialogs")
                 if not isinstance(channel, Channel) or not getattr(
                         channel, "broadcast", False):
                     raise RuntimeError(

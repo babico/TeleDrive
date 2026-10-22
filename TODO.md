@@ -226,6 +226,10 @@ come from simply authorizing more accounts.
 - [ ] S3 + API permission UI modernization: replace the current
       permission-granting controls; add viewing existing S3 credential
       SECRETS and editing access keys.
+- [ ] S3 credential EDITING: existing credentials cannot be edited at
+      all today — make name, expiry and permission set editable
+      (secret rotation = issue new credential; editing never weakens
+      an active credential's audit trail).
 - [ ] S3 sub-menu: bucket browser moves under the S3 menu
       (/s3/buckets), detailed and verified end to end.
 - [x] API management: documentation card with /docs, /redoc,

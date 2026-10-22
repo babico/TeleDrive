@@ -2917,6 +2917,75 @@ class ObjectCopyRequest(BaseModel):
     destination_key: str = Field(min_length=1, max_length=1024)
 
 
+@app.get("/api/v1/admin/storage/buckets/{bucket}/cors",
+         tags=["Object catalog"],
+         summary="Read the bucket CORS rules")
+def admin_get_bucket_cors(bucket: str, _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        from teledrive.s3.cors import BucketCORSStore
+        rules = BucketCORSStore(catalog).get(bucket)
+        return {"rules": rules or []}
+    finally:
+        conn.close()
+
+
+@app.put("/api/v1/admin/storage/buckets/{bucket}/cors",
+         tags=["Object catalog"],
+         summary="Replace the bucket CORS rules")
+def admin_put_bucket_cors(bucket: str, request: Request,
+                          payload: dict = Body(...),
+                          _: None = Depends(require_auth)):
+    _same_origin(request)
+    rules = payload.get("rules")
+    if not isinstance(rules, list) or len(rules) > 20:
+        raise HTTPException(422, "rules must be a list of at most 20")
+    allowed_methods = {"GET", "PUT", "POST", "DELETE", "HEAD"}
+    origin_re = re.compile(r"\*|https?://[A-Za-z0-9.*-]+(:\d+)?(/\*)?")
+    for rule in rules:
+        methods = [str(m).upper() for m in rule.get("methods", [])]
+        origins = [str(o) for o in rule.get("origins", [])]
+        if not methods or not origins:
+            raise HTTPException(422, "Each rule needs methods and origins")
+        if not set(methods) <= allowed_methods:
+            raise HTTPException(422, "Unsupported CORS method")
+        if any(not origin_re.fullmatch(o) for o in origins):
+            raise HTTPException(422, "Invalid origin (use * or "
+                                     "scheme://host[:port])")
+        try:
+            max_age = int(rule.get("max_age") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "max_age must be an integer") from None
+        if not 0 <= max_age <= 86400:
+            raise HTTPException(422, "max_age must be 0..86400")
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        from teledrive.s3.cors import BucketCORSStore
+        BucketCORSStore(catalog).replace(bucket, [
+            {"origins": [str(o) for o in r.get("origins", [])],
+             "methods": [str(m).upper() for m in r.get("methods", [])],
+             "allowed_headers": [str(h) for h in
+                                 r.get("allowed_headers", [])],
+             "expose_headers": [str(h) for h in
+                                r.get("expose_headers", [])],
+             "max_age": int(r.get("max_age") or 0),
+             "id": r.get("id")}
+            for r in rules
+        ])
+        conn.connection.commit()
+    finally:
+        conn.close()
+    _log(f"bucket cors replaced: bucket={bucket} rules={len(rules)}",
+         "storage")
+    return {"ok": True, "rules": len(rules)}
+
+
 @app.post("/api/v1/admin/storage/buckets/{bucket}/presign",
           tags=["Object catalog"],
           summary="Create a presigned GET URL for one object")

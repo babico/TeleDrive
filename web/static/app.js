@@ -567,6 +567,34 @@ function app(){
         this.toast('Presigned link generated (' + r.expires_in + 's)');
       } catch(e){ this.toast(e.message,true); }
     },
+    corsBucket: null,
+    corsRules: [],
+    async editCors(bucket){
+      this.corsBucket = bucket;
+      try {
+        const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/cors');
+        this.corsRules = (r.rules||[]).map(r => ({
+          origins: (r.origins||[]).join(','),
+          methods: (r.methods||[]).join(','),
+          allowed_headers: (r.allowed_headers||[]).join(',') || '*',
+          max_age: r.max_age||0,
+        }));
+        if(!this.corsRules.length) this.corsRules = [{origins:'',methods:'GET',allowed_headers:'*',max_age:0}];
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async saveCors(){
+      const rules = this.corsRules.map(r => ({
+        origins: r.origins.split(',').map(x=>x.trim()).filter(Boolean),
+        methods: r.methods.split(',').map(x=>x.trim()).filter(Boolean),
+        allowed_headers: r.allowed_headers.split(',').map(x=>x.trim()).filter(Boolean),
+        max_age: Number(r.max_age)||0,
+      })).filter(r => r.origins.length && r.methods.length);
+      try {
+        await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.corsBucket)+'/cors',
+          {method:'PUT', body: JSON.stringify({rules})});
+        this.toast('CORS rules saved');
+      } catch(e){ this.toast(e.message,true); }
+    },
     downloadObject(bucket, key){
       window.open('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key), '_blank');
     },

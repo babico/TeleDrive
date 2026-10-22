@@ -143,6 +143,7 @@ tailwind.config = {
         <td x-text="b.quota?( (b.quota.max_size_bytes?fmtBytes(b.quota.max_size_bytes):'unlimited') + ' / ' + (b.quota.max_objects||'unlimited') + ' objs'):'no quota'"></td>
         <td><div class="flex gap-2">
           <button class="btn btn-sm" x-show="isAdmin" @click="editQuota(b.name)">Quota</button>
+          <button class="btn btn-sm" x-show="isAdmin" @click="editCors(b.name)">CORS</button>
           <button class="btn btn-danger btn-sm" x-show="isAdmin" @click="deleteBucket(b.name)">Delete</button>
         </div></td>
       </tr></template></tbody></table>
@@ -202,6 +203,30 @@ tailwind.config = {
           <label>Presigned URL</label>
           <textarea class="input font-mono text-xs" rows="3" :value="presignedUrl" readonly></textarea>
           <button class="btn btn-sm mt-2" @click="copyText(presignedUrl)">Copy URL</button>
+        </div>
+      </div>
+    </div>
+    <div class="mt-3" x-show="corsBucket" x-cloak>
+      <div class="card bg-gray-900">
+        <h4 x-text="'CORS rules — ' + corsBucket"></h4>
+        <p class="muted text-xs">Browser cross-origin access to this bucket's objects. Origins: <code>*</code> or <code>scheme://host[:port]</code>. Methods: GET, PUT, POST, DELETE, HEAD.</p>
+        <div class="scroll space-y-3 mt-2">
+          <template x-for="(r, i) in corsRules" :key="i">
+            <div class="card">
+              <div class="grid grid-cols-2 gap-2">
+                <div class="field"><label>Origins (comma)</label><input class="input" x-model="corsRules[i].origins" placeholder="https://example.com, *"></div>
+                <div class="field"><label>Methods (comma)</label><input class="input" x-model="corsRules[i].methods" placeholder="GET, HEAD"></div>
+                <div class="field"><label>Allowed headers (comma)</label><input class="input" x-model="corsRules[i].allowed_headers" placeholder="*"></div>
+                <div class="field"><label>Max age (seconds)</label><input class="input" type="number" x-model="corsRules[i].max_age"></div>
+              </div>
+              <button class="btn btn-danger btn-sm" @click="corsRules.splice(i,1)">Remove rule</button>
+            </div>
+          </template>
+        </div>
+        <div class="row mt-3">
+          <button class="btn btn-sm" @click="corsRules.push({origins:'',methods:'GET',allowed_headers:'*',max_age:0})">Add rule</button>
+          <button class="btn btn-primary btn-sm" @click="saveCors()">Save</button>
+          <button class="btn btn-sm" @click="corsBucket=null">Close</button>
         </div>
       </div>
     </div>

@@ -1183,3 +1183,51 @@ def test_storage_strategy_endpoint(authenv):
     assert client.put("/api/v1/admin/storage/strategy",
                       headers={**admin, **CSRF},
                       json={"strategy": "round_robin"}).status_code == 200
+
+
+def test_bucket_cors_management(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    csrf = {"X-TeleDrive-CSRF": "1"}
+
+    r = client.post("/api/v1/admin/storage/buckets", headers={**admin, **CSRF},
+                    json={"name": "cors-bucket"})
+    assert r.status_code in (200, 201), r.text
+
+    # Empty by default.
+    r = client.get("/api/v1/admin/storage/buckets/cors-bucket/cors",
+                   headers=admin)
+    assert r.status_code == 200 and r.json() == {"rules": []}
+
+    # Replace with one rule.
+    r = client.put("/api/v1/admin/storage/buckets/cors-bucket/cors",
+                   headers={**admin, **CSRF},
+                   json={"rules": [{"origins": ["https://example.com"],
+                                    "methods": ["GET", "HEAD"],
+                                    "allowed_headers": ["*"],
+                                    "max_age": 3600}]})
+    assert r.status_code == 200, r.text
+    r = client.get("/api/v1/admin/storage/buckets/cors-bucket/cors",
+                   headers=admin)
+    rules = r.json()["rules"]
+    assert rules[0]["origins"] == ["https://example.com"]
+    assert rules[0]["methods"] == ["GET", "HEAD"]
+    assert rules[0]["max_age"] == 3600
+
+    # Validation: bad method, bad origin, bad max_age.
+    base = "/api/v1/admin/storage/buckets/cors-bucket/cors"
+    assert client.put(base, headers={**admin, **CSRF},
+                      json={"rules": [{"origins": ["*"], "methods": ["PATCH"]}]}) \
+        .status_code == 422
+    assert client.put(base, headers={**admin, **CSRF},
+                      json={"rules": [{"origins": ["no-scheme"],
+                                      "methods": ["GET"]}]}) \
+        .status_code == 422
+    assert client.put(base, headers={**admin, **CSRF},
+                      json={"rules": [{"origins": ["*"], "methods": ["GET"],
+                                       "max_age": 99999}]}) \
+        .status_code == 422
+    # Viewer cannot write.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.put(base, headers={**viewer, **CSRF},
+                      json={"rules": []}).status_code == 403

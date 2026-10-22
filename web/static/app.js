@@ -15,7 +15,8 @@ function app(){
     loginError: '',
 
     // Dashboard / queue / history
-    dashboard: {pending:0,failed:0,uploaded:0,strategy:'-'},
+    dashboard: {pending:0,failed:0,uploaded:0,alerts:0,strategy:'-'},
+    dashAccounts: [],
     queueRows: [],
     historyRows: [],
     bucketUsage: [],
@@ -188,12 +189,18 @@ function app(){
           pending: (s.queued||0)+(s.running||0)+(s.staged||0)+(s.publishing||0),
           failed: s.failed||0,
           uploaded: s.done||s.completed||0,
+          alerts: r.unresolved_alert_count||0,
           strategy: this.dashboard.strategy
         };
       } catch(e){}
       try {
         const a = await this.api('/api/v1/admin/storage/active-channel');
         this.dashboard.strategy = (a.active && a.active.strategy) || '-';
+      } catch(e){}
+      try {
+        const r = await this.api('/api/v1/admin/storage/telegram-sessions');
+        this.dashAccounts = r.sessions||[];
+        if(r.strategy) this.dashboard.strategy = r.strategy;
       } catch(e){}
       try {
         const r = await this.api('/api/v1/admin/storage/jobs?limit=100');

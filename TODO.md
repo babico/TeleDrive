@@ -243,8 +243,10 @@ come from simply authorizing more accounts.
       (/s3/buckets), detailed and verified end to end.
 - [x] API management: documentation card with /docs, /redoc,
       openapi.json, GitHub docs and the S3 compatibility matrix.
-- [ ] Dashboard enrichment: more detail (per-account usage, quota
-      bars, job throughput, session health at a glance).
+- [x] Dashboard enrichment DONE: Telegram accounts card (per-account
+      objects, size, live flood cooldown, health verdict) with the
+      active routing strategy and an unresolved-alerts badge; existing
+      quota bars and job stats stay.
 - [ ] CI overhaul: fresh naming scheme, one consistent convention,
       renumbered workflows (meta tests updated accordingly).
 - [ ] Menu-wide consistency: list add/delete flows must work the same

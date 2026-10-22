@@ -110,6 +110,34 @@ tailwind.config = {
       <button class="btn" @click="refreshDashboard()">Refresh</button>
     </div>
   </div>
+  <div class="card" x-show="dashAccounts.length" x-cloak>
+    <h3>Telegram accounts <span class="badge badge-red ml-2" x-show="dashboard.alerts" x-text="dashboard.alerts + ' alert' + (dashboard.alerts>1?'s':'')"></span></h3>
+    <p class="muted text-xs">Upload routing: <b x-text="dashboard.strategy||'-'"></b> — health probes run every 30 minutes.</p>
+    <div class="scroll mt-2">
+      <table>
+        <thead><tr><th>Account</th><th>Objects</th><th>Size</th><th>Flood</th><th>Health</th></tr></thead>
+        <tbody>
+          <template x-for="a in dashAccounts" :key="a.account">
+            <tr>
+              <td class="font-mono" x-text="a.account"></td>
+              <td x-text="a.objects"></td>
+              <td x-text="fmtBytes(a.bytes)"></td>
+              <td>
+                <span x-show="a.cooldown_remaining_s>0" class="text-red-400" x-text="'cooldown '+Math.ceil(a.cooldown_remaining_s/60)+'m'"></span>
+                <span x-show="!a.cooldown_remaining_s" class="text-green-400">OK</span>
+              </td>
+              <td>
+                <span x-show="a.authorized===1" class="text-green-400">OK</span>
+                <span x-show="a.authorized===0" class="text-red-400 font-bold">UNAUTHORIZED</span>
+                <span x-show="a.authorized==null" class="muted">unknown</span>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="card" x-show="bucketUsage.length">
     <h3>Storage usage</h3>
     <div class="space-y-3 mt-3">

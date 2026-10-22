@@ -6,7 +6,7 @@
 > commands and CI contracts, see [CI and Test Guide](docs/CI_WORKFLOWS.md).
 > Product/feature analysis that produced the roadmap phases:
 > `.opencode/teledrive/10x/session-1.md` (git-ignored).
-> Last updated: 2026-10-21.
+> Last updated: 2026-10-22. Complete means implemented **and** verified on the relevant SHA; production owner gates are not fulfilled by CI.
 
 ---
 
@@ -318,7 +318,9 @@ come from simply authorizing more accounts.
 
 ## 11. Release decision rules
 
-- [ ] Any new release candidate requires all mandatory checks green on that
+**Verification checkpoint (2026-10-22):** `main` `3aa70d18` had **five of six** successful mandatory workflows. CI 2 Integration failed in the REST/S3 job (1 failed, 1,040 passed): an upload-job test assumed retired environment configuration. The correct config-only behavior is HTTP 503 for an unset `jobs.source_root`, and HTTP 422 for an out-of-root path. The audit PR corrects the test and a misleading asynchronous Telethon test fake. Confirm **all six** normal main-push workflows on the new merge SHA; earlier green runs cannot certify it. See [Verification Report](docs/VERIFICATION_2026-10-22.md).
+
+- [ ] Any new release candidate requires all six main-push checks green on that
       exact SHA; previous green commits cannot be reused as proof.
 - [ ] Review binaries, tag, release metadata and supported-feature limits
       before publication; do not silently publish unreleased `main` features.

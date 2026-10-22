@@ -54,6 +54,9 @@ storage:
   #   failover     keep one set until a definite flood-wait rejection,
   #                then switch to the next with a fresh send intent
   #   parallel     upload chunks concurrently across all sets
+  # Per-account soft quotas are placement hints, not hard limits.
+  # Bucket→account pins win while available, otherwise routing falls back.
+  # Neither pins nor quotas replicate payloads to another Telegram account.
   strategy: round_robin
 
   scratch_dir: "/data/tmp"

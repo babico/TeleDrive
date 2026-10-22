@@ -1,6 +1,6 @@
 # S3 API Specifications and Compatibility Matrix
 
-> **Scope:** TeleDrive's S3-compatible listener over the shared SQL catalog and USER MTProto engine with historical same-channel Bot-media reads only, **not** AWS S3. **Last reviewed:** 2026-10-21 against the development default branch. **Target:** P2 Advanced S3 planning; this document does not assert production certification or update the released v1.0.7 binary.
+> **Scope:** TeleDrive's S3-compatible listener over the shared SQL catalog and USER MTProto engine with historical same-channel Bot-media reads only, **not** AWS S3. **Last reviewed:** 2026-10-22 against the development default branch. **Target:** P2 Advanced S3 planning; this document does not assert production certification or update the released v1.0.7 binary.
 >
 > **Canonical operation inventory:** [AWS S3 REST API, 2006-03-01, operation list](https://docs.aws.amazon.com/AmazonS3/latest/API/API_Operations_Amazon_Simple_Storage_Service.html). This matrix enumerates **all 116 operations** on that AWS S3 service-reference page as reviewed. AWS S3 Control, S3 Tables, S3 on Outposts, S3 Files and future additions are **separate services**, not silently included in this list. This is a protocol/API coverage inventory, not a claim to implement every possible request parameter, header, mode or AWS service.
 

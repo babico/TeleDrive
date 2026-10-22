@@ -188,3 +188,140 @@ def test_head_returns_actual_object_metadata_without_telegram_download(service):
         params={"key": "head-check.bin"},
     )
     assert forbidden.status_code == 401
+
+
+# --- Signed public share links -------------------------------------------
+
+ADMIN = ("admin-test", "some-long-password")
+
+
+def _admin_post(client, path, **kw):
+    kw.setdefault("headers", {})["x-teledrive-csrf"] = "1"
+    return client.post(path, auth=ADMIN, **kw)
+
+
+def _share(client, payload, bucket="backup-bucket"):
+    webapp._share_rate.clear()
+    return _admin_post(
+        client, f"/api/v1/admin/storage/buckets/{bucket}/shares",
+        json=payload)
+
+
+def test_share_link_streams_object_without_auth(service):
+    client, headers, _, _ = service
+    payload = os.urandom(8192)
+    assert put(client, headers, payload).status_code in (200, 201)
+
+    r = _share(client, {"key": "data.bin", "expires_in": 3600})
+    assert r.status_code == 200, r.text
+    token = r.json()["token"]
+    assert r.json()["path"] == f"/share/{token}"
+
+    # Unauthenticated GET streams the exact bytes.
+    res = client.get(f"/share/{token}")
+    assert res.status_code == 200
+    assert res.content == payload
+    assert res.headers["content-type"].startswith("application/octet-stream")
+    assert "attachment" in res.headers.get("content-disposition", "")
+
+    # The download is counted and reported by the admin listing.
+    listing = client.get("/api/v1/admin/storage/shares", auth=ADMIN)
+    assert listing.status_code == 200
+    entry = next(s for s in listing.json()["shares"] if s["token"] == token)
+    assert entry["download_count"] == 1
+    assert entry["status"] == "active"
+
+
+def test_share_link_password_gate(service):
+    client, headers, _, _ = service
+    payload = b"secret-shared-bytes"
+    assert put(client, headers, payload).status_code in (200, 201)
+    webapp._share_rate.clear()
+    r = _admin_post(client, "/api/v1/admin/storage/buckets/backup-bucket/shares",
+                    json={"key": "data.bin", "password": "hunter2"})
+    token = r.json()["token"]
+
+    # GET shows an HTML password form, never the bytes.
+    page = client.get(f"/share/{token}")
+    assert page.status_code == 200
+    assert "password" in page.text and b"secret-shared-bytes" not in page.content
+
+    # Wrong password is rejected without consuming a download slot.
+    bad = client.post(f"/share/{token}", data={"password": "nope"})
+    assert bad.status_code == 401
+
+    # Correct password streams the object.
+    good = client.post(f"/share/{token}", data={"password": "hunter2"})
+    assert good.status_code == 200 and good.content == payload
+
+
+def test_share_link_expiry_count_and_revocation(service):
+    client, headers, _, tmp = service
+    assert put(client, headers, b"bounded").status_code in (200, 201)
+    webapp._share_rate.clear()
+    r = _admin_post(client, "/api/v1/admin/storage/buckets/backup-bucket/shares",
+                    json={"key": "data.bin", "max_downloads": 1})
+    token = r.json()["token"]
+    assert client.get(f"/share/{token}").status_code == 200
+    # Exhausted: uniform 404.
+    assert client.get(f"/share/{token}").status_code == 404
+
+    # A second link, expired by force via the DB: uniform 404.
+    webapp._share_rate.clear()
+    r = _admin_post(client, "/api/v1/admin/storage/buckets/backup-bucket/shares",
+                    json={"key": "data.bin", "expires_in": 3600})
+    token2 = r.json()["token"]
+    db = webapp.db_connect()
+    try:
+        from sqlalchemy import text
+        db.connection.execute(text(
+            "UPDATE share_links SET expires_at = 1 WHERE token = :t"),
+            {"t": token2})
+        db.commit()
+    finally:
+        db.close()
+    assert client.get(f"/share/{token2}").status_code == 404
+
+    # Revocation removes the link.
+    webapp._share_rate.clear()
+    r = _admin_post(client, "/api/v1/admin/storage/buckets/backup-bucket/shares",
+                    json={"key": "data.bin"})
+    token3 = r.json()["token"]
+    revoked = client.delete(f"/api/v1/admin/storage/shares/{token3}",
+                            auth=ADMIN, headers={"x-teledrive-csrf": "1"})
+    assert revoked.status_code == 200
+    assert client.get(f"/share/{token3}").status_code == 404
+
+    # Unknown and malformed tokens answer 404 without leaking anything.
+    assert client.get("/share/does-not-exist-token").status_code == 404
+    assert client.get("/share/../../etc/passwd").status_code in (404, 403, 422)
+
+
+def test_share_creation_validation(service):
+    client, headers, _, _ = service
+    assert put(client, headers, b"x").status_code in (200, 201)
+    webapp._share_rate.clear()
+    base = "/api/v1/admin/storage/buckets/backup-bucket/shares"
+    assert _admin_post(client, base, json={"key": ""}).status_code == 422
+    assert _admin_post(client, base, json={}).status_code == 422
+    assert _admin_post(client, base, json={
+        "key": "data.bin", "expires_in": 1}).status_code == 422
+    assert _admin_post(client, base, json={
+        "key": "data.bin", "max_downloads": 0}).status_code == 422
+    assert _admin_post(client, base, json={
+        "key": "data.bin", "password": ""}).status_code == 422
+    # Missing object and missing bucket are 404.
+    assert _admin_post(client, base, json={"key": "ghost.bin"}).status_code == 404
+    assert _admin_post(client, "/api/v1/admin/storage/buckets/nope/shares",
+                       json={"key": "x"}).status_code == 404
+
+
+def test_share_public_route_rate_limit(service):
+    client, headers, _, _ = service
+    assert put(client, headers, b"limited").status_code in (200, 201)
+    webapp._share_rate.clear()
+    r = _admin_post(client, "/api/v1/admin/storage/buckets/backup-bucket/shares",
+                    json={"key": "data.bin"})
+    token = r.json()["token"]
+    codes = [client.get(f"/share/{token}").status_code for _ in range(70)]
+    assert 429 in codes, codes[:5]

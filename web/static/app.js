@@ -168,6 +168,7 @@ function app(){
         setInterval(()=>{ this.floodNow = Math.floor(Date.now()/1000); }, 1000);
       } else if(path === '/s3/buckets'){
         await this.refreshBuckets();
+        await this.refreshShares();
       } else if(path === '/s3/credentials'){
         await this.refreshS3Keys();
       } else if(path === '/users'){
@@ -631,6 +632,50 @@ function app(){
     corsBucket: null,
     pinBucket: null,
     pinAccount: '',
+    shareKey: null,
+    shareBucket: '',
+    shareExpiry: '',
+    shareMaxDownloads: '',
+    sharePassword: '',
+    shareUrl: '',
+    shares: [],
+    shareOrigin: window.location.origin,
+    async shareObject(bucket, key){
+      this.shareBucket = bucket;
+      this.shareKey = key;
+      this.shareUrl = '';
+      this.shareExpiry = '86400';
+      this.shareMaxDownloads = '';
+      this.sharePassword = '';
+      await this.refreshShares();
+    },
+    async createShare(){
+      try {
+        const body = {key: this.shareKey};
+        if(this.shareExpiry) body.expires_in = Number(this.shareExpiry);
+        if(this.shareMaxDownloads) body.max_downloads = Number(this.shareMaxDownloads);
+        if(this.sharePassword) body.password = this.sharePassword;
+        const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.shareBucket)+'/shares',
+          {method:'POST', body: JSON.stringify(body)});
+        this.shareUrl = this.shareOrigin + r.path;
+        this.toast('Share link created');
+        await this.refreshShares();
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async refreshShares(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/shares');
+        this.shares = r.shares;
+      } catch(e){ /* shares list is best-effort */ }
+    },
+    async revokeShare(token){
+      if(!this.confirmDelete('revoke this share link')) return;
+      try {
+        await this.api('/api/v1/admin/storage/shares/'+encodeURIComponent(token), {method:'DELETE'});
+        this.toast('Share link revoked');
+        await this.refreshShares();
+      } catch(e){ this.toast(e.message,true); }
+    },
     async editPin(bucket){
       this.pinBucket = bucket;
       await this.refreshTgSessionStatus();

@@ -87,8 +87,9 @@
       against the S3 listener (mount-as-drive on any desktop).
 - [x] **Quota usage bars on the dashboard** — used vs quota data already
       returned by `admin_list_buckets`.
-- [ ] **Copy presigned URL button** in the S3 browser (moved to Phase 3:
-      belongs with signed share links, which need an owned signing path).
+- [x] **Copy presigned URL button** in the S3 browser DONE: per-object
+      "Link" action opens the presign dialog (expiry selector, server-side
+      SigV4 GET URL, audit-logged, one-click Copy URL).
 
 ## 4. Phase 2 — The file manager (WebUI usable without an S3 client)
 
@@ -106,8 +107,18 @@
 
 ## 5. Phase 3 — Sharing, visibility and governance
 
-- [ ] Share links: signed public object links with expiry, max-download
-      count and optional password; rate-limited public route.
+- [x] Share links DONE: signed public object links —
+      POST /api/v1/admin/storage/buckets/{bucket}/shares creates a
+      192-bit token URL bounded by expiry (60s..30d, optional), download
+      count (CAS-claimed before streaming, optional) and an optional
+      password (PBKDF2-HMAC-SHA256 200k, constant-time compare).
+      GET/POST /share/{token} streams the object unauthenticated with a
+      minimal dark HTML password form (urlencoded, no extra deps);
+      invalid/expired/exhausted/revoked states answer a uniform 404.
+      Per-IP sliding-window rate limit (60/min). Admin listing with live
+      status + revocation (audit-logged). S3 browser: per-object Share
+      action with expiry/count/password fields and a share management
+      table with revoke.
 - [x] Usage analytics DONE: GET /api/v1/admin/storage/usage?days=N —
       daily published objects + bytes series (Python-side aggregation,
       portable and split-DB defensive); the dashboard renders a
@@ -203,8 +214,13 @@ come from simply authorizing more accounts.
       explicit operator intent wins over strategy rotation and soft
       quotas; unavailable pins fall through to the normal routing.
       Buckets page: Pin button with an account dropdown (empty = clear).
-- [ ] Account health probes: periodic `is_authorized` check per session,
-      dead/expired session detection with a UI warning and re-login hint.
+- [x] Account health probes DONE: `telegram_session_health_loop`
+      probes every session every 30 minutes (connect + is_authorized),
+      stores the authorized flag + health_checked_at, logs the moment a
+      previously-healthy session dies, and the accounts card shows
+      OK/UNAUTHORIZED with the last check time and a re-login hint;
+      on-demand probe via POST .../telegram-sessions/{account}/
+      health-check.
 - [x] Strategy control from the UI: one cross-account routing selector
       in the accounts card (PUT /api/v1/admin/storage/strategy) with an
       immediate runtime hot-reload. The runtime also reloads after

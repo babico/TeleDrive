@@ -124,6 +124,24 @@ bucket_quotas = Table(
     Column("updated_at", BigInteger, nullable=False),
 )
 
+# Signed public share links: an unauthenticated URL that streams one
+# object, bounded by expiry, download count and an optional password.
+share_links = Table(
+    "share_links", metadata,
+    Column("token", String(64), primary_key=True),
+    Column("bucket", String(63), nullable=False),
+    Column("object_key", String(1024), nullable=False),
+    Column("created_by", String(255), nullable=False),
+    Column("created_at", BigInteger, nullable=False),
+    Column("expires_at", BigInteger),
+    Column("max_downloads", Integer),
+    Column("download_count", Integer, nullable=False, default=0),
+    # PBKDF2-HMAC-SHA256; both NULL means the link needs no password.
+    Column("password_salt", String(64)),
+    Column("password_hash", String(128)),
+    Column("revoked", Integer, nullable=False, default=0),
+)
+
 users = Table(
     "users", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

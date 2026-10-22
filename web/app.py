@@ -5,19 +5,22 @@ import base64
 import hashlib
 import hmac
 import copy
+import html as _html
 import secrets
 import tempfile
 import os
 import gzip
 import shutil
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+import urllib.parse
+from urllib.parse import quote as _url_quote, urlsplit
 from typing import Any
 
 import yaml
@@ -3222,6 +3225,129 @@ def admin_presign_object(bucket: str, request: Request,
     return {"url": url, "expires_in": expires}
 
 
+@app.post("/api/v1/admin/storage/buckets/{bucket}/shares",
+          tags=["Object catalog"],
+          summary="Create a signed public share link for one object")
+def admin_create_share(bucket: str, request: Request,
+                       payload: dict = Body(...),
+                       _: None = Depends(require_auth)):
+    """Unauthenticated URL bounded by expiry, download count and an
+    optional password (PBKDF2-hashed; the plaintext is never stored)."""
+    _same_origin(request)
+    key = str(payload.get("key", "")).strip()
+    if not key:
+        raise HTTPException(422, "key is required")
+    expires_in = payload.get("expires_in")
+    if expires_in is not None:
+        try:
+            expires_in = int(expires_in)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "expires_in must be an integer") from None
+        if not 60 <= expires_in <= 30 * 86400:
+            raise HTTPException(422, "expires_in must be 60..2592000 seconds")
+    max_downloads = payload.get("max_downloads")
+    if max_downloads is not None:
+        try:
+            max_downloads = int(max_downloads)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "max_downloads must be an integer") from None
+        if not 1 <= max_downloads <= 1_000_000:
+            raise HTTPException(422, "max_downloads must be 1..1000000")
+    password = payload.get("password")
+    if password is not None and not (
+            isinstance(password, str) and 1 <= len(password) <= 128):
+        raise HTTPException(422, "password must be 1..128 characters")
+
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        try:
+            catalog.get(bucket, key)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Object not found") from exc
+        from sqlalchemy import insert as _insert
+        from teledrive.db import share_links
+        token = secrets.token_urlsafe(24)
+        now = int(time.time())
+        salt = digest = None
+        if password is not None:
+            salt, digest = _hash_share_password(password)
+        conn.connection.execute(_insert(share_links).values(
+            token=token, bucket=bucket, object_key=key,
+            created_by=(request.state.user or {}).get("username", "-"),
+            created_at=now,
+            expires_at=now + expires_in if expires_in else None,
+            max_downloads=max_downloads, download_count=0,
+            password_salt=salt, password_hash=digest, revoked=0,
+        ))
+        conn.connection.commit()
+    finally:
+        conn.close()
+    _log(f"share link created: bucket={bucket} key={key} token={token[:6]}… "
+         f"expires_in={expires_in} max_downloads={max_downloads} "
+         f"password={'yes' if password is not None else 'no'}", "share")
+    return {"token": token, "path": f"/share/{token}"}
+
+
+@app.get("/api/v1/admin/storage/shares", tags=["Object catalog"],
+         summary="List all share links with live status")
+def admin_list_shares(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        rows = conn.connection.execute(_text(
+            "SELECT token, bucket, object_key, created_by, created_at, "
+            "expires_at, max_downloads, download_count, "
+            "password_salt IS NOT NULL, revoked FROM share_links "
+            "ORDER BY created_at DESC")).all()
+        now = int(time.time())
+        shares = []
+        for (token, bucket, key, author, created, expires, max_downloads,
+             count, has_password, revoked) in rows:
+            if revoked:
+                status = "revoked"
+            elif expires is not None and expires <= now:
+                status = "expired"
+            elif max_downloads is not None and count >= max_downloads:
+                status = "exhausted"
+            else:
+                status = "active"
+            shares.append({
+                "token": token, "bucket": bucket, "key": key,
+                "created_by": author, "created_at": created,
+                "expires_at": expires, "max_downloads": max_downloads,
+                "download_count": count, "password": bool(has_password),
+                "revoked": bool(revoked), "status": status,
+            })
+        return {"shares": shares, "count": len(shares)}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/admin/storage/shares/{token}", tags=["Object catalog"],
+            summary="Revoke a share link")
+def admin_revoke_share(token: str, request: Request,
+                       _: None = Depends(require_auth)):
+    _same_origin(request)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", token):
+        raise HTTPException(404, "Unknown share link")
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        deleted = conn.connection.execute(_text(
+            "DELETE FROM share_links WHERE token = :t"
+        ), {"t": token}).rowcount
+        conn.connection.commit()
+    finally:
+        conn.close()
+    if not deleted:
+        raise HTTPException(404, "Unknown share link")
+    _log(f"share link revoked: token={token[:6]}…", "share")
+    return {"ok": True}
+
+
 @app.post("/api/v1/admin/storage/buckets/{bucket}/objects/copy",
           tags=["Object catalog"],
           summary="Copy (rename/move) an object at the catalog level")
@@ -4360,6 +4486,187 @@ async def get_object_content(
         headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
     return StreamingResponse(stream(), status_code=206 if partial else 200,
                              media_type="application/octet-stream", headers=headers)
+
+
+# --- Signed public share links -------------------------------------------
+#
+# An unauthenticated URL streaming exactly one object, bounded by
+# expiry, download count and an optional password. Tokens carry 192
+# bits of entropy; invalid states answer a uniform 404 so the link's
+# existence is never leaked.
+
+_SHARE_RATE_LIMIT = 60          # requests
+_SHARE_RATE_WINDOW = 60.0       # seconds
+_share_rate: dict[str, deque] = {}
+_share_rate_lock = threading.Lock()
+
+
+def _share_rate_limited(client_ip: str) -> bool:
+    """Small in-memory sliding window per client IP (public surface)."""
+    now = time.monotonic()
+    with _share_rate_lock:
+        window = _share_rate.setdefault(client_ip, deque())
+        while window and now - window[0] > _SHARE_RATE_WINDOW:
+            window.popleft()
+        if len(window) >= _SHARE_RATE_LIMIT:
+            return True
+        window.append(now)
+        if len(_share_rate) > 10_000:
+            stale = [ip for ip, hits in _share_rate.items()
+                     if not hits or now - hits[-1] > _SHARE_RATE_WINDOW]
+            for ip in stale:
+                del _share_rate[ip]
+        return False
+
+
+def _hash_share_password(password: str, salt: str | None = None):
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt),
+        200_000).hex()
+    return salt, digest
+
+
+def _share_html(title: str, body: str, status_code: int = 200) -> Response:
+    page = ("<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{_html.escape(title)}</title><style>"
+            "body{background:#111827;color:#e5e7eb;font-family:system-ui,"
+            "sans-serif;display:flex;align-items:center;justify-content:"
+            "center;min-height:100vh;margin:0}"
+            ".card{background:#1f2937;border:1px solid #374151;border-radius:"
+            "8px;padding:2rem;max-width:24rem;text-align:center}"
+            "input{width:100%;box-sizing:border-box;padding:.5rem;margin:"
+            ".75rem 0;border-radius:4px;border:1px solid #4b5563;"
+            "background:#111827;color:#e5e7eb}"
+            "button{background:#2563eb;color:#fff;border:0;border-radius:4px;"
+            "padding:.5rem 1.5rem;cursor:pointer;font-weight:600}"
+            ".err{color:#f87171;font-size:.9rem}"
+            "</style></head><body><div class='card'>" + body +
+            "</div></body></html>")
+    return Response(page, status_code=status_code,
+                    media_type="text/html; charset=utf-8")
+
+
+def _load_active_share(token: str):
+    """Fetch a usable share row; anything else collapses to 404."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", token):
+        return None
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        row = conn.connection.execute(_text(
+            "SELECT token, bucket, object_key, password_salt, password_hash "
+            "FROM share_links WHERE token = :t AND revoked = 0 "
+            "AND (expires_at IS NULL OR expires_at > :now) "
+            "AND (max_downloads IS NULL OR download_count < max_downloads)"
+        ), {"t": token, "now": int(time.time())}).first()
+        return row
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+async def _stream_share(row) -> StreamingResponse:
+    """Consume one download slot atomically, then stream the object."""
+    token, bucket, key = row[0], row[1], row[2]
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        claimed = conn.connection.execute(_text(
+            "UPDATE share_links SET download_count = download_count + 1 "
+            "WHERE token = :t AND revoked = 0 "
+            "AND (max_downloads IS NULL OR download_count < max_downloads)"
+        ), {"t": token}).rowcount
+        conn.connection.commit()
+        if claimed != 1:
+            raise HTTPException(404, "Link not found or expired")
+        try:
+            item = BucketCatalog(ManifestStore(conn)).get(bucket, key).item
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Link not found or expired") from exc
+        transport = storage_transport(conn)
+        root = Path(STORAGE_SCRATCH_DIR)
+        _secure_mkdir(root)
+        engine = TelegramObjectStorage(
+            ManifestStore(conn), transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=root)
+    except BaseException:
+        conn.close()
+        raise
+
+    async def stream():
+        try:
+            async for piece in engine.iter_bytes(item.id):
+                yield piece
+        finally:
+            conn.close()
+
+    filename = key.rsplit("/", 1)[-1] or "download"
+    quoted = _url_quote(filename)
+    return StreamingResponse(stream(), media_type="application/octet-stream",
+                             headers={
+                                 "Content-Length": str(item.size),
+                                 "Content-Disposition":
+                                     f"attachment; filename*=UTF-8''{quoted}",
+                                 "X-Content-Type-Options": "nosniff",
+                             })
+
+
+@app.get("/share/{token}", tags=["Sharing"],
+         summary="Public share link: stream the shared object")
+async def public_share_get(token: str, request: Request):
+    client_ip = request.client.host if request.client else "-"
+    if _share_rate_limited(client_ip):
+        raise HTTPException(429, "Too many requests")
+    row = _load_active_share(token)
+    if row is None:
+        return _share_html(
+            "Link unavailable",
+            "<h2>Link not found or expired</h2>", status_code=404)
+    if row[3] is not None:  # password protected
+        return _share_html(
+            "Protected download",
+            "<h2>Protected download</h2>"
+            "<p>This link requires a password.</p>"
+            f"<form method='post' action='/share/{_html.escape(token)}'>"
+            "<input type='password' name='password' placeholder='Password' "
+            "autofocus required><button type='submit'>Download</button></form>")
+    return await _stream_share(row)
+
+
+@app.post("/share/{token}", tags=["Sharing"],
+          summary="Public share link: unlock a password-protected object")
+async def public_share_post(token: str, request: Request):
+    client_ip = request.client.host if request.client else "-"
+    if _share_rate_limited(client_ip):
+        raise HTTPException(429, "Too many requests")
+    row = _load_active_share(token)
+    if row is None:
+        return _share_html(
+            "Link unavailable",
+            "<h2>Link not found or expired</h2>", status_code=404)
+    if row[3] is None:
+        return await _stream_share(row)
+    # The share form is always application/x-www-form-urlencoded (our
+    # own HTML); parse it directly instead of pulling in python-multipart.
+    raw = (await request.body()).decode("utf-8", "replace")
+    fields = urllib.parse.parse_qs(raw)
+    password = str((fields.get("password") or [""])[0])
+    _, candidate = _hash_share_password(password, row[3])
+    if not hmac.compare_digest(candidate, row[4] or ""):
+        _log(f"share password rejected: token={token[:6]}… ip={client_ip}",
+             "share")
+        return _share_html(
+            "Protected download",
+            "<h2>Protected download</h2>"
+            "<p class='err'>Incorrect password.</p>"
+            f"<form method='post' action='/share/{_html.escape(token)}'>"
+            "<input type='password' name='password' placeholder='Password' "
+            "autofocus required><button type='submit'>Download</button></form>",
+            status_code=401)
+    return await _stream_share(row)
 
 
 @app.get("/api/health", tags=["System"], response_model=OKResponse, summary="Liveness health check (unauthenticated)")

@@ -208,6 +208,54 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
     return access_key
 
 
+def presign_get_url(endpoint: str, bucket: str, key: str, access_key: str,
+                    secret: str, expires: int = 3600, *,
+                    region: str = "us-east-1",
+                    now: datetime | None = None) -> str:
+    """Create a presigned GET URL for one object.
+
+    Mirrors _presigned_signature's canonical recipe exactly (host-only
+    signed headers, UNSIGNED-PAYLOAD, sorted encoded query) so the
+    gateway verifies its own URLs. The secret never leaves the caller.
+    """
+    if not (1 <= int(expires) <= 604800):
+        raise ValueError("Expiry must be 1..604800 seconds")
+    clock = now or datetime.now(timezone.utc)
+    stamp = clock.strftime("%Y%m%dT%H%M%SZ")
+    date = stamp[:8]
+    host = endpoint.split("://", 1)[-1].rstrip("/")
+    path = "/" + "/".join(
+        quote(segment, safe="-_.~") for segment in (bucket, *key.split("/"))
+        if segment != "")
+    scope = f"{date}/{region}/s3/aws4_request"
+    pairs = [
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
+        ("X-Amz-Credential", f"{access_key}/{scope}"),
+        ("X-Amz-Date", stamp),
+        ("X-Amz-Expires", str(int(expires))),
+        ("X-Amz-SignedHeaders", "host"),
+    ]
+    canonical_query = "&".join(
+        f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}"
+        for k, v in sorted(pairs, key=lambda p:
+                           (quote(p[0], safe='-_.~'), quote(p[1], safe='-_.~')))
+    )
+    canonical = (
+        f"GET\n{path}\n{canonical_query}\n"
+        f"host:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+    )
+    string_to_sign = (
+        f"AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{_sha(canonical.encode())}"
+    )
+    auth_key = _hmac(b"AWS4" + secret.encode(), date)
+    for word in (region, "s3", "aws4_request"):
+        auth_key = _hmac(auth_key, word)
+    signature = hmac.new(auth_key, string_to_sign.encode(),
+                         hashlib.sha256).hexdigest()
+    return (f"{endpoint.rstrip('/')}{path}?{canonical_query}"
+            f"&X-Amz-Signature={signature}")
+
+
 def verify_header_signature(request: Request, lookup_secret, permission: str, *,
                             now: datetime | None = None) -> str:
     """Return authenticated access-key ID; never reveal the secret on failure.

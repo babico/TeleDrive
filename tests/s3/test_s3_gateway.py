@@ -463,3 +463,34 @@ def test_s3_port_traffic_is_logged(service, monkeypatch):
     captured.clear()
     client.get("/__health")
     assert not captured
+
+
+def test_presigned_url_round_trip(service):
+    """The generator's URLs must verify against the live gateway."""
+    client, issued, telegram, connection, key = service
+    # Create the bucket, then seed one object through the signed PUT path.
+    r = signed(service, "PUT", "/roundtrip-bucket")
+    assert r.status_code == 200, r.text
+    body = b"presign-me-payload"
+    r = signed(service, "PUT", "/roundtrip-bucket/presign/key.txt", body)
+    assert r.status_code == 200, r.text
+
+    from teledrive.s3.sigv4 import presign_get_url
+    secret = client.app  # not needed; use the issued secret directly
+    url = presign_get_url("http://localhost:9000", "roundtrip-bucket",
+                          "presign/key.txt", issued.access_key,
+                          issued.secret_key, expires=300)
+    assert "X-Amz-Signature" in url and "X-Amz-Expires=300" in url
+
+    # GET via the presigned URL: no Authorization header at all.
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    r = client.get(parsed.path + "?" + parsed.query,
+                   headers={"host": "localhost:9000"})
+    assert r.status_code == 200, r.text
+    assert r.content == body
+
+    # Tampering with the expiry invalidates the signature.
+    r = client.get(parsed.path + "?" + parsed.query.replace("300", "9999"),
+                   headers={"host": "localhost:9000"})
+    assert r.status_code in (400, 401, 403)

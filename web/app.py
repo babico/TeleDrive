@@ -2917,6 +2917,56 @@ class ObjectCopyRequest(BaseModel):
     destination_key: str = Field(min_length=1, max_length=1024)
 
 
+@app.post("/api/v1/admin/storage/buckets/{bucket}/presign",
+          tags=["Object catalog"],
+          summary="Create a presigned GET URL for one object")
+def admin_presign_object(bucket: str, request: Request,
+                         payload: dict = Body(...),
+                         _: None = Depends(require_auth)):
+    """Server-side SigV4 query signing; the credential secret never
+    leaves the process, only the signed URL is returned."""
+    _same_origin(request)
+    key = str(payload.get("key", "")).strip()
+    if not key:
+        raise HTTPException(422, "key is required")
+    try:
+        expires = int(payload.get("expires") or 3600)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "expires must be an integer") from None
+    credential_id = payload.get("credential_id")
+    conn = db_connect()
+    try:
+        if bucket not in BucketCatalog(ManifestStore(conn)).list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        if not _bucket_has_current_key(conn, bucket, key):
+            raise HTTPException(404, "Object not found")
+        try:
+            store = S3CredentialStore(conn, load_master_key())
+            if credential_id:
+                revealed = store.reveal(str(credential_id))
+            else:
+                candidates = [c for c in store.list() if not c["revoked"]
+                              and "s3:GetObject" in c["permissions"]]
+                if not candidates:
+                    raise HTTPException(
+                        422, "No active S3 credential with s3:GetObject")
+                revealed = store.reveal(candidates[0]["id"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    finally:
+        conn.close()
+    host = (request.headers.get("host") or "").split(":")[0]
+    scheme = "https" if S3_SSL_CERTFILE else "http"
+    from teledrive.s3.sigv4 import presign_get_url
+    url = presign_get_url(f"{scheme}://{host}:{settings_s3_port()}",
+                          bucket, key, revealed["access_key"],
+                          revealed["secret_key"], expires)
+    _log(f"presigned URL issued: bucket={bucket} key={key} "
+         f"expires={expires}s credential={revealed['access_key']}",
+         "security")
+    return {"url": url, "expires_in": expires}
+
+
 @app.post("/api/v1/admin/storage/buckets/{bucket}/objects/copy",
           tags=["Object catalog"],
           summary="Copy (rename/move) an object at the catalog level")

@@ -242,8 +242,12 @@ come from simply authorizing more accounts.
       (revoked ones are immutable; access key and secret never change —
       rotation stays a new-credential flow). Credentials page gained an
       inline editor.
-- [ ] S3 sub-menu: bucket browser moves under the S3 menu
-      (/s3/buckets), detailed and verified end to end.
+- [x] S3 sub-menu + bucket browser DONE (/s3/buckets): upload,
+      download, inline previews, rename/move/copy, bulk delete,
+      cross-bucket search, per-bucket quotas, and now PRESIGNED GET
+      links — server-side SigV4 query signing (secret never leaves the
+      process), verified end to end against the live gateway including
+      signature-tamper rejection.
 - [x] API management: documentation card with /docs, /redoc,
       openapi.json, GitHub docs and the S3 compatibility matrix.
 - [x] Dashboard enrichment DONE: Telegram accounts card (per-account

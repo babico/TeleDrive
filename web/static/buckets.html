@@ -162,6 +162,7 @@ tailwind.config = {
           <td x-text="fmtTs(o.created_at)"></td>
           <td class="whitespace-nowrap">
             <button class="btn btn-sm" @click="downloadObject(currentBucket,o.key)">Download</button>
+            <button class="btn btn-sm" x-show="canWrite" @click="presignObject(currentBucket,o.key)">Link</button>
             <button class="btn btn-sm" @click="previewObject(currentBucket,o.key)">Preview</button>
             <button class="btn btn-sm" x-show="canWrite" @click="renameObject(currentBucket,o.key)">Rename</button>
             <button class="btn btn-sm" x-show="canWrite" @click="moveObject(currentBucket,o.key)">Move</button>
@@ -185,6 +186,22 @@ tailwind.config = {
           <audio x-show="previewKind==='audio'" :src="previewUrl()" controls class="w-full"></audio>
           <pre x-show="previewKind==='text'" x-text="previewText" class="text-xs whitespace-pre-wrap bg-gray-950 p-3 rounded"></pre>
           <p class="muted" x-show="previewKind==='binary'" x-text="'No inline preview for this file type (' + fmtBytes(previewSize) + ')'"></p>
+        </div>
+      </div>
+    </div>
+    <div class="mt-3" x-show="presignKey" x-cloak>
+      <div class="card bg-gray-900">
+        <h4 x-text="'Shareable link — ' + presignKey"></h4>
+        <p class="muted text-xs">A presigned GET URL works without login until it expires. Anyone with the link can download the object.</p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field" style="flex:0 0 200px"><label>Expires in (seconds)</label><input x-model="presignExpiry" class="input" type="number"></div>
+          <button class="btn btn-primary btn-sm" @click="presignObject(presignBucket, presignKey)">Generate</button>
+          <button class="btn btn-sm" @click="presignKey=null">Close</button>
+        </div>
+        <div class="field mt-3" x-show="presignedUrl" x-cloak>
+          <label>Presigned URL</label>
+          <textarea class="input font-mono text-xs" rows="3" :value="presignedUrl" readonly></textarea>
+          <button class="btn btn-sm mt-2" @click="copyText(presignedUrl)">Copy URL</button>
         </div>
       </div>
     </div>

@@ -552,6 +552,21 @@ function app(){
     },
     fmtBytes(b){ if(b==null) return '-'; if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; if(b<1073741824) return (b/1048576).toFixed(1)+' MB'; return (b/1073741824).toFixed(2)+' GB'; },
     quotaPct(used, max){ if(!max) return 0; return Math.min(100, Math.round(100*used/max)); },
+    presignKey: null,
+    presignBucket: '',
+    presignExpiry: 3600,
+    presignedUrl: '',
+    async presignObject(bucket, key){
+      this.presignBucket = bucket;
+      this.presignKey = key;
+      this.presignedUrl = '';
+      try {
+        const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/presign',
+          {method:'POST', body: JSON.stringify({key, expires: Number(this.presignExpiry)||3600})});
+        this.presignedUrl = r.url;
+        this.toast('Presigned link generated (' + r.expires_in + 's)');
+      } catch(e){ this.toast(e.message,true); }
+    },
     downloadObject(bucket, key){
       window.open('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key), '_blank');
     },

@@ -258,11 +258,32 @@ come from simply authorizing more accounts.
 
 ## 8. Advanced S3 parity track
 
-- [ ] Deliver [P2 Advanced S3](docs/S3_SPECS.md#5-p2-advanced-s3-implementation-plan)
+- [x] Deliver [P2 Advanced S3](docs/S3_SPECS.md#5-p2-advanced-s3-implementation-plan)
       from the [116-operation compatibility matrix](docs/S3_SPECS.md):
       fail-closed selectors, advanced multipart/checksums, policies,
       encryption, lifecycle and independent client tests. Keep partial
-      capabilities explicitly partial until verified.
+      capabilities explicitly partial until verified. STATUS (evidence
+      on the current SHA): P2-0 done (manifest + route guard); P2-1
+      done (UploadPartCopy shipped and boto3-verified — the spec and
+      manifest now say so: 11 supported / 45 partial / 60 unsupported);
+      P2-2 decided and shipped (immutable private-only model: honest
+      AWS-shaped compat reads, 501 writes); P2-3/P2-4/P2-5 remain
+      intentionally unsupported (fail-closed) per the spec's "no fake
+      AWS semantics" rule. Checklist items closed: adversarial
+      selector sweep (manifest-driven: every one of the 60
+      unsupported operations is hit with a VALID signature and proven
+      non-2xx, non-mutating, zero-Telegram — a mapping test keeps
+      future operations from being skipped silently) and the
+      version-pinned client matrix (boto3 + AWS CLI + rclone v1.66.0,
+      pinned in CI). Real-bug fix on the way: CreateBucket is now
+      idempotent for existing owned buckets (AWS us-east-1 semantics)
+      — rclone's DEFAULT pre-upload bucket preparation previously
+      failed with 400; the default-config rclone flow (mkdir, nested
+      copyto, ls, byte-identical cat, size, delete) is now a live
+      regression test. Remaining open checklist items (per-op
+      exhaustive normal/malformed/retry/race/crash coverage, both-DB
+      mutation invariants, migration/rollback docs) stay tracked in
+      the spec's engineering checklist.
 - [ ] Extend trustworthy recovery of unknown original Telegram history beyond
       candidate markers without inventing metadata.
 - [ ] Establish longer-duration real-environment capacity benchmarks on

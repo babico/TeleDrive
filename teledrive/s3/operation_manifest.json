@@ -296,13 +296,13 @@
     },
     {
       "name": "GetBucketLifecycle",
-      "status": "unsupported",
-      "workstream": "P2-D"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketLifecycle",
-      "status": "unsupported",
-      "workstream": "P2-D"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketReplication",
@@ -326,8 +326,8 @@
     },
     {
       "name": "UploadPartCopy",
-      "status": "unsupported",
-      "workstream": "P2-E"
+      "status": "partial",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketWebsite",

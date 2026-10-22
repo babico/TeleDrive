@@ -39,7 +39,7 @@
 | Bucket CORS | Restricted origin/method/header CORS rules, max **100** rules, **64 KiB** config. CORS is not authentication. | [CORS](../teledrive/s3/cors.py), [tests](../tests/s3/test_s3_cors.py) |
 | Public access | **Private only.** Get/PutPublicAccessBlock expose/accept all four values as true. GetBucketPolicyStatus is read-only and always IsPublic=false because public grants/policies cannot be configured. Non-private ACLs and public bucket policies are **not** supported. | [public access module](../teledrive/s3/public_access.py), [tests](../tests/s3/test_s3_public_access_block.py) |
 | Multipart | Durable staged parts, up to **10,000** part numbers, minimum **5 MiB** for non-final completed parts, size/part limits, guarded completion and abort. Completion atomically records an immutable object-version part snapshot (number/size/SHA-256/ETag); historical and copied multipart attributes have bounded 1–1,000 part pages and a read-only pre-upgrade SQL fallback. Failed/aborted/unused Telegram chunks remain protected until approved GC. | [multipart](../teledrive/s3/multipart.py), [tests](../tests/s3/test_s3_multipart.py), [recovery tests](../tests/s3/test_s3_recovery.py) |
-| Copy | Metadata-level local bucket/key and selected source-VersionId copy; signed source, permissions, metadata/tag directives and ETag source preconditions. No UploadPartCopy, presigned CopyObject or ranged source copy. | [gateway copy route](../web/s3.py), [tests](../tests/s3/test_s3_copy.py), [version copy](../tests/s3/test_s3_version_copy.py) |
+| Copy | Metadata-level local bucket/key and selected source-VersionId copy; signed source, permissions, metadata/tag directives and ETag source preconditions. UploadPartCopy stages source bytes through Telegram exactly like UploadPart. No presigned CopyObject or ranged source copy. | [gateway copy route](../web/s3.py), [tests](../tests/s3/test_s3_copy.py), [version copy](../tests/s3/test_s3_version_copy.py) |
 | Unsupported write semantics | SSE-S3/SSE-KMS/SSE-C, retention/Object Lock, public ACLs, non-STANDARD tiers, request-payer, aws-chunked/trailer semantics and select copy conditions **must not be silently acknowledged**. | [fail-closed write checks](../web/s3.py), [tests](../tests/s3/test_s3_fail_closed.py) |
 | Clients and operational proof | Boto3, AWS CLI and rclone scenarios exist, with **synthetic Telegram transport** for most storage integration tests; dedicated live Telegram E2E tests validate other actual payload paths. **Cyberduck, other SDKs and every SDK checksum mode remain unverified.** | [client tests](../tests/s3/test_s3_cli_compat.py), [CI guide](CI_WORKFLOWS.md) |
 | Physical delete and lifecycle | Object deletion removes catalog visibility or version references; it **does not authorize deleting Telegram messages**. Only SQL-only AbortIncompleteMultipartUpload lifecycle rules are implemented; an hourly task marks old unfinished upload sessions aborted while retaining Telegram chunks. Object expiration/transitions and physical GC are not enabled. | [Lifecycle](../teledrive/s3/lifecycle.py), [lifecycle tests](../tests/s3/test_s3_lifecycle.py), [GC safeguards](IMPLEMENTATION_STATUS.md#41-physical-telegram-garbage-collection-disabled) |
@@ -54,7 +54,7 @@ The following operations have a routed implementation. Every qualification in th
 
 | AWS S3 API operation | Status | Implemented scope / explicit gap |
 | --- | --- | --- |
-| [CreateBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html) | ✅ Supported | Creates a bucket in the shared catalog. |
+| [CreateBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html) | ✅ Supported | Creates a bucket in the shared catalog; re-creating an existing (owned) bucket is idempotent and answers 200, matching AWS us-east-1 semantics that clients such as rclone rely on during pre-upload bucket preparation. |
 | [HeadBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html) | ✅ Supported | Authenticated existence check. |
 | [DeleteBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucket.html) | ✅ Supported | Requires an empty/deletable catalog bucket. |
 | [ListBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html) | ✅ Supported | Private single-region us-east-1 contract: signed GET, creation date, owner ID, 1–10,000 max-buckets, prefix/region filters, HMAC-scoped continuation token and keyset pagination. AWS account quota APIs, multi-region and directory buckets do not exist in TeleDrive. |
@@ -71,6 +71,7 @@ The following operations have a routed implementation. Every qualification in th
 | [GetObjectAttributes](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html) | ✅ Supported | Documented private single-region general-purpose contract: signed ETag, ObjectSize, SHA-256 FULL_OBJECT Checksum, fixed STANDARD StorageClass, published historical VersionId, LastModified header, and immutable completed-multipart ObjectParts (selected part number/size/SHA-256). Supports signed MaxParts 1–1,000, PartNumberMarker 0–10,000, IsTruncated/NextPartNumberMarker and copied version snapshots. Non-MPU objects never fabricate parts; old SQL completion journals are read only and strictly checked. Fails closed on invalid/unsigned inputs and inconsistent history. AWS SSE-C, RequestPayer, directory buckets and provider-managed tiers are outside the TeleDrive contract. |
 | [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | 🟡 Partial | Signed initiation and selected metadata; no SSE/retention/storage-tier variants. |
 | [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | 🟡 Partial | 1–10,000 part numbers, configured part-size bound and selected integrity checks. |
+| [UploadPartCopy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html) | 🟡 Partial | PUT ?uploadId&partNumber with a signed x-amz-copy-source: the source bytes are staged through Telegram exactly like a normal UploadPart (completion physically re-owns chunk rows per part). No copy-source RANGES, consistent with CopyObject. |
 | [ListParts](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListParts.html) | ✅ Supported | TeleDrive private general-purpose contract: scoped active uploads, SQL-bounded 1–1,000 part pages, part-number marker 0–10,000, sparse/replaced parts, accurate ETag, Size, LastModified, STANDARD StorageClass, IsTruncated/NextPartNumberMarker. Invalid/over-limit cursors and wrong-owner/inactive IDs fail closed without Telegram reads. AWS Owner/Initiator account identities, multipart composite checksums, other tiers/directory buckets remain outside the contract. |
 | [ListMultipartUploads](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListMultipartUploads.html) | ✅ Supported | TeleDrive private general-purpose contract: scoped active sessions, bounded SQL keyset pages 1–1,000, prefix, delimiter/CommonPrefixes, UTF-8 encoding-type=url, same-key UploadId cursors, Initiated/StorageClass and NextKeyMarker/NextUploadIdMarker. Completed, aborted and foreign-owner sessions excluded. AWS billing/requester pays, account ownership identities and directory buckets remain outside scope. |
 | [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | 🟡 Partial | Fenced, zero-reupload staged-part publication; selected SHA-bound requests only. |
@@ -90,6 +91,8 @@ The following operations have a routed implementation. Every qualification in th
 | [GetBucketPolicyStatus](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicyStatus.html) | 🟡 Partial | Read-only IsPublic=false for the enforced private-only gateway; no bucket policy engine or public ACLs. |
 | [PutPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html) | 🟡 Partial | Accepts only all-four-fields true; cannot weaken privacy. |
 | [GetBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycleConfiguration.html) | 🟡 Partial | Read a private bucket's bounded, prefix-scoped AbortIncompleteMultipartUpload-only rules; no AWS expiration/transition support. |
+| [GetBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycle.html) | 🟡 Partial | Deprecated AWS alias: the same `?lifecycle` GET request, served by the GetBucketLifecycleConfiguration handler with identical semantics. |
+| [PutBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycle.html) | 🟡 Partial | Deprecated AWS alias: the same `?lifecycle` PUT request, served by the PutBucketLifecycleConfiguration handler with identical semantics. |
 | [PutBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycleConfiguration.html) | 🟡 Partial | Signed strict XML; only Disabled/Enabled incomplete multipart abort rules with DaysAfterInitiation 1..3650 and Prefix. |
 | [DeleteBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketLifecycle.html) | 🟡 Partial | Removes SQL configuration; it never deletes an object or Telegram media. |
 | [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | 🟡 Partial | Read-only private canned ACL (caller FULL_CONTROL); every ACL configuration attempt fails closed. |
@@ -144,8 +147,6 @@ Model rules and durable workers without promising AWS transitions that Telegram 
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [GetBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycle.html) | ❌ Unsupported | P2-D |
-| [PutBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycle.html) | ❌ Unsupported | P2-D |
 | [PutBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketReplication.html) | ❌ Unsupported | P2-D |
 | [DeleteBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketReplication.html) | ❌ Unsupported | P2-D |
 | [RestoreObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RestoreObject.html) | ❌ Unsupported | P2-D |
@@ -156,7 +157,6 @@ Support copy-part source ranges, signing and ownership, checksum composition and
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [UploadPartCopy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html) | ❌ Unsupported | P2-E |
 
 ### P2-F — Website, notifications and access logging
 
@@ -240,9 +240,9 @@ Mostly depends on AWS account services (Express sessions, directory buckets, S3 
 
 - [x] Commit a machine-readable 116-operation manifest synchronized by CI with the reviewed specification matrix, and add a strict S3 request-parameter allowlist. Upstream AWS additions still require explicit periodic re-audits.
 - [ ] For every supported operation, test normal, missing/auth-failed, malformed, over-limit, retry, multiworker race, signature-tampered and crash/restart cases; assert no partial SQL publication.
-- [ ] For unsupported operations, add adversarial selector/HTTP method tests: **no accidental HTTP 200 or mutation**; unsupported-sensitive headers must fail before Telegram I/O.
+- [x] For unsupported operations, add adversarial selector/HTTP method tests: **no accidental HTTP 200 or mutation**; unsupported-sensitive headers must fail before Telegram I/O.
 - [ ] Verify all S3 mutation paths are reflected in REST/local-job heads, version records, tombstones, tags and copy aliases; invariants run against both SQLite and PostgreSQL.
-- [ ] Add boto3, AWS CLI and rclone version-pinned compatibility matrix plus optional client tests; distinguish simulated Telegram I/O from real test-channel Telegram E2E.
+- [x] Add boto3, AWS CLI and rclone version-pinned compatibility matrix plus optional client tests; distinguish simulated Telegram I/O from real test-channel Telegram E2E.
 - [ ] Define atomic migration/rollback and API backward compatibility for every metadata table or new header field; no irreversible rewrite of historic versions.
 - [ ] Respect GC blocking prerequisites: independent payload backup and restore rehearsal, owner/alias/retention graph, writer fencing and explicit independent approval **before** physical Telegram deletion.
 - [ ] Update this matrix, [README](../README.md), [Project Status](IMPLEMENTATION_STATUS.md) and [CI Guide](CI_WORKFLOWS.md) **only when implementation and evidence change**; keep unsupported rows marked unsupported until validated on the new SHA.

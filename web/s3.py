@@ -1144,7 +1144,15 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
     if controls is not None:
         return controls
     if request.method == "PUT":
-        catalog.create_bucket(bucket, int(time.time()))
+        try:
+            catalog.create_bucket(bucket, int(time.time()))
+        except ValueError:
+            # AWS us-east-1 semantics: re-creating an owned bucket is
+            # idempotent and answers 200. TeleDrive is single-owner
+            # private, so an existing bucket is by definition owned by
+            # the caller — clients like rclone rely on this during
+            # their pre-upload bucket preparation.
+            pass
         return Response(status_code=200)
     if request.method == "DELETE":
         try:

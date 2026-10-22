@@ -41,6 +41,9 @@ class ServiceSettings:
     auth_failure_window_seconds: int = 300
     ssl_certfile: str = ""
     ssl_keyfile: str = ""
+    s3_ssl_certfile: str = ""
+    s3_ssl_keyfile: str = ""
+    trusted_proxy: bool = False
     db_extra_packages: tuple[str, ...] = ()
     auth_dir: str = "/data/auth"
     config_path: str = "config/config.yaml"
@@ -167,6 +170,22 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
             300, "auth_failure_window_seconds", minimum=1),
         ssl_certfile=str(_cfg_or_env("ssl_certfile", "TELEDRIVE_SSL_CERTFILE", "")),
         ssl_keyfile=str(_cfg_or_env("ssl_keyfile", "TELEDRIVE_SSL_KEYFILE", "")),
+        # S3-listener TLS lives in the STORAGE section (like
+        # s3_master_key_file), with env fallbacks.
+        s3_ssl_certfile=str(
+            storage.get("s3_ssl_certfile")
+            or os.environ.get("TELEDRIVE_S3_SSL_CERTFILE", "")),
+        s3_ssl_keyfile=str(
+            storage.get("s3_ssl_keyfile")
+            or os.environ.get("TELEDRIVE_S3_SSL_KEYFILE", "")),
+        # Reverse-proxy mode: TLS terminates in front (nginx/caddy/traefik).
+        # The app serves plain HTTP and trusts X-Forwarded-Proto for cookie
+        # security flags and generated URLs. The proxy MUST forward the
+        # original Host header unchanged (S3 SigV4 signs the Host).
+        trusted_proxy=bool(str(
+            web.get("trusted_proxy")
+            or os.environ.get("TELEDRIVE_TRUSTED_PROXY", "")).lower()
+            in ("1", "true", "yes", "on")),
         db_extra_packages=packages,
         auth_dir=str(_cfg_or_env("auth_dir", "TELEDRIVE_AUTH_DIR", "/data/auth")),
         config_path=config_path,

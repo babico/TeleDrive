@@ -11,6 +11,12 @@
 # Web service: authentication, listeners and request limits.
 # ---------------------------------------------------------------------------
 web:
+  # Reverse-proxy mode: TLS terminates in nginx/caddy/traefik in front.
+  # The app serves plain HTTP and trusts X-Forwarded-Proto for cookie
+  # security flags. The proxy MUST forward the original Host header
+  # unchanged (S3 SigV4 signs the Host).
+  # trusted_proxy: true
+
   user: "admin"
   password: "CHANGE_ME_AT_LEAST_16_CHARACTERS"
   allowed_hosts: "localhost,127.0.0.1,[::1]"
@@ -51,6 +57,12 @@ storage:
   strategy: round_robin
 
   scratch_dir: "/data/tmp"
+  # S3-listener TLS (independent of the WebUI). Direct HTTPS on the S3
+  # port for rclone/boto3 over TLS. Generate a LAN certificate with:
+  #   openssl req -x509 -newkey rsa:2048 -keyout s3.key -out s3.crt   #     -days 365 -nodes -subj "/CN=your-host"
+  # s3_ssl_certfile: /config/s3.crt
+  # s3_ssl_keyfile: /config/s3.key
+
 
   # Persistent S3 credential-encryption master key file.
   s3_master_key_file: "/config/s3-master.key"

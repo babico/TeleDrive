@@ -215,13 +215,16 @@ come from simply authorizing more accounts.
 - [x] Route/page restructure DONE (b56e264): nested paths with legacy
       redirects; one shared dynamic nav (grouped sub-menus) on every
       page; S3 credentials moved to their own page.
-- [ ] S3 SSL from scratch, two deployment modes:
-      a) direct TLS on the S3 listener (env-provided cert/key, or
-         auto-generated self-signed for LAN use), verified with
-         openssl/curl before deploy;
-      b) behind a reverse proxy: proxy terminates TLS, service stays
-         plain HTTP — handle X-Forwarded-* / Host preservation for
-         SigV4 verification and correct https endpoint URLs in the UI.
+- [x] S3 SSL DONE (per-listener TLS + reverse-proxy mode): storage.
+      s3_ssl_certfile/s3_ssl_keyfile give the S3 port direct HTTPS while
+      the WebUI stays HTTP (or vice versa); web.trusted_proxy=true makes
+      the app honor X-Forwarded-Proto (Secure cookies) behind a
+      TLS-terminating proxy. Verified live with openssl self-signed +
+      curl --insecure (S3 https 200, plain http rejected). Also fixed on
+      the way: uvicorn captured TLS settings BEFORE the config reload
+      (TLS silently dropped — now materialized first), missing `global`
+      declarations, and three hardcoded /data paths that broke
+      non-Docker deployments.
 - [x] Checkboxes themed (accent-color) on every page.
 - [ ] S3 + API permission UI modernization: replace the current
       permission-granting controls; add viewing existing S3 credential

@@ -74,6 +74,9 @@ WATCH_INTERVAL = 30
 WATCH_BUCKET = ""
 SSL_CERTFILE = ""
 SSL_KEYFILE = ""
+S3_SSL_CERTFILE = ""
+S3_SSL_KEYFILE = ""
+TRUSTED_PROXY = False
 DB_EXTRA_PACKAGES: tuple[str, ...] = ()
 
 
@@ -112,6 +115,7 @@ def _reload_service_settings() -> None:
     global ALLOWED_SQLITE_ROOTS, AUTH_FAILURE_WINDOW_SECONDS, AUTH_FAILURE_LIMIT
     global WATCH_ENABLED, WATCH_INTERVAL, WATCH_BUCKET
     global SSL_CERTFILE, SSL_KEYFILE, DB_EXTRA_PACKAGES
+    global S3_SSL_CERTFILE, S3_SSL_KEYFILE, TRUSTED_PROXY
 
     from teledrive.settings import load_settings
     cfg = uploader.load_config(str(CONFIG_PATH))
@@ -135,6 +139,9 @@ def _reload_service_settings() -> None:
     WATCH_BUCKET = settings.job_watch_bucket
     SSL_CERTFILE = settings.ssl_certfile
     SSL_KEYFILE = settings.ssl_keyfile
+    S3_SSL_CERTFILE = settings.s3_ssl_certfile
+    S3_SSL_KEYFILE = settings.s3_ssl_keyfile
+    TRUSTED_PROXY = settings.trusted_proxy
     DB_EXTRA_PACKAGES = settings.db_extra_packages
     # Legacy uploader path allowlists read os.environ internally; seed them
     # from the config so the operator never configures them via env.
@@ -566,9 +573,19 @@ def ensure_config() -> None:
     if CONFIG_PATH.is_symlink():
         raise RuntimeError("Refusing to use a symlinked TeleDrive config file")
     _secure_mkdir(AUTH_DIR)
-    _secure_mkdir(Path("/data/sessions"))
-    _secure_mkdir(Path("/data/tmp"))
-    Path("/uploads").mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(AUTH_DIR.parent / "sessions")
+    # Scratch and source roots follow the settings (env/config), not
+    # hardcoded /data and /uploads — non-Docker deployments broke here.
+    _secure_mkdir(Path(STORAGE_SCRATCH_DIR))
+    # Inline YAML parse: read_raw_config()/effective_config() both call
+    # ensure_config() and would recurse.
+    try:
+        raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except OSError:
+        raw = {}
+    source_dir = str(((raw.get("upload") or {}).get("source_dir"))
+                     or "/uploads")
+    Path(source_dir).mkdir(parents=True, exist_ok=True)
     if not CONFIG_PATH.exists():
         _secure_write(CONFIG_PATH, yaml.safe_dump(default_config(), sort_keys=False))
     else:
@@ -833,8 +850,11 @@ async def lifespan(_: FastAPI):
     global upload_job_scheduler_task, lifecycle_scheduler_task
     global folder_watch_task
     os.umask(0o077)
-    ensure_config()
+    # Settings first: ensure_config() mkdirs AUTH_DIR, which must already
+    # reflect the config/env override (Docker only worked by accident
+    # because the image pre-creates /data/auth).
     _reload_service_settings()
+    ensure_config()
     _create_default_admin()
     # Migrate users table: add enabled column if missing.
     try:
@@ -1271,9 +1291,13 @@ def login(payload: dict, request: Request):
     _log(f"login: username={username}", "auth")
     resp = JSONResponse(content={"token": token, "user": {"id": row[0], "username": row[1], "role": row[3]},
                                   "expires_at": expires})
+    # Behind a TLS-terminating reverse proxy the cookie must still be
+    # Secure when the client connection is https (X-Forwarded-Proto).
+    forwarded_https = (TRUSTED_PROXY and request.headers.get(
+        "x-forwarded-proto", "").lower() == "https")
     resp.set_cookie(key="teledrive_session", value=token, httponly=True,
                     max_age=7 * 86400, samesite="lax", path="/",
-                    secure=bool(SSL_CERTFILE))
+                    secure=bool(SSL_CERTFILE) or forwarded_https)
     return resp
 
 
@@ -2443,9 +2467,10 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
             conn2.close()
 
     # Also write the session file so the existing file-based runtime works.
-    session_file = f"/data/sessions/{account}.session"
+    sessions_dir = AUTH_DIR.parent / "sessions"
+    session_file = f"{sessions_dir}/{account}.session"
     try:
-        _secure_mkdir(Path("/data/sessions"))
+        _secure_mkdir(sessions_dir)
         _secure_write(Path(session_file), session_string + "\n")
     except Exception:
         pass

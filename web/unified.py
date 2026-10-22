@@ -57,17 +57,45 @@ def main():
     s3_port = args.s3_port or webapp.settings_s3_port()
     service=UnifiedApplication(web_port,s3_port)
     listeners=[]
+    # Materialize the TLS settings BEFORE building the server configs:
+    # uvicorn.Config captures ssl_certfile at construction time, but the
+    # webapp globals are only populated by _reload_service_settings()
+    # (previously first-run during lifespan — too late, TLS was silently
+    # dropped).
+    webapp._reload_service_settings()
+
+    # Two servers: WebUI and S3 get INDEPENDENT TLS settings. The web UI
+    # commonly stays plain HTTP behind a reverse proxy (storage.trusted_
+    # proxy) while the S3 listener serves direct TLS, or vice versa.
+    import asyncio
+    web_socket = _bind(host, service.web_port)
+    s3_socket = _bind(host, service.s3_port)
+    web_server = uvicorn.Server(uvicorn.Config(
+        service, host=host, port=service.web_port,
+        workers=1, lifespan="on", server_header=False,
+        ssl_certfile=webapp.SSL_CERTFILE or None,
+        ssl_keyfile=webapp.SSL_KEYFILE or None,
+    ))
+    s3_server = uvicorn.Server(uvicorn.Config(
+        service, host=host, port=service.s3_port,
+        workers=1, lifespan="off", server_header=False,
+        ssl_certfile=webapp.S3_SSL_CERTFILE or None,
+        ssl_keyfile=webapp.S3_SSL_KEYFILE or None,
+    ))
+    # One server owns the signal handlers; the second must not install
+    # its own in the same event loop.
+    s3_server.install_signal_handlers = lambda: None
+
+    async def _serve():
+        await asyncio.gather(
+            web_server.serve(sockets=[web_socket]),
+            s3_server.serve(sockets=[s3_socket]),
+        )
     try:
-        listeners=[_bind(host,service.web_port),_bind(host,service.s3_port)]
-        uvicorn.Server(uvicorn.Config(
-            service,host=host,port=service.web_port,
-            workers=1,lifespan="on",server_header=False,
-            ssl_certfile=webapp.SSL_CERTFILE or None,
-            ssl_keyfile=webapp.SSL_KEYFILE or None,
-        )).run(sockets=listeners)
+        asyncio.run(_serve())
     finally:
-        for listener in listeners:
-            listener.close()
+        web_socket.close()
+        s3_socket.close()
 
 if __name__=="__main__":
     main()

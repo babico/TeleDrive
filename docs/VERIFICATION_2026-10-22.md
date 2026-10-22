@@ -65,10 +65,11 @@ head SHA**. Never cite the successful 5/6 baseline as a 6/6 acceptance.
 | Priority | Area | Status / next evidence required |
 | --- | --- | --- |
 | P0 | Integration CI reliability | Fix source-root test contract; require exact-SHA six-workflow green result before declaring a new release candidate |
+| Verified UI | Existing time-limited presigned GET link | The S3 bucket page has a Link/Generate/Copy URL flow backed by an admin signing endpoint; **not** a password-protected or download-count-limited public sharing service |
 | P1 | Authorized Telegram sessions | Implement periodic `is_authorized` probes and clear UI health/re-login cues for dead/expired sessions; test recovery without sending bytes |
 | P1 | CI consolidation | Finish the planned content-level workflow refactor (unit-vs-integration ownership, duplicate suite execution, accurate summaries), preserving coverage; **not** complete |
 | P2 | Sharing & indexing | Expiring signed public links with controlled access; opt-in content search only if justified; all require design, threat model and tests |
-| P2 | Durability & security | Optional client-side encryption with key recovery design, content-addressed deduplication with retention/GC integration, independently proven cross-account replication |
+| P2 | Durability & security | Optional client-side encryption with key recovery design, content-addressed deduplication with retention/GC integration, independently proven cross-account replication (**not** an independent off-Telegram backup) |
 | P2 | S3 parity | **42 partial and 63 unsupported** operations; see [S3 workstreams](S3_SPECS.md#5-p2-advanced-s3-implementation-plan). No blanket AWS parity claim |
 | P2 | History | Independently validate unknown original-channel inventory and mapping without guessing missing object metadata |
 | P2 | Performance | Owner-authorized long-duration real-media capacity benchmarks with real rate-limit telemetry, no synthetic 429 substitutions |

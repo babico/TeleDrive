@@ -87,8 +87,11 @@
       against the S3 listener (mount-as-drive on any desktop).
 - [x] **Quota usage bars on the dashboard** — used vs quota data already
       returned by `admin_list_buckets`.
-- [ ] **Copy presigned URL button** in the S3 browser (moved to Phase 3:
-      belongs with signed share links, which need an owned signing path).
+- [x] **Copy presigned URL button** in the S3 bucket browser: the
+      session-authenticated Link action signs a time-limited S3 GET URL
+      server-side; the UI has a Copy URL action. This is **not** an
+      independent share-link service with password/download-count controls,
+      which stays open in Phase 3.
 
 ## 4. Phase 2 — The file manager (WebUI usable without an S3 client)
 
@@ -139,9 +142,12 @@
       master key; opt-in per bucket. Design key-recovery UX first.
 - [ ] **Content-addressed deduplication**: refcounted identical objects +
       skip-upload when the client sends the hash first; co-design with GC.
-- [ ] **Cross-account replication**: write each object to a second Telegram
-      account (the `parallel` strategy exists); satisfies owner gate #1 and
-      de-risks physical GC.
+- [ ] **Cross-account replication**: durably copy verified content to a
+      second, independently authorized Telegram USER account and verify
+      recovery/failover. `parallel` only distributes chunks; it does **not**
+      replicate an object. Telegram-to-Telegram replication improves
+      availability but **does not satisfy** the independent off-Telegram
+      media-backup, two-physical-host or GC-approval owner gates.
 
 ---
 
@@ -209,7 +215,10 @@ come from simply authorizing more accounts.
 
 ## 9. Owner gates — physical GC prerequisites (BLOCKED_OWNER_ACTION)
 
-- [ ] Independent backup host (Phase 6 replication or rclone export job).
+- [ ] Independent, complete and hash-verified **off-Telegram** payload
+      archive plus isolated restore, physically separate from the SQL and
+      Telegram backends (e.g. an independently hosted rclone export).
+      A second Telegram account is not an independent media archive.
 - [ ] Authorized 1h soak on 2–8 HTTPS endpoints.
 - [ ] Original-media recovery rehearsal with the owner's sealed SQL archive,
       Telegram credentials and real channel.

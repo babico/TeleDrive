@@ -463,3 +463,36 @@ def test_large_single_telegram_chunk_survives_sql_restart_and_range_checks(
             assert execute(read_range(start, end)) == payload[start:end]
     finally:
         reopened.close()
+
+
+def test_content_dedup_aliases_without_telegram_traffic(store, tmp_path):
+    """Second upload of identical content sends ZERO Telegram bytes."""
+    backend = MemoryTelegram()
+    engine = TelegramObjectStorage(store, backend, chunk_size=4096)
+    payload = os.urandom(50_000)
+    first_source = tmp_path / "first"
+    first_source.write_bytes(payload)
+    first = execute(engine.put_file("backup", "a.bin", first_source))
+    assert backend.uploads > 0
+    uploads_after_first = backend.uploads
+
+    # Identical bytes, different key and bucket.
+    second_source = tmp_path / "second"
+    second_source.write_bytes(payload)
+    second = execute(engine.put_file("other", "b.bin", second_source))
+    assert backend.uploads == uploads_after_first, "dedup must not upload"
+    assert second.id != first.id
+    assert second.sha256 == first.sha256
+    assert second.size == first.size
+
+    # The alias resolves to the original content and reads identically.
+    output = tmp_path / "restored"
+    execute(engine.download_to_path(second.id, output))
+    assert output.read_bytes() == payload
+
+    # Different content still takes the normal upload path.
+    third_source = tmp_path / "third"
+    third_source.write_bytes(payload + b"changed")
+    third = execute(engine.put_file("other", "c.bin", third_source))
+    assert backend.uploads > uploads_after_first
+    assert third.sha256 != first.sha256

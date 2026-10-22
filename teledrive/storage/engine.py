@@ -17,10 +17,11 @@ import tempfile
 import time
 from pathlib import Path
 from typing import AsyncIterator, Protocol
+from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
-from .manifest import ChunkReference, ManifestStore, StoredObject, ManifestError, objects
+from .manifest import ChunkReference, ManifestStore, StoredObject, ManifestError, object_aliases, objects
 
 
 class IntegrityError(RuntimeError):
@@ -93,17 +94,82 @@ class TelegramObjectStorage:
                 return
 
     async def put_file(self, bucket: str, key: str, source: Path, *,
-                       on_begin=None) -> StoredObject:
+                       on_begin=None, dedup: bool = True) -> StoredObject:
         from teledrive.storage.placement import (
             reset_upload_bucket, set_upload_bucket)
         # Publish the bucket for the transport's placement decisions
         # (bucket→account pinning); scoped to this object's upload.
         placement_token = set_upload_bucket(bucket)
         try:
+            # Content-addressed dedup is skipped for internal staging
+            # uploads (multipart parts): completion physically re-owns
+            # the staged parts' chunk rows, which requires them to be
+            # chunked objects rather than aliases.
+            if dedup:
+                deduped = self._dedup_lookup(source, bucket, key)
+                if deduped is not None:
+                    return deduped
             return await self._put_file_inner(
                 bucket, key, source, on_begin=on_begin)
         finally:
             reset_upload_bucket(placement_token)
+
+    def _dedup_lookup(self, source: Path, bucket: str,
+                      key: str) -> StoredObject | None:
+        """Content-addressed deduplication: identical published content
+        is aliased instead of re-sent to Telegram.
+
+        One local hashing pass (cheap next to a Telegram upload); a hit
+        creates a fresh alias object for this bucket/key pointing at the
+        existing content — the same aliasing mechanism CopyObject uses,
+        fully GC-aware. Concurrent identical uploads may both miss (the
+        loser's chunks simply remain for owner-gated GC).
+        """
+        try:
+            digest = hashlib.sha256()
+            size = 0
+            with open(source, "rb") as handle:
+                while block := handle.read(1 << 20):
+                    digest.update(block)
+                    size += len(block)
+            if size == 0:
+                return None  # empty objects are tiny; keep the normal path
+            from sqlalchemy import text as _text
+            from teledrive.storage.manifest import object_aliases, objects
+            db = self.manifests.db
+            base = db.connection.execute(_text(
+                "SELECT id FROM storage_objects WHERE sha256 = :sha "
+                "AND status = 'ready' LIMIT 1"
+            ), {"sha": digest.hexdigest()}).scalar_one_or_none()
+            if base is None:
+                return None
+            base_id = self.manifests.resolve_content_id(base)
+            base_obj = self.manifests.get(base_id)
+            identifier = str(uuid4())
+            now = int(time.time())
+            db.connection.execute(insert(objects).values(
+                id=identifier, bucket=bucket,
+                object_key=key, status="ready", size=base_obj.size,
+                sha256=base_obj.sha256, created_at=now, updated_at=now,
+                error=None,
+            ))
+            db.connection.execute(insert(object_aliases).values(
+                object_id=identifier, source_object_id=base_id,
+            ))
+            db.connection.commit()
+            return StoredObject(
+                id=identifier, bucket=bucket, key=key,
+                size=base_obj.size, sha256=base_obj.sha256,
+                created_at=now,
+            )
+        except Exception:
+            # Dedup is an optimization: any failure falls back to a
+            # normal upload.
+            try:
+                self.manifests.db.connection.rollback()
+            except Exception:
+                pass
+            return None
 
     async def _put_file_inner(self, bucket: str, key: str, source: Path, *,
                               on_begin=None) -> StoredObject:

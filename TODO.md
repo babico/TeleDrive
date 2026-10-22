@@ -137,8 +137,16 @@
 - [ ] **Client-side end-to-end encryption** (zero-knowledge): WebCrypto
       AES-GCM before upload; per-object keys wrapped by a passphrase-derived
       master key; opt-in per bucket. Design key-recovery UX first.
-- [ ] **Content-addressed deduplication**: refcounted identical objects +
-      skip-upload when the client sends the hash first; co-design with GC.
+- [x] **Content-addressed deduplication** DONE: `put_file` performs one
+      local hashing pass before uploading; an identical READY object
+      (matched by full sha256) turns the upload into a fresh alias
+      object via the same GC-aware alias mechanism CopyObject uses —
+      ZERO Telegram bytes for duplicate content. Failures degrade to a
+      normal upload; concurrent identical uploads may both miss
+      (harmless). Internal staging uploads (multipart parts) pass
+      `dedup=False` because completion physically re-owns chunk rows.
+      REST/S3 PUT/POST-policy uploads all dedup; alias readback is
+      round-trip verified.
 - [ ] **Cross-account replication**: write each object to a second Telegram
       account (the `parallel` strategy exists); satisfies owner gate #1 and
       de-risks physical GC.

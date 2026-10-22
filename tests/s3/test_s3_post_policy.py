@@ -135,7 +135,10 @@ def test_browser_post_prefix_policy_binds_bucket_checksum_and_destination(servic
         assert post(service, data, {**form, "key": forbidden}).status_code == 403
     assert post(service, data+b"x", authorized).status_code in (400, 403)
     assert post(service, data, authorized, bucket="other-bucket").status_code == 403
-    assert service[2].uploads == 2
+    # Content-addressed dedup: the second identical POST aliases the
+    # first object instead of re-sending the bytes to Telegram; the
+    # readback above proves the alias serves identical bytes.
+    assert service[2].uploads == 1
 
 
 @pytest.mark.parametrize("bad_condition", [

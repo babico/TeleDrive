@@ -1414,7 +1414,7 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
             catalog.manifests, transport,
             chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
         )
-        staged = await engine.put_file(bucket, key, stage)
+        staged = await engine.put_file(bucket, key, stage, dedup=False)
         tag = md5.hexdigest()
         mpu.record_part(upload_id, bucket, key, owner,
                         number=number, object_id=staged.id, etag=tag)
@@ -1497,7 +1497,7 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
         with open(stage, "rb") as handle:
             for block in iter(lambda: handle.read(1 << 20), b""):
                 md5.update(block)
-        staged = await engine.put_file(bucket, key, stage)
+        staged = await engine.put_file(bucket, key, stage, dedup=False)
         etag = md5.hexdigest()
         mpu.record_part(upload_id, bucket, key, owner, number=number,
                         object_id=staged.id, etag=etag)

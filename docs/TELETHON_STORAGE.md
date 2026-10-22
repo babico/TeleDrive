@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 # Enter them without typing credentials into shell history. The hash is hidden.
 read -r -p "Telegram API ID: " TELEDRIVE_STORAGE_MTPROTO_API_ID
 read -r -s -p "Telegram API hash: " TELEDRIVE_STORAGE_MTPROTO_API_HASH
-printf '\\n'
+printf '\n'
 export TELEDRIVE_STORAGE_MTPROTO_API_ID TELEDRIVE_STORAGE_MTPROTO_API_HASH
 # The helper then requests the USER phone login code and optional 2FA.
 python scripts/dev/create_storage_user_session.py --output config/mtproto-user.session
@@ -53,8 +53,8 @@ chmod 600 config/mtproto-user.session
 ```
 
 Obtain API credentials from [my.telegram.org/apps](https://my.telegram.org/apps).
-The helper currently **requires** these two environment values; it does not prompt for the application API credentials itself. Export them only in a trusted, interactive operator shell and clear them immediately afterward. It does prompt for the Telegram USER login code and optional 2FA. Generate the session **before** starting a configured TeleDrive container;
-the script refuses to overwrite an existing session. Alternatively, create
+The helper currently **requires** these two environment values; it does not prompt for the application API credentials itself. Export them only in a trusted, interactive operator shell and clear them immediately afterward. It does prompt for the Telegram USER login code and optional 2FA. Generate the session **before** starting a configured TeleDrive container; the
+script refuses to overwrite an existing session. Alternatively, create
 the session interactively from the WebUI **Storage** page after startup:
 it posts the API credentials to
 `POST /api/v1/admin/storage/telegram-session/request-code`, asks for the

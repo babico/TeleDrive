@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from urllib.parse import quote
 
 import pytest
@@ -494,3 +495,79 @@ def test_presigned_url_round_trip(service):
     r = client.get(parsed.path + "?" + parsed.query.replace("300", "9999"),
                    headers={"host": "localhost:9000"})
     assert r.status_code in (400, 401, 403)
+
+
+def test_upload_part_copy(service):
+    """UploadPartCopy: a part sourced from another object, no re-upload."""
+    client, issued, telegram, connection, key = service
+    # Source object with a distinctive payload.
+    source_body = b"upload-part-copy-source-payload" * 200_000  # ~6.6 MB
+    r = signed(service, "PUT", "/copy-src-bucket")
+    assert r.status_code == 200, r.text
+    r = signed(service, "PUT", "/copy-src-bucket/original.bin", source_body)
+    assert r.status_code == 200, r.text
+
+    # boto3 drives the full MPU flow with UploadPartCopy for part 1 and
+    # a real uploaded part for part 2.
+    # boto3 needs a real TCP endpoint: boot the (fixture-patched) gateway
+    # app on an ephemeral port.
+    import socket
+    import threading
+
+    import uvicorn
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.listen(64)
+    server = uvicorn.Server(uvicorn.Config(
+        gateway.app, host="127.0.0.1", port=port,
+        lifespan="off", log_level="error"))
+    thread = threading.Thread(target=server.run, args=([sock],), daemon=True)
+    thread.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    assert server.started
+
+    import boto3
+    from botocore.client import Config as BotoConfig
+    s3 = boto3.client(
+        "s3", endpoint_url=f"http://127.0.0.1:{port}",
+        aws_access_key_id=issued.access_key,
+        aws_secret_access_key=issued.secret_key,
+        region_name="us-east-1",
+        config=BotoConfig(s3={"addressing_style": "path"},
+                          retries={"max_attempts": 1}),
+    )
+    try:
+        # Both buckets must exist before the MPU flow starts.
+        r = signed(service, "PUT", "/copy-dst-bucket")
+        assert r.status_code == 200
+        mpu = s3.create_multipart_upload(Bucket="copy-dst-bucket",
+                                         Key="assembled.bin")
+        upload_id = mpu["UploadId"]
+        part1 = s3.upload_part_copy(
+            Bucket="copy-dst-bucket", Key="assembled.bin",
+            UploadId=upload_id, PartNumber=1,
+            CopySource={"Bucket": "copy-src-bucket", "Key": "original.bin"},
+        )
+        assert "CopyPartResult" in part1 and "ETag" in part1["CopyPartResult"]
+        part2 = s3.upload_part(Bucket="copy-dst-bucket", Key="assembled.bin",
+                               UploadId=upload_id, PartNumber=2,
+                               Body=b"tail-part-payload")
+        completed = s3.complete_multipart_upload(
+            Bucket="copy-dst-bucket", Key="assembled.bin", UploadId=upload_id,
+            MultipartUpload={"Parts": [
+                {"PartNumber": 1, "ETag": part1["CopyPartResult"]["ETag"]},
+                {"PartNumber": 2, "ETag": part2["ETag"]},
+            ]},
+        )
+        assert "ETag" in completed
+
+        # The assembled object is byte-identical to source + tail.
+        got = s3.get_object(Bucket="copy-dst-bucket", Key="assembled.bin")
+        assert got["Body"].read() == source_body + b"tail-part-payload"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

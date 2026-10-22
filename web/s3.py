@@ -25,7 +25,7 @@ from defusedxml.common import DefusedXmlException
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from teledrive.db import Database
 from teledrive.s3.credentials import S3CredentialStore, load_master_key
@@ -1350,6 +1350,8 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
 async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
                            upload_id: str) -> Response:
     """PUT ?uploadId&partNumber: UploadPart staging and checksum verify."""
+    if ctx.request.headers.get("x-amz-copy-source") is not None:
+        return await _mpu_upload_part_copy(ctx, mpu, upload_id)
     request = ctx.request
     bucket = ctx.bucket
     key = ctx.key
@@ -1417,6 +1419,94 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
         mpu.record_part(upload_id, bucket, key, owner,
                         number=number, object_id=staged.id, etag=tag)
         return Response(status_code=200, headers={"ETag": '"' + tag + '"'})
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
+                               upload_id: str) -> Response:
+    """PUT ?uploadId&partNumber with x-amz-copy-source: UploadPartCopy.
+
+    The part aliases the SOURCE's Telegram chunks through a fresh staged
+    manifest for the destination bucket/key — no bytes move, and the
+    source is never at risk: multipart completion only READS part
+    manifests. Copy-source byte RANGES are deliberately unsupported
+    (consistent with CopyObject).
+    """
+    request = ctx.request
+    bucket, key, owner = ctx.bucket, ctx.key, ctx.owner
+    if "X-Amz-Algorithm" in request.query_params:
+        raise SigV4Error("NotImplemented", "Presigned UploadPartCopy unsupported")
+    authorization = request.headers.get("authorization", "")
+    signed = authorization.partition("SignedHeaders=")[2].split(",", 1)[0].split(";")
+    if ("x-amz-copy-source" not in signed
+            or ctx.store.resolve(owner, "s3:GetObject") is None):
+        raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
+    if request.headers.get("x-amz-copy-source-range") is not None:
+        return _error("NotImplemented", "Copy-source ranges are unsupported", 501)
+    if (request.headers.get("x-amz-copy-source-if-match") is not None
+            and "x-amz-copy-source-if-match" not in signed):
+        raise SigV4Error("AccessDenied", "Copy precondition must be signed")
+    async for block in request.stream():
+        if block:
+            raise MultipartError("InvalidRequest",
+                                 "UploadPartCopy requires an empty body")
+    source_header = request.headers["x-amz-copy-source"]
+    if (source_header.startswith("//") or "://" in source_header
+            or "?" in source_header):
+        raise MultipartError("InvalidArgument",
+                             "CopySource must be a plain local bucket/object path")
+    path = unquote(source_header[1:] if source_header.startswith("/")
+                   else source_header)
+    src_bucket, slash, src_key = path.partition("/")
+    if not slash or not src_bucket or not src_key:
+        raise MultipartError("InvalidArgument", "Invalid CopySource bucket/object key")
+    if src_bucket not in ctx.catalog.list_buckets():
+        return _error("NoSuchBucket", "CopySource bucket does not exist", 404)
+    try:
+        source = ctx.catalog.get(src_bucket, src_key).item
+    except FileNotFoundError:
+        return _error("NoSuchKey", "CopySource object does not exist", 404)
+    try:
+        number = int(request.query_params.get("partNumber", ""))
+    except ValueError:
+        raise MultipartError("InvalidArgument", "Invalid part number")
+    if not 1 <= number <= MAX_PARTS:
+        raise MultipartError("InvalidArgument", "Invalid part number")
+    mpu.require(upload_id, bucket, key, owner)
+    db = ctx.db
+    # Part bytes are COPIED through Telegram (our storage backend): the
+    # source is downloaded to scratch and staged exactly like a regular
+    # UploadPart. Completion physically re-owns chunk rows per part, so
+    # an object-level alias part cannot work — and must never move the
+    # source's chunks.
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    fd, name = tempfile.mkstemp(prefix="s3-partcopy-", dir=scratch)
+    stage = Path(name)
+    try:
+        os.close(fd)
+        transport = storage_transport(db)
+        await transport.verify_target()
+        engine = TelegramObjectStorage(
+            ctx.catalog.manifests, transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+        )
+        await engine.download_to_path(source.id, stage)
+        md5 = hashlib.md5(usedforsecurity=False)
+        with open(stage, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                md5.update(block)
+        staged = await engine.put_file(bucket, key, stage)
+        etag = md5.hexdigest()
+        mpu.record_part(upload_id, bucket, key, owner, number=number,
+                        object_id=staged.id, etag=etag)
+        now = int(time.time())
+        return Response(_xml("CopyPartResult", [
+            ("ETag", '"' + etag + '"'),
+            ("LastModified", time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))),
+        ]), media_type="application/xml", status_code=200)
     finally:
         stage.unlink(missing_ok=True)
 

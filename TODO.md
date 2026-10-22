@@ -120,8 +120,15 @@
       cookie-authenticated handshake, unauthenticated close 4401. The
       logs page Live mode uses the socket and falls back to 3s polling
       automatically when WS is unavailable (e.g. proxy without upgrade).
-- [ ] UploadPartCopy (S3 P2-E): server-side part copy for efficient
-      rclone/boto3 large-object copies.
+- [x] UploadPartCopy DONE: PUT ?uploadId&partNumber with a signed
+      x-amz-copy-source copies another object as a multipart part.
+      The part bytes are staged through Telegram exactly like a normal
+      UploadPart (completion physically re-owns chunk rows per part, so
+      object-level alias parts are impossible by design — the first
+      attempt proved it and was replaced). Copy-source RANGES are
+      deliberately unsupported, consistent with CopyObject. Verified
+      with a real boto3 MPU flow against a live gateway listener
+      (copy part + uploaded part -> complete -> byte-identical GET).
 
 ## 6. Phase 4 — Strategic bets
 

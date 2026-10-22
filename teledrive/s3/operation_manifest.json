@@ -26,7 +26,7 @@
     },
     {
       "name": "GetBucketLocation",
-      "status": "partial",
+      "status": "supported",
       "workstream": "implemented"
     },
     {
@@ -326,7 +326,7 @@
     },
     {
       "name": "UploadPartCopy",
-      "status": "partial",
+      "status": "supported",
       "workstream": "implemented"
     },
     {

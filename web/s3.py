@@ -32,7 +32,9 @@ from teledrive.s3.credentials import S3CredentialStore, load_master_key
 from teledrive.s3.route_guard import validate_s3_query, S3QueryError
 from teledrive.s3.bucket_listing import list_buckets_xml, BucketListingError
 from teledrive.s3.checksums import crc32c, crc64nvme
-from teledrive.s3.sigv4 import SigV4Error, verify_header_signature
+from teledrive.s3.aws_chunked import AwsChunkedDecoder, streaming_mode
+from teledrive.s3.sigv4 import (STREAMING_MODES, SigV4Error,
+                                verify_header_signature)
 from teledrive.s3.post_policy import parse_form, verify_post_policy, FORM_LIMIT
 from teledrive.s3.multipart import MultipartStore, MultipartError, MAX_PARTS
 from teledrive.s3.batch_delete import BatchDeleteError, MAX_XML_BYTES, parse_batch, verify_body
@@ -153,6 +155,11 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         "x-amz-expected-bucket-owner",
         "x-amz-decoded-content-length",
     }
+    if streaming_mode(request) is not None:
+        # aws-chunked streaming uploads legitimately carry the trailer
+        # declaration and the decoded length; the decoder enforces both
+        # (and sigv4 requires a signed x-amz-trailer).
+        rejected -= {"x-amz-trailer", "x-amz-decoded-content-length"}
     # The S3 gateway is permanently private and has exactly one storage
     # tier, so these explicit default values do not change actual behavior.
     # Reject every other canned ACL / storage-class rather than pretending
@@ -171,7 +178,8 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         if actual != expected:
             raise SigV4Error("NotImplemented", "Unsupported S3 ACL or storage tier")
     if (any(name in request.headers for name in rejected)
-            or request.headers.get("content-encoding", "").lower() == "aws-chunked"):
+            or (request.headers.get("content-encoding", "").lower() == "aws-chunked"
+                and streaming_mode(request) is None)):
         raise SigV4Error(
             "NotImplemented",
             "S3 encryption, retention, ACL, storage class or aws-chunked semantics unsupported",
@@ -182,24 +190,34 @@ def _verify_upload_sha256(
     request: Request, digest: bytes, *, md5_digest: bytes | None = None,
     sha1_digest: bytes | None = None,
     crc64nvme_value: int | None = None,
+    trailer: dict[str, str] | None = None,
 ) -> None:
     """Verify *every* supplied checksum, not only the first matching digest.
 
     Signature verification and upload checksum validation are independent.
     A valid SHA-256 content digest must never permit a contradictory
     Content-MD5, SHA-1 or x-amz-checksum-sha256 to go unreported.
+    aws-chunked requests carry checksums in the TRAILER instead of
+    headers; the trailer dict is consulted as a header extension.
     """
+
+    def checksum_header(name: str) -> str | None:
+        value = request.headers.get(name)
+        if value is None and trailer is not None:
+            value = trailer.get(name)
+        return value
+
     actual = base64.b64encode(digest).decode("ascii")
-    sha256_header = request.headers.get("x-amz-checksum-sha256")
+    sha256_header = checksum_header("x-amz-checksum-sha256")
     if sha256_header is not None and not hmac.compare_digest(sha256_header, actual):
         raise SigV4Error("BadDigest", "SHA-256 checksum mismatch")
-    md5_header = request.headers.get("content-md5")
+    md5_header = checksum_header("content-md5")
     if md5_header is not None:
         if md5_digest is None or not hmac.compare_digest(
             md5_header, base64.b64encode(md5_digest).decode("ascii")
         ):
             raise SigV4Error("BadDigest", "Content-MD5 checksum mismatch")
-    crc64_header = request.headers.get("x-amz-checksum-crc64nvme")
+    crc64_header = checksum_header("x-amz-checksum-crc64nvme")
     if crc64_header is not None:
         if crc64nvme_value is None:
             # Never acknowledge an unverified CRC64NVME declaration.
@@ -209,13 +227,13 @@ def _verify_upload_sha256(
         ).decode("ascii")
         if not hmac.compare_digest(crc64_header, actual_crc64):
             raise SigV4Error("BadDigest", "CRC64NVME checksum mismatch")
-    sha1_header = request.headers.get("x-amz-checksum-sha1")
+    sha1_header = checksum_header("x-amz-checksum-sha1")
     if sha1_header is not None:
         if sha1_digest is None or not hmac.compare_digest(
             sha1_header, base64.b64encode(sha1_digest).decode("ascii")
         ):
             raise SigV4Error("BadDigest", "SHA-1 checksum mismatch")
-    declared = request.headers.get("x-amz-sdk-checksum-algorithm")
+    declared = checksum_header("x-amz-sdk-checksum-algorithm")
     if declared is not None:
         allowed = {"SHA1": "x-amz-checksum-sha1", "SHA256": "x-amz-checksum-sha256",
                    "CRC32": "x-amz-checksum-crc32",
@@ -223,13 +241,18 @@ def _verify_upload_sha256(
                    "CRC64NVME": "x-amz-checksum-crc64nvme"}
         if declared not in allowed:
             raise SigV4Error("NotImplemented", "Unsupported SDK checksum algorithm")
-        if request.headers.get(allowed[declared]) is None:
+        if checksum_header(allowed[declared]) is None:
             raise SigV4Error("BadDigest", "Declared SDK checksum is missing")
 
     hexdigest = digest.hex()
     signed_content = request.headers.get("x-amz-content-sha256", "")
     presigned = "X-Amz-Algorithm" in request.query_params
     if signed_content == hexdigest:
+        return
+    if signed_content in STREAMING_MODES:
+        # aws-chunked: every chunk signature was verified during decoding
+        # (signed modes) and every supplied header/trailer checksum was
+        # checked above — that IS the payload integrity proof.
         return
     if sha256_header is not None and hmac.compare_digest(sha256_header, actual):
         return
@@ -797,7 +820,32 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
     verify_body(payload, request.headers)
     batch = parse_batch(payload)
     result = ET.Element("DeleteResult", xmlns=NAMESPACE)
-    for key_to_delete in batch.keys:
+    for key_to_delete, version_id in batch.entries:
+        if version_id is not None:
+            # Explicit per-entry version deletion, the same semantics as
+            # DELETE ?versionId on a single object.
+            try:
+                if not catalog.delete_version(bucket, key_to_delete,
+                                              version_id):
+                    problem = ET.SubElement(result, "Error")
+                    ET.SubElement(problem, "Key").text = key_to_delete
+                    ET.SubElement(problem, "VersionId").text = version_id
+                    ET.SubElement(problem, "Code").text = "NoSuchVersion"
+                    ET.SubElement(problem, "Message").text = (
+                        "The specified version does not exist")
+                    continue
+            except ValueError:
+                problem = ET.SubElement(result, "Error")
+                ET.SubElement(problem, "Key").text = key_to_delete
+                ET.SubElement(problem, "VersionId").text = version_id
+                ET.SubElement(problem, "Code").text = "InvalidArgument"
+                ET.SubElement(problem, "Message").text = "Invalid version ID"
+                continue
+            if not batch.quiet:
+                deleted = ET.SubElement(result, "Deleted")
+                ET.SubElement(deleted, "Key").text = key_to_delete
+                ET.SubElement(deleted, "VersionId").text = version_id
+            continue
         try:
             marker = catalog.delete_marker(bucket, key_to_delete)
         except ValueError:
@@ -1387,8 +1435,15 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
         crc32c_value = 0
         crc64_value = 0
         size = 0
+        decoder = None
+        if streaming_mode(request) is not None:
+            decoder = AwsChunkedDecoder(request, ctx.store.resolve,
+                                        "s3:PutObject")
+            part_stream = decoder.blocks()
+        else:
+            part_stream = request.stream()
         with os.fdopen(fd, "wb") as output:
-            async for block in request.stream():
+            async for block in part_stream:
                 size += len(block)
                 if max_bytes < 1 or size > max_bytes:
                     raise MultipartError("EntityTooLarge", "Part exceeds configured upload maximum", 413)
@@ -1404,8 +1459,11 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
         _verify_upload_sha256(
             request, sha.digest(), md5_digest=md5.digest(),
             sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
+            trailer=decoder.trailer if decoder is not None else None,
         )
-        checksum_crc = request.headers.get("x-amz-checksum-crc32")
+        checksum_crc = (request.headers.get("x-amz-checksum-crc32")
+                        or (decoder.trailer if decoder else {}).get(
+                            "x-amz-checksum-crc32"))
         if checksum_crc and checksum_crc != base64.b64encode(
             (crc & 0xffffffff).to_bytes(4, "big")
         ).decode():
@@ -1450,11 +1508,12 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
     if ("x-amz-copy-source" not in signed
             or ctx.store.resolve(owner, "s3:GetObject") is None):
         raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
-    if request.headers.get("x-amz-copy-source-range") is not None:
-        return _error("NotImplemented", "Copy-source ranges are unsupported", 501)
     if (request.headers.get("x-amz-copy-source-if-match") is not None
             and "x-amz-copy-source-if-match" not in signed):
         raise SigV4Error("AccessDenied", "Copy precondition must be signed")
+    copy_range = request.headers.get("x-amz-copy-source-range")
+    if copy_range is not None and "x-amz-copy-source-range" not in signed:
+        raise SigV4Error("AccessDenied", "Copy-source range must be signed")
     async for block in request.stream():
         if block:
             raise MultipartError("InvalidRequest",
@@ -1475,6 +1534,19 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
         source = ctx.catalog.get(src_bucket, src_key).item
     except FileNotFoundError:
         return _error("NoSuchKey", "CopySource object does not exist", 404)
+    # AWS copy-source ranges are INCLUSIVE byte positions.
+    range_start, range_end = 0, source.size - 1
+    if copy_range is not None:
+        match = re.fullmatch(r"bytes=(\d+)-(\d+)", copy_range.strip())
+        if match is None:
+            raise MultipartError("InvalidArgument",
+                                 "CopySourceRange must be bytes=first-last")
+        range_start, range_end = int(match.group(1)), int(match.group(2))
+        if (range_start > range_end or range_start < 0
+                or range_end >= max(source.size, 1)):
+            raise MultipartError("InvalidRange",
+                                 "Copy-source range is outside the object",
+                                 416)
     try:
         number = int(request.query_params.get("partNumber", ""))
     except ValueError:
@@ -1500,7 +1572,10 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
             ctx.catalog.manifests, transport,
             chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
         )
-        await engine.download_to_path(source.id, stage)
+        with open(stage, "wb") as out:
+            async for piece in engine.iter_bytes(
+                    source.id, start=range_start, end=range_end + 1):
+                out.write(piece)
         md5 = hashlib.md5(usedforsecurity=False)
         with open(stage, "rb") as handle:
             for block in iter(lambda: handle.read(1 << 20), b""):
@@ -1784,8 +1859,17 @@ async def _handle_object_put(ctx: _S3RequestContext,
     crc64_value = 0
     length = 0
     try:
+        # aws-chunked streaming uploads (signed chunks / trailer
+        # checksums) are decoded and verified transparently.
+        decoder = None
+        if streaming_mode(request) is not None:
+            decoder = AwsChunkedDecoder(request, ctx.store.resolve,
+                                        "s3:PutObject")
+            body = decoder.blocks()
+        else:
+            body = request.stream()
         with os.fdopen(fd, "wb") as dest:
-            async for block in request.stream():
+            async for block in body:
                 length += len(block)
                 if max_bytes < 1 or length > max_bytes:
                     return _error("EntityTooLarge", "Upload exceeds configured maximum", 413)
@@ -1801,16 +1885,20 @@ async def _handle_object_put(ctx: _S3RequestContext,
         _verify_upload_sha256(
             request, digest.digest(), md5_digest=md5.digest(),
             sha1_digest=sha1.digest(), crc64nvme_value=crc64_value,
+            trailer=decoder.trailer if decoder is not None else None,
         )
         # Enforce bucket quota (same TeleDrive-level policy as the
         # REST upload path) before any Telegram upload work starts.
         quota_error = _quota_guard(db, bucket, key, length)
         if quota_error is not None:
             return quota_error
-        checksum_crc = request.headers.get("x-amz-checksum-crc32")
+        trailer_headers = decoder.trailer if decoder is not None else {}
+        checksum_crc = (request.headers.get("x-amz-checksum-crc32")
+                        or trailer_headers.get("x-amz-checksum-crc32"))
         if checksum_crc and checksum_crc != base64.b64encode((crc & 0xffffffff).to_bytes(4, "big")).decode():
             return _error("BadDigest", "CRC32 checksum mismatch", 400)
-        declared_crc32c = request.headers.get("x-amz-checksum-crc32c")
+        declared_crc32c = (request.headers.get("x-amz-checksum-crc32c")
+                           or trailer_headers.get("x-amz-checksum-crc32c"))
         if declared_crc32c is not None and not hmac.compare_digest(
             declared_crc32c,
             base64.b64encode(crc32c_value.to_bytes(4, "big")).decode("ascii"),

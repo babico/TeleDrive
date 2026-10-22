@@ -264,8 +264,10 @@ come from simply authorizing more accounts.
       encryption, lifecycle and independent client tests. Keep partial
       capabilities explicitly partial until verified. STATUS (evidence
       on the current SHA): P2-0 done (manifest + route guard); P2-1
-      done (UploadPartCopy shipped and boto3-verified — the spec and
-      manifest now say so: 11 supported / 45 partial / 60 unsupported);
+      done (UploadPartCopy shipped with boto3-verified INCLUSIVE
+      copy-source ranges; manifest now says 13 supported / 43 partial /
+      60 unsupported — GetBucketLocation and UploadPartCopy honestly
+      promoted, deprecated lifecycle aliases documented);
       P2-2 decided and shipped (immutable private-only model: honest
       AWS-shaped compat reads, 501 writes); P2-3/P2-4/P2-5 remain
       intentionally unsupported (fail-closed) per the spec's "no fake
@@ -275,15 +277,25 @@ come from simply authorizing more accounts.
       non-2xx, non-mutating, zero-Telegram — a mapping test keeps
       future operations from being skipped silently) and the
       version-pinned client matrix (boto3 + AWS CLI + rclone v1.66.0,
-      pinned in CI). Real-bug fix on the way: CreateBucket is now
-      idempotent for existing owned buckets (AWS us-east-1 semantics)
-      — rclone's DEFAULT pre-upload bucket preparation previously
-      failed with 400; the default-config rclone flow (mkdir, nested
-      copyto, ls, byte-identical cat, size, delete) is now a live
-      regression test. Remaining open checklist items (per-op
-      exhaustive normal/malformed/retry/race/crash coverage, both-DB
-      mutation invariants, migration/rollback docs) stay tracked in
-      the spec's engineering checklist.
+      pinned in CI). Partial→feature promotions this round:
+      DeleteObjects per-entry VersionId (AWS per-entry Deleted/Error
+      semantics: unknown versions report NoSuchVersion inside a 200
+      response), UploadPartCopy copy-source ranges (signed, inclusive,
+      416 on out-of-range), and aws-chunked streaming upload bodies
+      (teledrive/s3/aws_chunked.py: STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+      chunk-signature chains verified against the request's own
+      Authorization seed, STREAMING-UNSIGNED-PAYLOAD-TRAILER with
+      declared+verified trailer checksums, decoded-length accounting;
+      wired into PutObject and UploadPart; a live-view bytearray regex
+      bug was found and fixed on the way). Real-bug fixes:
+      CreateBucket is now idempotent for existing owned buckets (AWS
+      us-east-1 semantics) — rclone's DEFAULT pre-upload bucket
+      preparation previously failed with 400; the default-config
+      rclone flow (mkdir, nested copyto, ls, byte-identical cat, size,
+      delete) is now a live regression test. Remaining open checklist
+      items (per-op exhaustive normal/malformed/retry/race/crash
+      coverage, both-DB mutation invariants, migration/rollback docs)
+      stay tracked in the spec's engineering checklist.
 - [ ] Extend trustworthy recovery of unknown original Telegram history beyond
       candidate markers without inventing metadata.
 - [ ] Establish longer-duration real-environment capacity benchmarks on

@@ -126,7 +126,6 @@ def test_corrupted_signed_body_and_bad_md5_rejected_before_any_delete(service):
 @pytest.mark.parametrize("payload", [
     b"<!DOCTYPE Delete [<!ENTITY payload SYSTEM 'file:///etc/passwd'>]><Delete><Object><Key>&payload;</Key></Object></Delete>",
     b"<Delete><Object><Key>target.bin</Key></Object><Broken></Delete>",
-    delete_xml(["target.bin"], version="unknown-version"),
     delete_xml(["target.bin"] * 1001),
     b"<Delete><Object><Key></Key></Object></Delete>",
 ])
@@ -137,6 +136,44 @@ def test_invalid_batch_is_fully_rejected_before_mutation(service, payload):
     assert res.status_code in (400, 501)
     assert error_code(res) in ("MalformedXML", "NotImplemented", "InvalidObjectName")
     assert signed(service, "GET", "/backup-bucket/target.bin").status_code == 200
+
+
+def test_batch_deletes_explicit_versions_per_entry(service):
+    """Per-entry VersionId deletes exact versions with AWS semantics:
+    unknown ids become per-entry Error results, never a failed batch."""
+    make_bucket(service)
+    # Two versions of one key plus a distinct key.
+    first = signed(service, "PUT", "/backup-bucket/victim.bin", b"v1")
+    assert first.status_code == 200
+    second = signed(service, "PUT", "/backup-bucket/victim.bin", b"v2")
+    assert second.status_code == 200
+    current_version = second.headers["x-amz-version-id"]
+    make_objects(service, ["bystander.bin"])
+
+    res = batch(service, delete_xml(["victim.bin"],
+                                    version=current_version))
+    assert res.status_code == 200
+    root = ET.fromstring(res.content)
+    deleted = root.findall(NS + "Deleted")
+    assert len(deleted) == 1
+    assert deleted[0].findtext(NS + "Key") == "victim.bin"
+    assert deleted[0].findtext(NS + "VersionId") == current_version
+    # The older version is still the current head after removing v2.
+    head = signed(service, "GET", "/backup-bucket/victim.bin")
+    assert head.status_code == 200 and head.content == b"v1"
+
+    # Unknown version ids: per-entry NoSuchVersion, batch still 200.
+    res = batch(service, delete_xml(["victim.bin"],
+                                    version="does-not-exist"))
+    assert res.status_code == 200
+    root = ET.fromstring(res.content)
+    assert root.findall(NS + "Deleted") == []
+    problems = root.findall(NS + "Error")
+    assert len(problems) == 1
+    assert problems[0].findtext(NS + "Code") == "NoSuchVersion"
+    # Nothing else was touched.
+    assert signed(service, "GET", "/backup-bucket/victim.bin").status_code == 200
+    assert signed(service, "GET", "/backup-bucket/bystander.bin").status_code == 200
 
 
 def test_batch_denies_key_without_delete_scope_and_missing_bucket(service):

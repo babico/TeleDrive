@@ -30,8 +30,14 @@ class BatchDeleteError(ValueError):
 
 @dataclass(frozen=True)
 class BatchDeleteRequest:
-    keys: tuple[str, ...]
+    """Per-entry (key, VersionId or None) batch delete manifest."""
+    entries: tuple[tuple[str, str | None], ...]
     quiet: bool
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        """Backward-compatible key-only view."""
+        return tuple(key for key, _ in self.entries)
 
 
 def verify_body(body: bytes, headers: dict | object) -> None:
@@ -84,7 +90,7 @@ def parse_batch(body: bytes) -> BatchDeleteRequest:
     if local_name(root.tag) != "Delete" or root.attrib:
         raise BatchDeleteError("MalformedXML", "Invalid DeleteObjects root")
 
-    keys: list[str] = []
+    keys: list[tuple[str, str | None]] = []
     quiet = False
     quiet_seen = False
     for entry in root:
@@ -102,16 +108,28 @@ def parse_batch(body: bytes) -> BatchDeleteRequest:
             if len(keys) >= MAX_BATCH_OBJECTS:
                 raise BatchDeleteError("MalformedXML", "Too many DeleteObjects entries")
             fields = list(entry)
-            if (len(fields) != 1 or local_name(fields[0].tag) != "Key"
-                    or fields[0].attrib or list(fields[0])):
-                # VersionId is intentionally refused until real S3 version
-                # addressing/retention can be honored.
-                raise BatchDeleteError("NotImplemented",
-                                       "DeleteObjects VersionId or extension unsupported", 501)
-            key = fields[0].text or ""
+            if not 1 <= len(fields) <= 2:
+                raise BatchDeleteError("MalformedXML",
+                                       "Invalid DeleteObjects entry")
+            key_field = fields[0]
+            if (local_name(key_field.tag) != "Key"
+                    or key_field.attrib or list(key_field)):
+                raise BatchDeleteError("MalformedXML", "Invalid Key field")
+            version_id: str | None = None
+            if len(fields) == 2:
+                version_field = fields[1]
+                if (local_name(version_field.tag) != "VersionId"
+                        or version_field.attrib or list(version_field)):
+                    raise BatchDeleteError("MalformedXML",
+                                           "Invalid VersionId field")
+                version_id = (version_field.text or "").strip()
+                if not 1 <= len(version_id) <= 80:
+                    raise BatchDeleteError("InvalidArgument",
+                                           "Invalid version ID")
+            key = key_field.text or ""
             if not (1 <= len(key.encode("utf-8")) <= 1024):
                 raise BatchDeleteError("InvalidObjectName", "Invalid S3 key")
-            keys.append(key)
+            keys.append((key, version_id))
         else:
             raise BatchDeleteError("MalformedXML", "Unexpected DeleteObjects field")
     if not keys:

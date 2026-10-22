@@ -21,6 +21,15 @@ class SigV4Error(ValueError):
         super().__init__(message)
 
 
+# aws-chunked streaming payload modes: the literal header VALUE is what
+# gets signed, so header-mode verification accepts it as the payload hash.
+SIGNED_STREAMING = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+SIGNED_STREAMING_TRAILER = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+UNSIGNED_STREAMING_TRAILER = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+STREAMING_MODES = frozenset({
+    SIGNED_STREAMING, SIGNED_STREAMING_TRAILER, UNSIGNED_STREAMING_TRAILER})
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -297,9 +306,19 @@ def verify_header_signature(request: Request, lookup_secret, permission: str, *,
         raise SigV4Error("RequestTimeTooSkewed", "Request timestamp outside 15-minute window")
     payload = request.headers.get("x-amz-content-sha256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", payload):
-        if payload != "UNSIGNED-PAYLOAD":
+        if payload in STREAMING_MODES:
+            # aws-chunked: chunk signatures (or a signed trailer
+            # declaration) authenticate the payload; the body decoder
+            # enforces them. Unsigned streaming additionally requires
+            # the trailer declaration to be signed.
+            if (payload == UNSIGNED_STREAMING_TRAILER
+                    and "x-amz-trailer" not in signed):
+                raise SigV4Error(
+                    "InvalidRequest",
+                    "Unsigned streaming requires a signed x-amz-trailer declaration")
+        elif payload != "UNSIGNED-PAYLOAD":
             raise SigV4Error("XAmzContentSHA256Mismatch", "Signed SHA-256 payload required")
-        if request.method in {"PUT", "POST"} and not (
+        elif request.method in {"PUT", "POST"} and not (
             "content-md5" in signed or "x-amz-checksum-sha256" in signed
         ):
             raise SigV4Error(

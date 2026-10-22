@@ -157,7 +157,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":11, "partial":45, "unsupported":60,
+        "supported":13, "partial":43, "unsupported":60,
     }
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",

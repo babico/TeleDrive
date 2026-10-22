@@ -571,3 +571,97 @@ def test_upload_part_copy(service):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+def test_upload_part_copy_ranges(service):
+    """Ranged UploadPartCopy: an inclusive byte slice becomes the part."""
+    client, issued, telegram, connection, key = service
+    source_body = bytes(range(256)) * 24 * 1024  # 6 MiB
+    r = signed(service, "PUT", "/range-src-bucket")
+    assert r.status_code == 200, r.text
+    r = signed(service, "PUT", "/range-src-bucket/original.bin", source_body)
+    assert r.status_code == 200, r.text
+
+    import socket
+    import threading
+
+    import uvicorn
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.listen(64)
+    server = uvicorn.Server(uvicorn.Config(
+        gateway.app, host="127.0.0.1", port=port,
+        lifespan="off", log_level="error"))
+    thread = threading.Thread(target=server.run, args=([sock],), daemon=True)
+    thread.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    assert server.started
+
+    import boto3
+    from botocore.client import Config as BotoConfig
+    s3 = boto3.client(
+        "s3", endpoint_url=f"http://127.0.0.1:{port}",
+        aws_access_key_id=issued.access_key,
+        aws_secret_access_key=issued.secret_key,
+        region_name="us-east-1",
+        config=BotoConfig(s3={"addressing_style": "path"},
+                          retries={"max_attempts": 1}),
+    )
+    try:
+        r = signed(service, "PUT", "/range-dst-bucket")
+        assert r.status_code == 200
+        mpu = s3.create_multipart_upload(Bucket="range-dst-bucket",
+                                         Key="sliced.bin")
+        upload_id = mpu["UploadId"]
+        # AWS ranges are INCLUSIVE: bytes=16-(16+5MiB-1) is exactly 5 MiB
+        # (the minimum for a non-final part).
+        five_mib = 5 * 1024 * 1024
+        part1 = s3.upload_part_copy(
+            Bucket="range-dst-bucket", Key="sliced.bin",
+            UploadId=upload_id, PartNumber=1,
+            CopySource={"Bucket": "range-src-bucket", "Key": "original.bin"},
+            CopySourceRange=f"bytes=16-{16 + five_mib - 1}",
+        )
+        assert "CopyPartResult" in part1
+        part2 = s3.upload_part_copy(
+            Bucket="range-dst-bucket", Key="sliced.bin",
+            UploadId=upload_id, PartNumber=2,
+            CopySource={"Bucket": "range-src-bucket", "Key": "original.bin"},
+            CopySourceRange=f"bytes={len(source_body)-8}-{len(source_body)-1}",
+        )
+        completed = s3.complete_multipart_upload(
+            Bucket="range-dst-bucket", Key="sliced.bin", UploadId=upload_id,
+            MultipartUpload={"Parts": [
+                {"PartNumber": 1, "ETag": part1["CopyPartResult"]["ETag"]},
+                {"PartNumber": 2, "ETag": part2["CopyPartResult"]["ETag"]},
+            ]},
+        )
+        assert "ETag" in completed
+        got = s3.get_object(Bucket="range-dst-bucket", Key="sliced.bin")
+        assert got["Body"].read() == (
+            source_body[16:16 + five_mib] + source_body[-8:])
+
+        # Out-of-range slices are rejected before any staging work.
+        mpu2 = s3.create_multipart_upload(Bucket="range-dst-bucket",
+                                          Key="bad.bin")
+        try:
+            s3.upload_part_copy(
+                Bucket="range-dst-bucket", Key="bad.bin",
+                UploadId=mpu2["UploadId"], PartNumber=1,
+                CopySource={"Bucket": "range-src-bucket",
+                            "Key": "original.bin"},
+                CopySourceRange=f"bytes=0-{len(source_body)}",
+            )
+            raise AssertionError("out-of-range copy-source was accepted")
+        except s3.exceptions.ClientError as exc:
+            assert exc.response["Error"]["Code"] in ("InvalidRange",
+                                                     "InvalidArgument")
+        s3.abort_multipart_upload(Bucket="range-dst-bucket", Key="bad.bin",
+                                  UploadId=mpu2["UploadId"])
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

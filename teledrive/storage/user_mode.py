@@ -611,6 +611,26 @@ class UnifiedUserTransport:
         self._quota_cache[account] = (now, over)
         return over
 
+    def _pinned_account(self) -> str | None:
+        """Bucket→account pin for the CURRENT upload bucket, if any.
+
+        Explicit operator intent: a pin wins over the strategy rotation
+        and over the soft-quota preference. Errors degrade to no pin.
+        """
+        try:
+            from teledrive.storage.placement import current_upload_bucket
+            bucket = current_upload_bucket()
+            if not bucket:
+                return None
+            from sqlalchemy import text as _text
+            row = self.journal.db.connection.execute(_text(
+                "SELECT account FROM bucket_account_pins "
+                "WHERE bucket = :bucket"
+            ), {"bucket": bucket}).scalar_one_or_none()
+            return str(row) if row else None
+        except Exception:
+            return None
+
     async def verify_target(self):
         self.runtime.require()
 
@@ -636,6 +656,13 @@ class UnifiedUserTransport:
             if (strategy in ("round_robin", "parallel")
                     and len(labels) > 1 and callable(advance)):
                 advance()
+        # Bucket→account pin: explicit operator intent wins over both
+        # the strategy rotation and the soft-quota preference — but
+        # only when the pinned account is actually available.
+        if labels:
+            pinned = self._pinned_account()
+            if pinned and pinned in labels:
+                return pinned
         # Soft-quota preference (best effort): when the selected account
         # is over its soft quota and an alternative is under quota,
         # prefer the alternative. All-over or unknown states keep the

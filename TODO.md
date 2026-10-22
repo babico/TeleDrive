@@ -177,10 +177,14 @@ come from simply authorizing more accounts.
       or DB errors keep the strategy choice; uploads never fail on
       monitoring). Unit tests cover preference, all-over, single-label
       and degradation paths.
-- [ ] Bucket→account pinning: store a bucket's objects on a chosen
-      account — needs bucket context threaded from the engine into the
-      transport selection (signature change across the transport
-      interface).
+- [x] Bucket→account pinning DONE: bucket_account_pins table +
+      GET/PUT/DELETE /api/v1/admin/storage/buckets/{bucket}/pin (the
+      account must exist; viewer blocked; audit-logged). The engine
+      publishes the current upload bucket via a ContextVar (no transport
+      signature changes) and _select prefers the pinned account —
+      explicit operator intent wins over strategy rotation and soft
+      quotas; unavailable pins fall through to the normal routing.
+      Buckets page: Pin button with an account dropdown (empty = clear).
 - [ ] Account health probes: periodic `is_authorized` check per session,
       dead/expired session detection with a UI warning and re-login hint.
 - [x] Strategy control from the UI: one cross-account routing selector

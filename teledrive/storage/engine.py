@@ -94,6 +94,19 @@ class TelegramObjectStorage:
 
     async def put_file(self, bucket: str, key: str, source: Path, *,
                        on_begin=None) -> StoredObject:
+        from teledrive.storage.placement import (
+            reset_upload_bucket, set_upload_bucket)
+        # Publish the bucket for the transport's placement decisions
+        # (bucket→account pinning); scoped to this object's upload.
+        placement_token = set_upload_bucket(bucket)
+        try:
+            return await self._put_file_inner(
+                bucket, key, source, on_begin=on_begin)
+        finally:
+            reset_upload_bucket(placement_token)
+
+    async def _put_file_inner(self, bucket: str, key: str, source: Path, *,
+                              on_begin=None) -> StoredObject:
         source = Path(source)
         with _regular_source(source) as handle:
             before = os.fstat(handle.fileno())

@@ -372,3 +372,51 @@ def test_soft_quota_preferred_routing():
     chosen = asyncio.run(transport._select(
         strategy="round_robin", labels=labels, advance=runtime.advance))
     assert chosen == "over-account"
+
+
+def test_bucket_pin_wins_routing():
+    """A bucket→account pin overrides strategy and soft quotas."""
+    import asyncio
+
+    from teledrive.storage import placement
+    from teledrive.storage.user_mode import UnifiedUserTransport
+
+    class _Runtime:
+        account = "strategy-choice"
+        strategy = "round_robin"
+
+        def advance(self):
+            pass
+
+    transport = UnifiedUserTransport(
+        _Runtime(), type("J", (), {"db": None})(), rate=object())
+    transport._account_over_quota = lambda account: account == "strategy-choice"
+
+    # Pin the current upload bucket to a specific account.
+    transport._pinned_account = lambda: "pinned-account"
+    token = placement.set_upload_bucket("pinned-bucket")
+    try:
+        chosen = asyncio.run(transport._select(
+            strategy="round_robin",
+            labels=["strategy-choice", "pinned-account", "other"],
+            advance=_Runtime().advance))
+        assert chosen == "pinned-account"
+    finally:
+        placement.reset_upload_bucket(token)
+
+    # Pin pointing at an unavailable account is ignored; the soft-quota
+    # preference then applies (strategy-choice is over its quota).
+    transport._pinned_account = lambda: "not-in-labels"
+    chosen = asyncio.run(transport._select(
+        strategy="round_robin",
+        labels=["strategy-choice", "pinned-account"],
+        advance=_Runtime().advance))
+    assert chosen == "pinned-account"
+    # Without quota pressure the strategy choice stands for unpinnable
+    # buckets.
+    transport._account_over_quota = lambda account: False
+    chosen = asyncio.run(transport._select(
+        strategy="round_robin",
+        labels=["strategy-choice", "pinned-account"],
+        advance=_Runtime().advance))
+    assert chosen == "strategy-choice"

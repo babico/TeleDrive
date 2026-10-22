@@ -3424,6 +3424,68 @@ def prometheus_metrics(_: None = Depends(require_auth)):
                     media_type="text/plain; charset=utf-8")
 
 
+@app.get("/api/v1/admin/storage/buckets/{bucket}/pin",
+         tags=["Object catalog"],
+         summary="Read the bucket's account pin")
+def admin_get_bucket_pin(bucket: str, _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        pin = conn.connection.execute(_text(
+            "SELECT account FROM bucket_account_pins WHERE bucket = :b"
+        ), {"b": bucket}).scalar_one_or_none()
+        return {"bucket": bucket, "account": pin}
+    finally:
+        conn.close()
+
+
+@app.put("/api/v1/admin/storage/buckets/{bucket}/pin",
+         tags=["Object catalog"],
+         summary="Pin the bucket's uploads to a Telegram account")
+def admin_put_bucket_pin(bucket: str, request: Request,
+                         payload: dict = Body(...),
+                         _: None = Depends(require_auth)):
+    _same_origin(request)
+    account = str(payload.get("account", "")).strip()
+    if not account:
+        raise HTTPException(422, "account is required")
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        if not conn.connection.execute(_text(
+                "SELECT 1 FROM telegram_sessions WHERE account = :a"),
+                {"a": account}).first():
+            raise HTTPException(404, "Unknown Telegram session account")
+        conn.connection.execute(_text(
+            "INSERT INTO bucket_account_pins (bucket, account, updated_at) "
+            "VALUES (:b, :a, :now) ON CONFLICT(bucket) DO UPDATE SET "
+            "account = :a, updated_at = :now"
+        ), {"b": bucket, "a": account, "now": int(time.time())})
+        conn.connection.commit()
+    finally:
+        conn.close()
+    _log(f"bucket pin set: bucket={bucket} account={account}", "storage")
+    return {"ok": True, "bucket": bucket, "account": account}
+
+
+@app.delete("/api/v1/admin/storage/buckets/{bucket}/pin",
+            tags=["Object catalog"],
+            summary="Remove the bucket's account pin")
+def admin_delete_bucket_pin(bucket: str, request: Request,
+                            _: None = Depends(require_auth)):
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "DELETE FROM bucket_account_pins WHERE bucket = :b"),
+            {"b": bucket})
+        conn.connection.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
 @app.get("/api/v1/admin/storage/usage", tags=["Storage jobs"],
          summary="Daily upload volume (objects, bytes) for the last N days")
 def storage_usage_series(days: int = Query(default=30, ge=1, le=365),

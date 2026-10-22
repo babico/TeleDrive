@@ -1348,3 +1348,37 @@ def test_account_soft_quota(authenv):
         "/api/v1/admin/storage/telegram-sessions/quota-user/quota",
         headers={**viewer, **CSRF},
         json={"soft_quota_bytes": 1}).status_code == 403
+
+
+def test_bucket_account_pin_api(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "pin-target")
+    finally:
+        db.close()
+
+    r = client.post("/api/v1/admin/storage/buckets", headers={**admin, **CSRF},
+                    json={"name": "pinned-bucket"})
+    assert r.status_code in (200, 201)
+
+    base = "/api/v1/admin/storage/buckets/pinned-bucket/pin"
+    assert client.get(base, headers=admin).json()["account"] is None
+    r = client.put(base, headers={**admin, **CSRF},
+                   json={"account": "pin-target"})
+    assert r.status_code == 200
+    assert client.get(base, headers=admin).json()["account"] == "pin-target"
+
+    # Unknown account rejected; empty account rejected; viewer blocked.
+    assert client.put(base, headers={**admin, **CSRF},
+                      json={"account": "ghost"}).status_code == 404
+    assert client.put(base, headers={**admin, **CSRF},
+                      json={}).status_code == 422
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.put(base, headers={**viewer, **CSRF},
+                      json={"account": "pin-target"}).status_code == 403
+
+    # Delete clears the pin.
+    assert client.delete(base, headers={**admin, **CSRF}).status_code == 200
+    assert client.get(base, headers=admin).json()["account"] is None

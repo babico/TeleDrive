@@ -601,6 +601,30 @@ function app(){
       } catch(e){ this.toast(e.message,true); }
     },
     corsBucket: null,
+    pinBucket: null,
+    pinAccount: '',
+    async editPin(bucket){
+      this.pinBucket = bucket;
+      await this.refreshTgSessionStatus();
+      try {
+        const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/pin');
+        this.pinAccount = r.account || '';
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async savePin(){
+      try {
+        if(this.pinAccount){
+          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.pinBucket)+'/pin',
+            {method:'PUT', body: JSON.stringify({account: this.pinAccount})});
+          this.toast('Pin saved: '+this.pinAccount);
+        } else {
+          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.pinBucket)+'/pin',
+            {method:'DELETE'});
+          this.toast('Pin removed');
+        }
+        this.pinBucket = null;
+      } catch(e){ this.toast(e.message,true); }
+    },
     corsRules: [],
     async editCors(bucket){
       this.corsBucket = bucket;

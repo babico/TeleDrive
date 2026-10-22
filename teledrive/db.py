@@ -105,6 +105,16 @@ telegram_session_pending = Table(
     Column("created_at", BigInteger, nullable=False),
 )
 
+# Operator-managed placement: uploads to a pinned bucket prefer the
+# pinned Telegram account. Explicit operator intent wins over the
+# soft-quota routing preference.
+bucket_account_pins = Table(
+    "bucket_account_pins", metadata,
+    Column("bucket", String(63), primary_key=True),
+    Column("account", String(255), nullable=False),
+    Column("updated_at", BigInteger, nullable=False),
+)
+
 bucket_quotas = Table(
     "bucket_quotas", metadata,
     Column("bucket", String(255), primary_key=True),

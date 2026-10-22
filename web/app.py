@@ -470,7 +470,8 @@ def _required_roles(method: str, path: str) -> frozenset[str] | None:
         return _ROLE_ADMIN
     if path.startswith("/api/v1/admin/keys"):
         return _ROLE_ADMIN
-    if path.startswith("/api/v1/admin/s3-credentials"):
+    if (path.startswith("/api/v1/admin/s3/credentials")
+            or path.startswith("/api/v1/admin/s3-credentials")):
         return _ROLE_ADMIN
     if path.startswith("/api/v1/admin/storage/buckets") and path.endswith("/quota"):
         return _ROLE_ADMIN
@@ -3610,8 +3611,10 @@ def recover_stale_s3_completion(
         conn.close()
 
 
-@app.get("/api/v1/admin/s3-credentials", tags=["API keys"],
+@app.get("/api/v1/admin/s3/credentials", tags=["API keys"],
          summary="List S3 access key metadata (secrets never returned)")
+@app.get("/api/v1/admin/s3-credentials", tags=["API keys"],
+         include_in_schema=False)
 def list_s3_credentials(_: None = Depends(require_auth)):
     conn = db_connect()
     try:
@@ -3623,8 +3626,10 @@ def list_s3_credentials(_: None = Depends(require_auth)):
         conn.close()
 
 
-@app.post("/api/v1/admin/s3-credentials", tags=["API keys"], status_code=201,
+@app.post("/api/v1/admin/s3/credentials", tags=["API keys"], status_code=201,
           summary="Issue encrypted S3 access credentials (secret displayed once)")
+@app.post("/api/v1/admin/s3-credentials", tags=["API keys"], status_code=201,
+          include_in_schema=False)
 def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
                          _: None = Depends(require_auth)):
     _same_origin(request)
@@ -3644,9 +3649,11 @@ def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
         conn.close()
 
 
-@app.get("/api/v1/admin/s3-credentials/{identifier}/secret",
+@app.get("/api/v1/admin/s3/credentials/{identifier}/secret",
          tags=["API keys"],
          summary="Reveal an S3 credential secret (admin only, audit-logged)")
+@app.get("/api/v1/admin/s3-credentials/{identifier}/secret",
+         tags=["API keys"], include_in_schema=False)
 def reveal_s3_credential_secret(identifier: str,
                                 _: None = Depends(require_auth)):
     conn = db_connect()
@@ -3665,8 +3672,10 @@ def reveal_s3_credential_secret(identifier: str,
         conn.close()
 
 
-@app.put("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
+@app.put("/api/v1/admin/s3/credentials/{identifier}", tags=["API keys"],
          summary="Edit an active S3 credential (name, permissions, expiry)")
+@app.put("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
+         include_in_schema=False)
 def update_s3_credentials(request: Request, identifier: str,
                           payload: dict = Body(...),
                           _: None = Depends(require_auth)):
@@ -3691,8 +3700,10 @@ def update_s3_credentials(request: Request, identifier: str,
         conn.close()
 
 
-@app.delete("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
+@app.delete("/api/v1/admin/s3/credentials/{identifier}", tags=["API keys"],
             summary="Revoke an S3 access key immediately")
+@app.delete("/api/v1/admin/s3-credentials/{identifier}", tags=["API keys"],
+            include_in_schema=False)
 def revoke_s3_credentials(request: Request, identifier: str,
                           _: None = Depends(require_auth)):
     _same_origin(request)

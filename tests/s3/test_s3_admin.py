@@ -33,7 +33,7 @@ def admin(tmp_path, monkeypatch):
 
 def test_issuance_requires_basic_auth_csrf_and_one_time_secret(admin):
     client, url, master = admin
-    path = "/api/v1/admin/s3-credentials"
+    path = "/api/v1/admin/s3/credentials"
     payload = {"name": "SDK-backup", "permissions": ["s3:GetObject", "s3:ListBucket"]}
     assert client.post(path, json=payload).status_code == 403 or client.post(path, json=payload).status_code == 401
     assert client.post(path, auth=("testadmin", "secure-auth-password"),
@@ -71,7 +71,7 @@ def test_issuance_requires_basic_auth_csrf_and_one_time_secret(admin):
 
 def test_scope_validation_and_missing_master_key(admin, monkeypatch):
     client, _, _ = admin
-    url = "/api/v1/admin/s3-credentials"
+    url = "/api/v1/admin/s3/credentials"
     auth = ("testadmin", "secure-auth-password")
     headers = {"x-teledrive-csrf": "1"}
     invalid = client.post(url, auth=auth, headers=headers,
@@ -91,14 +91,14 @@ def test_credential_editing(admin):
     auth = ("testadmin", "secure-auth-password")
     csrf = {"X-TeleDrive-CSRF": "1"}
 
-    r = client.post("/api/v1/admin/s3-credentials", auth=auth, headers=csrf,
+    r = client.post("/api/v1/admin/s3/credentials", auth=auth, headers=csrf,
                     json={"name": "orig", "permissions": ["s3:GetObject",
                                                          "s3:PutObject"]})
     assert r.status_code == 201, r.text
     created = r.json()
 
     # Edit name and narrow the permissions.
-    r = client.put(f"/api/v1/admin/s3-credentials/{created['id']}",
+    r = client.put(f"/api/v1/admin/s3/credentials/{created['id']}",
                    auth=auth, headers=csrf,
                    json={"name": "renamed-key",
                          "permissions": ["s3:GetObject", "s3:ListBucket"]})
@@ -108,20 +108,20 @@ def test_credential_editing(admin):
     assert body["permissions"] == ["s3:GetObject", "s3:ListBucket"]
 
     # Access key is unchanged; the edit is visible in the list.
-    creds = client.get("/api/v1/admin/s3-credentials", auth=auth).json()["credentials"]
+    creds = client.get("/api/v1/admin/s3/credentials", auth=auth).json()["credentials"]
     again = [c for c in creds if c["id"] == created["id"]][0]
     assert again["access_key"] == created["access_key"]
     assert again["name"] == "renamed-key"
 
     # Invalid permission set and empty updates are rejected.
-    assert client.put(f"/api/v1/admin/s3-credentials/{created['id']}",
+    assert client.put(f"/api/v1/admin/s3/credentials/{created['id']}",
                       auth=auth, headers=csrf,
                       json={"permissions": ["s3:Nonsense"]}).status_code == 422
-    assert client.put(f"/api/v1/admin/s3-credentials/{created['id']}",
+    assert client.put(f"/api/v1/admin/s3/credentials/{created['id']}",
                       auth=auth, headers=csrf,
                       json={}).status_code == 422
     # Unknown identifier.
-    assert client.put("/api/v1/admin/s3-credentials/nope",
+    assert client.put("/api/v1/admin/s3/credentials/nope",
                       auth=auth, headers=csrf,
                       json={"name": "x"}).status_code == 422
 
@@ -132,13 +132,13 @@ def test_credential_secret_reveal(admin):
     auth = ("testadmin", "secure-auth-password")
     csrf = {"X-TeleDrive-CSRF": "1"}
 
-    r = client.post("/api/v1/admin/s3-credentials", auth=auth, headers=csrf,
+    r = client.post("/api/v1/admin/s3/credentials", auth=auth, headers=csrf,
                     json={"name": "reveal-me",
                           "permissions": ["s3:GetObject"]})
     created = r.json()
 
     # The revealed secret matches the one shown at creation.
-    r = client.get(f"/api/v1/admin/s3-credentials/{created['id']}/secret",
+    r = client.get(f"/api/v1/admin/s3/credentials/{created['id']}/secret",
                    auth=auth)
     assert r.status_code == 200
     revealed = r.json()
@@ -146,11 +146,20 @@ def test_credential_secret_reveal(admin):
     assert revealed["secret_key"] == created["secret_key"]
 
     # Unknown identifier and revoked credentials are rejected.
-    assert client.get("/api/v1/admin/s3-credentials/nope/secret",
+    assert client.get("/api/v1/admin/s3/credentials/nope/secret",
                       auth=auth).status_code == 422
-    client.delete(f"/api/v1/admin/s3-credentials/{created['id']}",
+    client.delete(f"/api/v1/admin/s3/credentials/{created['id']}",
                   auth=auth, headers=csrf)
-    r = client.get(f"/api/v1/admin/s3-credentials/{created['id']}/secret",
+    r = client.get(f"/api/v1/admin/s3/credentials/{created['id']}/secret",
                    auth=auth)
     assert r.status_code == 422
     assert "Revoked" in r.json()["detail"]
+
+
+def test_legacy_s3_credentials_alias_still_works(admin):
+    """The old /admin/s3-credentials path remains a permanent alias."""
+    client, url, master = admin
+    auth = ("testadmin", "secure-auth-password")
+    r = client.get("/api/v1/admin/s3-credentials", auth=auth)
+    assert r.status_code == 200
+    assert "credentials" in r.json()

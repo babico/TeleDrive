@@ -457,14 +457,14 @@ function app(){
 
     async revokeS3Key(id){
       if(!confirm('Revoke this S3 key?')) return;
-      try { await this.api('/api/v1/admin/s3-credentials/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshS3Keys(); }
+      try { await this.api('/api/v1/admin/s3/credentials/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshS3Keys(); }
       catch(e){ this.toast(e.message,true); }
     },
 
     async revealS3Secret(k){
       if(!confirm('Reveal the secret for '+k.name+'? This action is audit-logged.')) return;
       try {
-        this.revealedS3 = await this.api('/api/v1/admin/s3-credentials/'+k.id+'/secret');
+        this.revealedS3 = await this.api('/api/v1/admin/s3/credentials/'+k.id+'/secret');
       } catch(e){ this.toast(e.message,true); }
     },
     startS3Edit(k){
@@ -473,7 +473,7 @@ function app(){
     },
     async saveS3Edit(){
       try {
-        await this.api('/api/v1/admin/s3-credentials/'+this.s3Edit.id,
+        await this.api('/api/v1/admin/s3/credentials/'+this.s3Edit.id,
           {method:'PUT', body: JSON.stringify({name: this.s3Edit.name.trim(),
             permissions: this.s3Edit.permissions})});
         this.toast('Credential updated');
@@ -482,7 +482,7 @@ function app(){
       } catch(e){ this.toast(e.message,true); }
     },
     async refreshS3Keys(){
-      try { const r = await this.api('/api/v1/admin/s3-credentials'); this.s3Keys = r.credentials||[]; }
+      try { const r = await this.api('/api/v1/admin/s3/credentials'); this.s3Keys = r.credentials||[]; }
       catch(e){ this.toast(e.message,true); }
     },
 
@@ -490,7 +490,7 @@ function app(){
       try {
         const body = {name:this.s3KeyName.trim()||'s3-key', permissions:this.selectedS3Perms.slice()};
         if(this.s3KeyExpiry) body.expires_at = Math.floor(new Date(this.s3KeyExpiry).getTime()/1000);
-        const r = await this.api('/api/v1/admin/s3-credentials',{method:'POST',body:JSON.stringify(body)});
+        const r = await this.api('/api/v1/admin/s3/credentials',{method:'POST',body:JSON.stringify(body)});
         this.createdS3 = {access:r.access_key, secret:r.secret_key};
         this.toast('S3 credentials created');
         await this.refreshS3Keys();

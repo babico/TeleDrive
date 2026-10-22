@@ -180,6 +180,12 @@ function app(){
 
     navActive(p){ return window.location.pathname === p; },
 
+    // One consistent confirmation helper for every destructive action:
+    // same phrasing, same "consequence" hint, same audit note when the
+    // action is logged.
+    confirmDelete(what, hint){
+      return confirm('Delete ' + what + '?' + (hint ? '\n\n' + hint : ''));
+    },
     toast(msg, bad=false){
       this.toastMsg = msg;
       this.toastBad = bad;
@@ -338,7 +344,7 @@ function app(){
     },
 
     async deleteChannel(id){
-      if(!confirm('Remove this channel?')) return;
+      if(!this.confirmDelete('this channel', 'Uploads targeting it must be re-assigned.')) return;
       try { await this.api('/api/v1/admin/storage/channels/'+id,{method:'DELETE'}); this.toast('Removed'); await this.refreshChannels(); }
       catch(e){ this.toast(e.message,true); }
     },
@@ -477,7 +483,7 @@ function app(){
     },
 
     async revokeKey(id){
-      if(!confirm('Revoke this key?')) return;
+      if(!this.confirmDelete('this API key', 'Clients using it stop working immediately.')) return;
       try { await this.api('/api/v1/admin/keys/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshKeys(); }
       catch(e){ this.toast(e.message,true); }
     },
@@ -487,7 +493,7 @@ function app(){
     },
 
     async revokeS3Key(id){
-      if(!confirm('Revoke this S3 key?')) return;
+      if(!this.confirmDelete('this S3 credential', 'S3 clients signed with it stop working immediately.')) return;
       try { await this.api('/api/v1/admin/s3/credentials/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshS3Keys(); }
       catch(e){ this.toast(e.message,true); }
     },
@@ -637,7 +643,7 @@ function app(){
     },
     syncSelectedKeys(){ this.selectedKeys = new Set(this.selectedKeyList); },
     async deleteSelected(){
-      if(!this.selectedKeys.size || !confirm('Delete ' + this.selectedKeys.size + ' object(s)? Telegram media is retained.')) return;
+      if(!this.selectedKeys.size || !this.confirmDelete(this.selectedKeys.size + ' object(s)', 'Telegram media is retained (physical GC is owner-gated).')) return;
       let ok = 0;
       for(const key of this.selectedKeys){
         try {
@@ -723,7 +729,7 @@ function app(){
       } catch(e){ this.toast(e.message,true); }
     },
     async deleteBucket(name){
-      if(!confirm('Delete bucket '+name+'? (must be empty)')) return;
+      if(!this.confirmDelete('bucket ' + name, 'Only possible when the bucket is empty.')) return;
       try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name),{method:'DELETE'}); this.toast('Deleted'); await this.refreshBuckets(); if(this.currentBucket===name) this.currentBucket=null; }
       catch(e){ this.toast(e.message,true); }
     },
@@ -733,7 +739,7 @@ function app(){
       catch(e){ this.toast(e.message,true); }
     },
     async deleteObject(bucket,key){
-      if(!confirm('Delete '+key+'?')) return;
+      if(!this.confirmDelete(key, 'Telegram media is retained (physical GC is owner-gated).')) return;
       try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}),{method:'DELETE'}); this.toast('Deleted'); await this.browseBucket(bucket); await this.refreshBuckets(); }
       catch(e){ this.toast(e.message,true); }
     },
@@ -781,7 +787,7 @@ function app(){
       } catch(e){ this.toast(e.message,true); }
     },
     async deleteUser(id){
-      if(!confirm('Delete this user?')) return;
+      if(!this.confirmDelete('this user', 'Their sessions are revoked immediately.')) return;
       try { await this.api('/api/v1/admin/users/'+id,{method:'DELETE'}); this.toast('User deleted'); await this.loadUsers(); }
       catch(e){ this.toast(e.message,true); }
     },

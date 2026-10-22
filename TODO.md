@@ -280,9 +280,10 @@ come from simply authorizing more accounts.
       paths stable to preserve run history where possible, renumber
       the display names, and delete jobs that only duplicate another
       workflow's pytest invocation.
-- [ ] Menu-wide consistency: list add/delete flows must work the same
-      way on every page (same confirm patterns, same buttons, same
-      feedback), not per-page variations.
+- [x] Menu-wide consistency DONE: every destructive action across all
+      pages goes through one confirmDelete helper with the same
+      phrasing pattern ("Delete X?" + consequence hint + audit note),
+      including the physical-GC owner-gate reminder on object deletes.
 
 ## 11. Release decision rules
 

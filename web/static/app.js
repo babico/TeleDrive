@@ -54,6 +54,8 @@ function app(){
     tgSessions: [],
     tgChecking: '',
     strategySel: 'round_robin',
+    replicaSel: '',
+    replication: null,
     tgSessionError: '',
     floodActive: false,
     floodLast: null,
@@ -310,6 +312,7 @@ function app(){
         this.activeChannelId = storage.channel||'';
         await this.refreshChannels();
         await this.refreshTgSessionStatus();
+        await this.loadReplication();
       } catch(e){ this.toast(e.message,true); }
     },
 
@@ -377,6 +380,31 @@ function app(){
         this.toast(e.message,true);
         await this.refreshTgSessionStatus();
       }
+    },
+    async loadReplication(){
+      try {
+        this.replication = await this.api('/api/v1/admin/storage/replication');
+        this.replicaSel = this.replication.account || '';
+      } catch(e){ /* status card is best-effort */ }
+    },
+    async saveReplication(){
+      try {
+        await this.api('/api/v1/admin/storage/replication',{method:'PUT',body:JSON.stringify({account:this.replicaSel})});
+        this.toast(this.replicaSel ? 'Replication target: '+this.replicaSel : 'Replication disabled');
+        await this.loadReplication();
+      } catch(e){
+        this.toast(e.message,true);
+        await this.loadReplication();
+      }
+    },
+    async repairReplication(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/replication/repair',{method:'POST',body:JSON.stringify({limit:10})});
+        this.toast(r.repaired_objects
+          ? 'Repaired '+r.repaired_objects+' object(s), '+r.chunks+' chunk(s)'
+          : 'Nothing to repair');
+        await this.loadReplication();
+      } catch(e){ this.toast(e.message,true); }
     },
     quotaEditAccount: null,
     quotaEditBytes: '',

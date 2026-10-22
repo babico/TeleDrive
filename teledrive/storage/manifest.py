@@ -62,6 +62,20 @@ writer_fences = Table(
     Column("heartbeat_at", BigInteger, nullable=False),
 )
 
+# Cross-account replication: a second Telegram copy of a chunk, on a
+# different account than the primary storage_chunks row. Read paths fall
+# back to these when the primary message is unavailable. Best-effort and
+# idempotently repairable; physical GC must treat them as referenced.
+replica_chunks = Table(
+    "storage_replica_chunks", metadata,
+    Column("object_id", String(36), ForeignKey("storage_objects.id"), primary_key=True),
+    Column("ordinal", Integer, primary_key=True),
+    Column("account", String(255), nullable=False),
+    Column("chat_id", BigInteger, nullable=False),
+    Column("message_id", BigInteger, nullable=False),
+    Column("created_at", BigInteger, nullable=False),
+)
+
 Index("ix_storage_objects_bucket", objects.c.bucket)
 Index("ix_storage_objects_status", objects.c.status)
 
@@ -391,3 +405,84 @@ class ManifestStore:
                                size=int(r["size"]), sha256=r["sha256"], account=r["account"],
                                chat_id=int(r["chat_id"]), message_id=int(r["message_id"]))
                 for r in rows]
+
+    def append_replica(self, identifier: str, ordinal: int, account: str,
+                       chat_id: int, message_id: int, now: int) -> None:
+        """Idempotently record a chunk's replica Telegram message."""
+        existing = self.db.connection.execute(
+            select(replica_chunks.c.message_id).where(
+                replica_chunks.c.object_id == identifier,
+                replica_chunks.c.ordinal == ordinal,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if int(existing) != int(message_id):
+                self.db.connection.execute(update(replica_chunks).where(
+                    replica_chunks.c.object_id == identifier,
+                    replica_chunks.c.ordinal == ordinal,
+                ).values(account=account, chat_id=int(chat_id),
+                         message_id=int(message_id), created_at=now))
+                self.db.commit()
+            return
+        self.db.connection.execute(insert(replica_chunks).values(
+            object_id=identifier, ordinal=int(ordinal), account=account,
+            chat_id=int(chat_id), message_id=int(message_id), created_at=now,
+        ))
+        self.db.commit()
+
+    def replica_refs(self, identifier: str) -> dict[int, tuple[str, int, int]]:
+        """ordinal -> (account, chat_id, message_id) replica coordinates."""
+        current = self.resolve_content_id(identifier)
+        rows = self.db.connection.execute(select(
+            replica_chunks.c.ordinal, replica_chunks.c.account,
+            replica_chunks.c.chat_id, replica_chunks.c.message_id,
+        ).where(replica_chunks.c.object_id == current)).all()
+        return {int(r[0]): (str(r[1]), int(r[2]), int(r[3])) for r in rows}
+
+    def replica_coverage(self) -> dict[str, int]:
+        """Replication coverage over READY content objects.
+
+        An object counts as replicated when every primary chunk ordinal
+        has a replica row. Alias objects have no chunks of their own and
+        are excluded (replicating their content covers them).
+        """
+        totals = self.db.connection.execute(
+            select(chunks.c.object_id, func.count()).where(
+                chunks.c.object_id.in_(
+                    select(objects.c.id).where(objects.c.status == "ready")
+                )
+            ).group_by(chunks.c.object_id)
+        ).all()
+        replicated = self.db.connection.execute(
+            select(replica_chunks.c.object_id, func.count()).where(
+                replica_chunks.c.object_id.in_(
+                    select(objects.c.id).where(objects.c.status == "ready")
+                )
+            ).group_by(replica_chunks.c.object_id)
+        ).all()
+        replica_counts = {str(r[0]): int(r[1]) for r in replicated}
+        total = fully = 0
+        for object_id, chunk_count in totals:
+            total += 1
+            if replica_counts.get(str(object_id), 0) >= int(chunk_count):
+                fully += 1
+        return {"objects": total, "replicated": fully,
+                "missing": total - fully}
+
+    def objects_missing_replicas(self, limit: int = 25) -> list[str]:
+        """READY content objects whose replica coverage is incomplete."""
+        rows = self.db.connection.execute(
+            select(chunks.c.object_id, func.count()).where(
+                chunks.c.object_id.in_(
+                    select(objects.c.id).where(objects.c.status == "ready")
+                )
+            ).group_by(chunks.c.object_id)
+        ).all()
+        replica_counts = {
+            str(r[0]): int(r[1]) for r in self.db.connection.execute(
+                select(replica_chunks.c.object_id, func.count())
+                .group_by(replica_chunks.c.object_id)).all()
+        }
+        missing = [str(object_id) for object_id, chunk_count in rows
+                   if replica_counts.get(str(object_id), 0) < int(chunk_count)]
+        return missing[:limit]

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import secrets
 import os
 import stat
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import AsyncIterator, Protocol
 from uuid import uuid4
@@ -22,6 +24,8 @@ from uuid import uuid4
 from sqlalchemy import insert, select
 
 from .manifest import ChunkReference, ManifestStore, StoredObject, ManifestError, object_aliases, objects
+
+_engine_logger = logging.getLogger(__name__)
 
 
 class IntegrityError(RuntimeError):
@@ -104,13 +108,15 @@ class TelegramObjectStorage:
             # Content-addressed dedup is skipped for internal staging
             # uploads (multipart parts): completion physically re-owns
             # the staged parts' chunk rows, which requires them to be
-            # chunked objects rather than aliases.
+            # chunked objects rather than aliases. Staging uploads are
+            # not replicated either — completion re-owns their chunks,
+            # so replica rows would point at the wrong object id.
             if dedup:
                 deduped = self._dedup_lookup(source, bucket, key)
                 if deduped is not None:
                     return deduped
             return await self._put_file_inner(
-                bucket, key, source, on_begin=on_begin)
+                bucket, key, source, on_begin=on_begin, replicate=dedup)
         finally:
             reset_upload_bucket(placement_token)
 
@@ -171,8 +177,92 @@ class TelegramObjectStorage:
                 pass
             return None
 
+    def _replica_target(self) -> str | None:
+        """Live replication target from the transport, if any."""
+        resolver = getattr(self.transport, "replica_account", None)
+        try:
+            return resolver() if callable(resolver) else None
+        except Exception:
+            return None
+
+    async def _replicate_chunk(self, identifier: str, ordinal: int,
+                               checksum: str, part_path: Path,
+                               primary_account: str) -> None:
+        """Best-effort second Telegram copy of one chunk.
+
+        The primary copy remains the source of truth: a failed replica
+        send never fails the upload — the chunk is simply left for a
+        later repair sweep.
+        """
+        replica = self._replica_target()
+        if not replica or replica == primary_account:
+            return
+        try:
+            account, chat_id, message_id = await self.transport.upload(
+                part_path, object_id=identifier, ordinal=ordinal,
+                checksum=checksum, force_account=replica,
+            )
+            self.manifests.append_replica(
+                identifier, ordinal, account, int(chat_id),
+                int(message_id), int(time.time()))
+        except Exception:
+            _engine_logger.warning(
+                "replica send failed for object %s chunk %d",
+                identifier, ordinal, exc_info=True)
+
+    def _replica_ref(self, identifier: str, part: ChunkReference):
+        """Replica coordinates for one chunk, as a fallback reference."""
+        try:
+            coords = self.manifests.replica_refs(identifier).get(part.ordinal)
+            if not coords or coords[0] == part.account:
+                return None
+            return replace(part, account=coords[0], chat_id=coords[1],
+                           message_id=coords[2])
+        except Exception:
+            return None
+
+    async def repair_replicas(self, identifier: str) -> int:
+        """Re-send the object's missing replica chunks; returns the count.
+
+        Each primary chunk is downloaded and digest-verified before it is
+        re-sent to the replica account, so a corrupt primary can never
+        propagate into the replica copy.
+        """
+        replica = self._replica_target()
+        if not replica:
+            return 0
+        content_id = self.manifests.resolve_content_id(identifier)
+        parts = self.manifests.parts(content_id)
+        refs = self.manifests.replica_refs(content_id)
+        repaired = 0
+        with tempfile.TemporaryDirectory(
+            prefix="teledrive-replica-", dir=self.scratch_directory
+        ) as scratch:
+            root = Path(scratch)
+            for part in parts:
+                coords = refs.get(part.ordinal)
+                if coords is not None and coords[0] == replica:
+                    continue
+                target = root / f"part-{part.ordinal:08d}"
+                await self.transport.download(part, target)
+                size, sha = _digest_file(target)
+                if size != part.size or sha != part.sha256:
+                    raise IntegrityError(
+                        "Primary chunk failed verification; refusing to "
+                        "replicate corrupt bytes")
+                account, chat_id, message_id = await self.transport.upload(
+                    target, object_id=content_id, ordinal=part.ordinal,
+                    checksum=part.sha256, force_account=replica,
+                )
+                self.manifests.append_replica(
+                    content_id, part.ordinal, account, int(chat_id),
+                    int(message_id), int(time.time()))
+                repaired += 1
+        return repaired
+
     async def _put_file_inner(self, bucket: str, key: str, source: Path, *,
-                              on_begin=None) -> StoredObject:
+                              on_begin=None, replicate: bool = False
+                              ) -> StoredObject:
         source = Path(source)
         with _regular_source(source) as handle:
             before = os.fstat(handle.fileno())
@@ -239,6 +329,10 @@ class TelegramObjectStorage:
                                 account=account, chat_id=int(chat_id),
                                 message_id=int(message_id),
                             ), int(time.time()), writer_token=token)
+                            if replicate:
+                                await self._replicate_chunk(
+                                    identifier, ordinal_number, digest,
+                                    part_path, account)
                             part_path.unlink()
                 after = os.fstat(handle.fileno())
                 if (offset != before.st_size or before.st_dev != after.st_dev
@@ -401,6 +495,28 @@ class TelegramObjectStorage:
                 stop.set()
                 await renewal
 
+    async def _verified_fetch(self, part: ChunkReference,
+                              target: Path) -> None:
+        """Download one chunk reference, digest-verified, bounded retries.
+
+        Telegram's remote file endpoint can occasionally return incorrect
+        bytes on an otherwise successful HTTPS response. A GET may safely
+        be repeated; a send MUST NOT be. Never expose any bytes until the
+        independently journaled digest validates.
+        """
+        for attempt in range(3):
+            target.unlink(missing_ok=True)
+            await self.transport.download(part, target)
+            if not target.is_file() or target.is_symlink():
+                raise IntegrityError("Telegram chunk missing or unsafe")
+            size, sha = _digest_file(target)
+            if size == part.size and sha == part.sha256:
+                return
+            target.unlink(missing_ok=True)
+            if attempt == 2:
+                raise IntegrityError("Telegram chunk checksum mismatch")
+            await asyncio.sleep(0.25 * (attempt + 1))
+
     async def iter_bytes(self, identifier: str, *,
                          start: int = 0, end: int | None = None,
                          block_size: int = 1024 * 1024) -> AsyncIterator[bytes]:
@@ -433,18 +549,15 @@ class TelegramObjectStorage:
                 # expose any bytes until the independently journaled digest
                 # validates. Re-read the same immutable message, boundedly,
                 # and fail closed if every attempt disagrees with the manifest.
-                for attempt in range(3):
-                    target.unlink(missing_ok=True)
-                    await self.transport.download(part, target)
-                    if not target.is_file() or target.is_symlink():
-                        raise IntegrityError("Telegram chunk missing or unsafe")
-                    size, sha = _digest_file(target)
-                    if size == part.size and sha == part.sha256:
-                        break
-                    target.unlink(missing_ok=True)
-                    if attempt == 2:
-                        raise IntegrityError("Telegram chunk checksum mismatch")
-                    await asyncio.sleep(0.25 * (attempt + 1))
+                # When the primary message is unavailable or corrupt, the
+                # cross-account replica is tried before failing the read.
+                try:
+                    await self._verified_fetch(part, target)
+                except Exception:
+                    replica_ref = self._replica_ref(identifier, part)
+                    if replica_ref is None:
+                        raise
+                    await self._verified_fetch(replica_ref, target)
                 local_start = max(0, start - part.offset)
                 local_end = min(part.size, end - part.offset)
                 with _regular_source(target) as file:

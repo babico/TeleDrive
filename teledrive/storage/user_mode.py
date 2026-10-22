@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import logging
 import os
 import platform
 import re
@@ -24,6 +25,7 @@ from .mtproto_rate_guard import MtprotoRateGuard
 from .telethon_adapter import TelethonChunkTransport
 
 _meta = MetaData()
+_module_logger = logging.getLogger(__name__)
 mtproto_send_intents = Table(
     "storage_mtproto_send_intents", _meta,
     Column("account", String(255), primary_key=True),
@@ -337,6 +339,9 @@ class UserSessionRuntime:
         self.account = None
         self.chat_id = None
         self.strategy = "round_robin"
+        # Cross-account replication target (storage.replica_account);
+        # None disables replication. Hot-reloaded with the runtime.
+        self.replica_account = None
         self._sets: dict[str, tuple[Any, Any]] = {}
         self._labels: list[str] = []
         self._index = 0
@@ -457,6 +462,17 @@ class UserSessionRuntime:
         self.transport = TelethonChunkTransport({
             label: pair for label, pair in self._sets.items()
         })
+        # Cross-account replication: an operator-set target account that
+        # is not among the loaded credential sets degrades to disabled
+        # (with a log) rather than killing the runtime.
+        replica = str((storage_section or {}).get(
+            "replica_account", "") or "").strip()
+        if replica and replica not in self._labels:
+            _module_logger.warning(
+                "replica_account %r is not a loaded credential set; "
+                "replication disabled", replica)
+            replica = ""
+        self.replica_account = replica or None
 
     async def stop(self) -> None:
         clients = [pair[0] for pair in self._sets.values()]
@@ -513,6 +529,30 @@ class UserSendJournal:
             self.db.commit()
         except IntegrityError:
             self.db.connection.rollback()
+            # A fully ACKNOWLEDGED intent may be re-opened for a re-send
+            # of the same identity (replica repair, resume): the previous
+            # remote outcome is known and resolved. An UNRESOLVED intent
+            # still blocks — its remote acceptance is unknown.
+            row = self.db.connection.execute(
+                select(mtproto_send_intents.c.sha256,
+                       mtproto_send_intents.c.size,
+                       mtproto_send_intents.c.message_id).where(
+                    mtproto_send_intents.c.account == account,
+                    mtproto_send_intents.c.chat_id == chat_id,
+                    mtproto_send_intents.c.object_id == object_id,
+                    mtproto_send_intents.c.ordinal == ordinal,
+                )
+            ).first()
+            if (row is not None and row[2] is not None
+                    and str(row[0]) == sha256 and int(row[1]) == size):
+                self.db.connection.execute(update(mtproto_send_intents).where(
+                    mtproto_send_intents.c.account == account,
+                    mtproto_send_intents.c.chat_id == chat_id,
+                    mtproto_send_intents.c.object_id == object_id,
+                    mtproto_send_intents.c.ordinal == ordinal,
+                ).values(message_id=None))
+                self.db.commit()
+                return
             raise RuntimeError("Unresolved MTProto upload intent: reconcile before retry") from None
 
     def acknowledged(self, account: str, chat_id: int, object_id: str,
@@ -677,8 +717,12 @@ class UnifiedUserTransport:
                 pass
         return account
 
+    def replica_account(self) -> str | None:
+        """Live replication target account; None disables replication."""
+        return getattr(self.runtime, "replica_account", None)
+
     async def upload(self, path: Path, *, object_id: str, ordinal: int,
-                     checksum: str):
+                     checksum: str, force_account: str | None = None):
         from telethon.errors import FloodWaitError
 
         size = path.stat().st_size
@@ -689,11 +733,19 @@ class UnifiedUserTransport:
         # fresh intent. Ambiguous outcomes never trigger cross-set retries.
         # Single-set runtimes keep the original intent across the bounded
         # same-set retry (legacy behavior).
+        # A forced account (cross-account replication) pins every attempt:
+        # replication either lands on the replica account or fails — it
+        # must never silently rotate onto a different set.
         transports = getattr(self.runtime, "transports", None)
         labels = list(transports()) if callable(transports) else None
         strategy = getattr(self.runtime, "strategy", "round_robin")
         advance = getattr(self.runtime, "advance", None)
-        if labels:
+        if force_account is not None:
+            if labels and force_account not in labels:
+                raise RuntimeError(
+                    "Forced upload account is not an available credential set")
+            account = force_account
+        elif labels:
             account = await self._select(
                 strategy=strategy, labels=labels, advance=advance)
         else:
@@ -702,7 +754,8 @@ class UnifiedUserTransport:
                            checksum, size)
         total_attempts = max(len(labels) * 2, 2) if labels else 2
         for attempt in range(total_attempts):
-            if attempt and labels and len(labels) > 1 and callable(advance):
+            if (attempt and force_account is None and labels
+                    and len(labels) > 1 and callable(advance)):
                 self.journal.clear_rejected_send(
                     account, chat_id, object_id, ordinal, checksum, size,
                 )

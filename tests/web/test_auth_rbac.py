@@ -1382,3 +1382,56 @@ def test_bucket_account_pin_api(authenv):
     # Delete clears the pin.
     assert client.delete(base, headers={**admin, **CSRF}).status_code == 200
     assert client.get(base, headers=admin).json()["account"] is None
+
+
+def test_replication_endpoints(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    # Status: disabled by default, zero coverage, no runtime account.
+    r = client.get("/api/v1/admin/storage/replication", headers=admin)
+    assert r.status_code == 200
+    status = r.json()
+    assert status["enabled"] is False
+    assert status["runtime_account"] is None
+    assert status["coverage"]["objects"] == 0
+
+    # Unknown accounts are rejected before any config write.
+    assert client.put("/api/v1/admin/storage/replication",
+                      headers={**admin, **CSRF},
+                      json={"account": "ghost"}).status_code == 404
+    # Viewer role is blocked.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.put("/api/v1/admin/storage/replication",
+                      headers={**viewer, **CSRF},
+                      json={"account": "repl-target"}).status_code == 403
+
+    # A real session account is accepted and persists in the config.
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "repl-target")
+    finally:
+        db.close()
+    r = client.put("/api/v1/admin/storage/replication",
+                   headers={**admin, **CSRF},
+                   json={"account": "repl-target"})
+    assert r.status_code == 200 and r.json()["account"] == "repl-target"
+    cfg = client.get("/api/v1/config", headers=admin).json()
+    assert cfg["storage"]["replica_account"] == "repl-target"
+    status = client.get("/api/v1/admin/storage/replication",
+                        headers=admin).json()
+    assert status["account"] == "repl-target"
+
+    # Repair with nothing to do reports zero work (and needs no session).
+    r = client.post("/api/v1/admin/storage/replication/repair",
+                    headers={**admin, **CSRF}, json={"limit": 3})
+    assert r.status_code == 200
+    assert r.json()["repaired_objects"] == 0
+
+    # Empty account disables replication again.
+    assert client.put("/api/v1/admin/storage/replication",
+                      headers={**admin, **CSRF},
+                      json={"account": ""}).status_code == 200
+    status = client.get("/api/v1/admin/storage/replication",
+                        headers=admin).json()
+    assert status["account"] is None

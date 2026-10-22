@@ -196,6 +196,22 @@ tailwind.config = {
         </div>
         <p class="muted text-xs" style="flex:1;margin:0">Takes effect immediately (runtime reloads). A FloodWait on one account automatically fails over to the others. Add another account by logging in above with a different phone number.</p>
       </div>
+      <div class="row mt-3" style="align-items:flex-end;border-top:1px solid #2d3748;padding-top:12px">
+        <div class="field" style="flex:0 0 320px">
+          <label>Cross-account replication target</label>
+          <select class="input" x-model="replicaSel" @change="saveReplication()" :disabled="!canWrite">
+            <option value="">(disabled — single copy)</option>
+            <template x-for="a in tgSessions" :key="a.account">
+              <option :value="a.account" x-text="a.account"></option>
+            </template>
+          </select>
+        </div>
+        <button class="btn btn-sm" x-show="canWrite" @click="repairReplication()">Repair missing replicas</button>
+        <p class="muted text-xs" style="flex:1;margin:0">
+          Every new upload's chunks are also sent to the replica account (best effort — reads fall back to it when the primary message is unavailable).
+          <span x-show="replication" x-text="'Coverage: ' + replication.coverage.replicated + '/' + replication.coverage.objects + ' objects replicated' + (replication.coverage.missing ? ' (' + replication.coverage.missing + ' missing)' : '')"></span>
+        </p>
+      </div>
       <table>
         <thead><tr><th>Account</th><th>Phone</th><th>API ID</th><th>Objects</th><th>Size</th><th>Soft quota</th><th>Flood</th><th>Health</th><th>Updated</th><th></th></tr></thead>
         <tbody>

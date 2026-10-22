@@ -496,3 +496,130 @@ def test_content_dedup_aliases_without_telegram_traffic(store, tmp_path):
     third = execute(engine.put_file("other", "c.bin", third_source))
     assert backend.uploads > uploads_after_first
     assert third.sha256 != first.sha256
+
+
+class ReplicaAwareTelegram(MemoryTelegram):
+    """Two-account fake: primary sends plus forced replica sends."""
+
+    def __init__(self):
+        super().__init__()
+        self.replica = "backup-account"
+        self.replica_uploads = 0
+
+    def replica_account(self):
+        return self.replica
+
+    async def upload(self, path, *, object_id, ordinal, checksum,
+                     force_account=None):
+        if force_account is not None:
+            assert force_account == self.replica
+            self.replica_uploads += 1
+            body = path.read_bytes()
+            assert hashlib.sha256(body).hexdigest() == checksum
+            message = 1_000_000 + self.replica_uploads
+            self.data[(force_account, 12345, message)] = body
+            return force_account, 12345, message
+        return await super().upload(
+            path, object_id=object_id, ordinal=ordinal, checksum=checksum)
+
+
+def _replica_rows(store, object_id):
+    from sqlalchemy import text
+    return store.db.connection.execute(text(
+        "SELECT ordinal, account, message_id FROM storage_replica_chunks "
+        "WHERE object_id = :i ORDER BY ordinal"), {"i": object_id}).all()
+
+
+def test_cross_account_replication_writes_second_copy(store, tmp_path):
+    backend = ReplicaAwareTelegram()
+    engine = TelegramObjectStorage(store, backend, chunk_size=4096)
+    payload = os.urandom(20_000)
+    source = tmp_path / "repl"
+    source.write_bytes(payload)
+    item = execute(engine.put_file("backup", "r.bin", source))
+
+    primary_parts = store.parts(item.id)
+    assert len(primary_parts) > 1
+    assert backend.replica_uploads == len(primary_parts)
+    rows = _replica_rows(store, item.id)
+    assert [r[0] for r in rows] == [p.ordinal for p in primary_parts]
+    assert all(r[1] == "backup-account" for r in rows)
+    primary_coords = {(p.account, p.message_id) for p in primary_parts}
+    assert all((r[1], r[2]) not in primary_coords for r in rows)
+
+    # Normal reads still use the primary copy.
+    output = tmp_path / "out"
+    execute(engine.download_to_path(item.id, output))
+    assert output.read_bytes() == payload
+    assert backend.downloads == len(primary_parts)
+
+
+def test_replica_fallback_serves_reads_when_primary_is_lost(store, tmp_path):
+    backend = ReplicaAwareTelegram()
+    engine = TelegramObjectStorage(store, backend, chunk_size=4096)
+    payload = os.urandom(12_000)
+    source = tmp_path / "repl"
+    source.write_bytes(payload)
+    item = execute(engine.put_file("backup", "r.bin", source))
+
+    # Simulate losing EVERY primary message: only replica copies remain.
+    for key in list(backend.data):
+        if key[0] == "primary":
+            del backend.data[key]
+
+    output = tmp_path / "rescued"
+    execute(engine.download_to_path(item.id, output))
+    assert output.read_bytes() == payload
+
+
+def test_replica_repair_restores_missing_copies(store, tmp_path):
+    backend = ReplicaAwareTelegram()
+    engine = TelegramObjectStorage(store, backend, chunk_size=4096)
+    payload = os.urandom(12_000)
+    source = tmp_path / "repl"
+    source.write_bytes(payload)
+    item = execute(engine.put_file("backup", "r.bin", source))
+
+    # Coverage drops to zero when the replica journal is wiped.
+    from sqlalchemy import text
+    store.db.connection.execute(text(
+        "DELETE FROM storage_replica_chunks WHERE object_id = :i"),
+        {"i": item.id})
+    store.db.commit()
+    assert _replica_rows(store, item.id) == []
+    assert store.replica_coverage()["missing"] >= 1
+    assert store.objects_missing_replicas(limit=5) == [item.id]
+
+    repaired = execute(engine.repair_replicas(item.id))
+    assert repaired == len(store.parts(item.id))
+    rows = _replica_rows(store, item.id)
+    assert len(rows) == len(store.parts(item.id))
+    assert all(r[1] == "backup-account" for r in rows)
+    assert store.replica_coverage()["missing"] == 0
+
+    # The repaired replica still serves a full read after primary loss.
+    for key in list(backend.data):
+        if key[0] == "primary":
+            del backend.data[key]
+    output = tmp_path / "after-repair"
+    execute(engine.download_to_path(item.id, output))
+    assert output.read_bytes() == payload
+
+
+def test_replication_best_effort_survives_replica_failures(store, tmp_path):
+    backend = ReplicaAwareTelegram()
+
+    def broken_account():
+        raise RuntimeError("replica account offline")
+
+    backend.replica_account = broken_account
+    engine = TelegramObjectStorage(store, backend, chunk_size=4096)
+    payload = os.urandom(8_000)
+    source = tmp_path / "repl"
+    source.write_bytes(payload)
+    item = execute(engine.put_file("backup", "r.bin", source))
+    assert item.sha256 == hashlib.sha256(payload).hexdigest()
+    assert backend.replica_uploads == 0
+    output = tmp_path / "out"
+    execute(engine.download_to_path(item.id, output))
+    assert output.read_bytes() == payload

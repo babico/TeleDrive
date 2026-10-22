@@ -2653,6 +2653,102 @@ def set_storage_strategy(request: Request, payload: dict = Body(...),
     return {"ok": True, "strategy": strategy}
 
 
+@app.get("/api/v1/admin/storage/replication", tags=["Storage jobs"],
+         summary="Cross-account replication status and coverage")
+def get_replication_status(_: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        coverage = BucketCatalog(ManifestStore(conn)).manifests.replica_coverage()
+    finally:
+        conn.close()
+    try:
+        account = str(((read_raw_config() or {}).get("storage") or {})
+                      .get("replica_account") or "").strip() or None
+    except Exception:
+        account = None
+    runtime_account = getattr(mtproto_storage_runtime, "replica_account", None)
+    return {
+        "account": account,
+        "runtime_account": runtime_account,
+        "enabled": bool(runtime_account),
+        "coverage": coverage,
+    }
+
+
+@app.put("/api/v1/admin/storage/replication", tags=["Storage jobs"],
+         summary="Set or disable the cross-account replication target")
+def set_replication_account(request: Request, payload: dict = Body(...),
+                            _: None = Depends(require_auth)):
+    _same_origin(request)
+    account = str(payload.get("account", "")).strip()
+    if account:
+        conn = db_connect()
+        try:
+            from sqlalchemy import text as _text
+            if not conn.connection.execute(_text(
+                    "SELECT 1 FROM telegram_sessions WHERE account = :a"),
+                    {"a": account}).first():
+                raise HTTPException(404, "Unknown Telegram session account")
+        finally:
+            conn.close()
+    cfg = read_raw_config()
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "Configuration is not readable")
+    # Surgical single-key update, mirroring the strategy setter. An
+    # account that is not among the loaded credential sets degrades to
+    # disabled at runtime (with a log) rather than failing startup.
+    cfg.setdefault("storage", {})["replica_account"] = account
+    tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    _secure_write(tmp, yaml.safe_dump(cfg, sort_keys=False))
+    os.replace(tmp, CONFIG_PATH)
+    _reload_service_settings()
+    _log(f"storage replica account set: {account or '(disabled)'} "
+         "(runtime reloaded)", "config")
+    _schedule_storage_runtime_reload()
+    return {"ok": True, "account": account or None}
+
+
+@app.post("/api/v1/admin/storage/replication/repair", tags=["Storage jobs"],
+          summary="Re-send missing replica chunks for under-replicated objects")
+async def repair_replication(request: Request, payload: dict = Body(None),
+                             _: None = Depends(require_auth)):
+    _same_origin(request)
+    try:
+        limit = int((payload or {}).get("limit", 5))
+    except (TypeError, ValueError):
+        limit = 5
+    limit = max(1, min(limit, 25))
+    conn = db_connect()
+    try:
+        manifests = BucketCatalog(ManifestStore(conn)).manifests
+        missing = manifests.objects_missing_replicas(limit=limit)
+        if not missing:
+            return {"ok": True, "repaired_objects": 0, "chunks": 0}
+        transport = storage_transport(conn)
+        await transport.verify_target()
+        engine = TelegramObjectStorage(
+            manifests, transport, chunk_size=RECOMMENDED_CHUNK_SIZE)
+        repaired_objects = 0
+        total_chunks = 0
+        errors = []
+        for object_id in missing:
+            try:
+                count = await engine.repair_replicas(object_id)
+                if count:
+                    repaired_objects += 1
+                    total_chunks += count
+            except Exception as exc:
+                errors.append({"object_id": object_id,
+                               "error": type(exc).__name__})
+        if errors:
+            _log(f"replica repair finished with {len(errors)} object "
+                 "error(s)", "storage")
+        return {"ok": True, "repaired_objects": repaired_objects,
+                "chunks": total_chunks, "errors": errors}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/admin/storage/channels/{channel_id}/activate",
           tags=["Storage jobs"], summary="Set the active write channel")
 def activate_telegram_channel(channel_id: int, request: Request,

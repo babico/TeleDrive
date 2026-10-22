@@ -147,9 +147,19 @@
       `dedup=False` because completion physically re-owns chunk rows.
       REST/S3 PUT/POST-policy uploads all dedup; alias readback is
       round-trip verified.
-- [ ] **Cross-account replication**: write each object to a second Telegram
-      account (the `parallel` strategy exists); satisfies owner gate #1 and
-      de-risks physical GC.
+- [x] **Cross-account replication** DONE: `storage.replica_account`
+      (config, hot-reloaded with the runtime) sends every new object's
+      chunks to a second Telegram account — forced-account sends never
+      rotate away from the replica, journal intents re-open cleanly for
+      re-sends. `storage_replica_chunks` records the replica messages;
+      reads fall back to them when a primary chunk is unavailable;
+      `POST /api/v1/admin/storage/replication/repair` re-sends missing
+      replicas (digest-verified before re-send). Telegram page: target
+      dropdown + coverage stats + repair button. Best effort: replica
+      failures never fail the upload; an account missing from the
+      loaded credential sets degrades to disabled (logged). Multipart
+      part staging is not replicated (completion re-owns chunk rows);
+      completed MPU objects are covered by repair.
 
 ---
 

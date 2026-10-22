@@ -120,7 +120,6 @@
       cookie-authenticated handshake, unauthenticated close 4401. The
       logs page Live mode uses the socket and falls back to 3s polling
       automatically when WS is unavailable (e.g. proxy without upgrade).
-- [ ] Two-person approval for destructive actions (owner gate #4).
 - [ ] UploadPartCopy (S3 P2-E): server-side part copy for efficient
       rclone/boto3 large-object copies.
 

@@ -254,8 +254,26 @@ come from simply authorizing more accounts.
       objects, size, live flood cooldown, health verdict) with the
       active routing strategy and an unresolved-alerts badge; existing
       quota bars and job stats stay.
-- [ ] CI overhaul: fresh naming scheme, one consistent convention,
-      renumbered workflows (meta tests updated accordingly).
+- [ ] CI overhaul — CONTENT, not just names. Proposed target structure
+      (one concern per workflow, no overlap, consistent naming
+      "CI N · <Area> — <Scope>"):
+      1. CI 1 · Static — lint, compile, dependency audit, secret scan
+         (merge from 01 Quality; keep quality-security.yml path).
+      2. CI 2 · Unit & Contract — the offline storage/S3/API suite
+         currently split between 01 and 05 (deduplicate the two
+         pytest invocations).
+      3. CI 3 · Integration — REST+S3 and Databases in one matrix
+         workflow (merge 02a+02b).
+      4. CI 4 · Image — Docker build, image scan, smoke probe, the
+         fault-injection suite from 03.
+      5. CI 5 · Live E2E — user + multiworker Telegram jobs (keep the
+         manual dispatch gates).
+      6. CI 6 · Delivery — release gate + packages (05).
+      Execution notes: update tests/meta/test_ci_workflows.py to the
+      new names/paths FIRST (it asserts names), keep workflow FILE
+      paths stable to preserve run history where possible, renumber
+      the display names, and delete jobs that only duplicate another
+      workflow's pytest invocation.
 - [ ] Menu-wide consistency: list add/delete flows must work the same
       way on every page (same confirm patterns, same buttons, same
       feedback), not per-page variations.

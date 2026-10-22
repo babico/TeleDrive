@@ -1,4 +1,4 @@
-name: 04 · Live Telegram | User MTProto E2E
+name: CI 4 · Live E2E — Telegram USER MTProto
 
 on:
   workflow_dispatch:

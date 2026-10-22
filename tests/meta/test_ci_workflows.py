@@ -18,7 +18,6 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED = (
     "quality-security.yml",
     "integration-storage.yml",
-    "integration-databases.yml",
     "live-telegram-user.yml",
     "live-telegram-multiworker.yml",
     "delivery-release.yml",
@@ -27,13 +26,13 @@ EXPECTED = (
 
 
 DISPLAY_NAMES = {
-    "quality-security.yml": "01 · Quality | Security & Regression",
-    "integration-databases.yml": "02 · Integration | Databases",
-    "integration-storage.yml": "02 · Integration | REST & S3",
-    "resilience-docker.yml": "03 · Resilience | Docker Fault Injection",
-    "live-telegram-user.yml": "04 · Live Telegram | User MTProto E2E",
-    "live-telegram-multiworker.yml": "04 · Live Telegram | Multiworker PostgreSQL E2E",
-    "delivery-release.yml": "05 · Delivery | Release Gate & Packages",
+    "quality-security.yml": "CI 1 · Quality — static, security & regression",
+    "integration-storage.yml": "CI 2 · Integration — REST, S3 & Databases",
+    "resilience-docker.yml": "CI 3 · Image & Resilience — Docker fault injection",
+    "live-telegram-user.yml": "CI 4 · Live E2E — Telegram USER MTProto",
+    "live-telegram-multiworker.yml": "CI 4 · Live E2E — Multiworker PostgreSQL",
+    "delivery-release.yml": "CI 5 · Delivery — release gate & packages",
+    "endurance-capacity.yml": "CI 6 · Endurance — isolated capacity soak",
 }
 
 
@@ -149,7 +148,7 @@ def test_security_includes_storage_and_api_tests():
 
 
 def test_db_and_desktop_matrix_and_storage_contracts_are_present():
-    db = workflow("integration-databases.yml")["jobs"]["database"]
+    db = workflow("integration-storage.yml")["jobs"]["database"]
     assert {"mysql", "postgres"} <= set(db["services"])
     assert any("tests/e2e/test_database_live.py" in s.get("run", "")
                and "tests/storage/test_storage_engine.py" in s.get("run", "")
@@ -165,7 +164,7 @@ def test_db_and_desktop_matrix_and_storage_contracts_are_present():
 
 
 def test_final_p0_contract_runs_on_every_database_and_desktop_push():
-    for name in ("integration-databases.yml", "integration-storage.yml"):
+    for name in ("integration-storage.yml",):
         rules = workflow(name)["on"]
         for event in ("push", "pull_request"):
             assert event in rules
@@ -180,7 +179,7 @@ def test_final_p0_contract_runs_on_every_database_and_desktop_push():
 
 
 def test_acceptance_report_updates_cannot_skip_required_ci():
-    for name in ("integration-databases.yml", "integration-storage.yml"):
+    for name in ("integration-storage.yml",):
         events = workflow(name)["on"]
         assert "paths" not in events["push"]
         assert "paths" not in events["pull_request"]
@@ -188,7 +187,7 @@ def test_acceptance_report_updates_cannot_skip_required_ci():
 
 
 def test_status_audit_rechecks_every_release_workflow():
-    for name in ("integration-databases.yml", "integration-storage.yml"):
+    for name in ("integration-storage.yml",):
         triggers = workflow(name)["on"]
         for event in ("push", "pull_request"):
             assert "paths" not in triggers[event]
@@ -670,7 +669,7 @@ def test_every_test_file_is_referenced_by_a_real_ci_workflow():
 
 
 def test_critical_ci_is_unfiltered_at_every_commit_sha():
-    for name in ("integration-databases.yml", "integration-storage.yml"):
+    for name in ("integration-storage.yml",):
         events = workflow(name)["on"]
         for trigger in ("push", "pull_request"):
             assert "paths" not in events[trigger]
@@ -700,7 +699,7 @@ def test_reusable_docker_fault_injection_workflow_contract():
     """Independent Docker fault injection persists across roadmap phases."""
     assert sorted(p.name for p in WORKFLOWS.glob("*.yml")) == sorted([*EXPECTED, "endurance-capacity.yml"])
     doc = workflow("resilience-docker.yml")
-    assert doc["name"] == "03 · Resilience | Docker Fault Injection"
+    assert doc["name"] == "CI 3 · Image & Resilience — Docker fault injection"
     assert "workflow_dispatch" in doc["on"]
     assert "push" in doc["on"] and "pull_request" in doc["on"]
     assert "paths" not in doc["on"]["push"]
@@ -850,15 +849,14 @@ def test_pip_cache_keys_follow_explicit_target_requirements():
     """Renamed manifest paths must be used by setup-python caching too."""
     for workflow_name in (
         "quality-security.yml", "integration-storage.yml",
-        "integration-databases.yml",
-        "delivery-release.yml",
+            "delivery-release.yml",
     ):
         job = next(iter(workflow(workflow_name)["jobs"].values()))
         setup = next(s for s in job["steps"] if s.get("name") == "Set up Python")
         expected = "requirements.txt"
         assert setup["with"]["cache-dependency-path"] == expected
     endurance = workflow("endurance-capacity.yml")
-    assert endurance["name"] == "06 · Endurance | Isolated Capacity Soak"
+    assert endurance["name"] == "CI 6 · Endurance — isolated capacity soak"
     assert "workflow_dispatch" in endurance["on"]
 
 

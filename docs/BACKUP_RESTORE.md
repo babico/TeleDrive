@@ -66,7 +66,7 @@ Choose an engine-aware, transactionally consistent backup method such as `mysqld
 
 ### Disposable database integration CI
 
-The [Database Integration workflow](../.github/workflows/integration-databases.yml) exercises PostgreSQL 17 `pg_dump -Fc`/`pg_restore` and MySQL 8.4 `mysqldump --single-transaction`/restore using **new disposable databases**.
+The [Integration workflow](../.github/workflows/integration-storage.yml) exercises PostgreSQL 17 `pg_dump -Fc`/`pg_restore` and MySQL 8.4 `mysqldump --single-transaction`/restore using **new disposable databases**.
 
 It seeds multiple published versions, chunk-boundary SHA metadata, delete markers/version removal, tags, MTProto send intent/receipt records, queued jobs and independently encrypted **test** S3 credentials. Fresh SQL connections check exact heads/generations, chunk identities, retention semantics, job state and decryptability.
 

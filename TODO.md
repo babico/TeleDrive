@@ -254,7 +254,13 @@ come from simply authorizing more accounts.
       objects, size, live flood cooldown, health verdict) with the
       active routing strategy and an unresolved-alerts badge; existing
       quota bars and job stats stay.
-- [ ] CI overhaul — CONTENT, not just names. Proposed target structure
+- [ ] CI overhaul — CONTENT, not just names. Increment 1 DONE
+      (naming scheme applied everywhere + the two Integration workflows
+      genuinely merged into CI 2 with both jobs and their service
+      containers, meta tests and docs migrated, endurance workflow now
+      tracked). Remaining increments: split CI 1 Quality into
+      Static vs Image concerns, deduplicate the regression pytest
+      invocation shared by CI 1 and CI 5. Proposed target structure
       (one concern per workflow, no overlap, consistent naming
       "CI N · <Area> — <Scope>"):
       1. CI 1 · Static — lint, compile, dependency audit, secret scan

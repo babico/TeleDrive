@@ -1,4 +1,4 @@
-name: 06 · Endurance | Isolated Capacity Soak
+name: CI 6 · Endurance — isolated capacity soak
 
 on:
   workflow_dispatch:

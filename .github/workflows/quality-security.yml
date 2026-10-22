@@ -1,4 +1,4 @@
-name: 01 · Quality | Security & Regression
+name: CI 1 · Quality — static, security & regression
 
 on:
   workflow_dispatch:

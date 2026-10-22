@@ -1,4 +1,4 @@
-name: 05 · Delivery | Release Gate & Packages
+name: CI 5 · Delivery — release gate & packages
 
 on:
   push:

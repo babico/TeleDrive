@@ -1,4 +1,4 @@
-name: 03 · Resilience | Docker Fault Injection
+name: CI 3 · Image & Resilience — Docker fault injection
 on:
   workflow_dispatch:
   push:

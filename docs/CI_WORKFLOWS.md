@@ -11,8 +11,7 @@ GitHub Actions does not support workflow folders in its sidebar. The numeric pre
 | Group | Workflow | Validates |
 | --- | --- | --- |
 | 01 · Quality | [Security & Regression](../.github/workflows/quality-security.yml) | Python regression, security checks, dependencies, Docker image and listener smoke tests |
-| 02 · Integration | [Databases](../.github/workflows/integration-databases.yml) | PostgreSQL/MySQL, native backups and isolated restores |
-| 02 · Integration | [REST & S3](../.github/workflows/integration-storage.yml) | API contracts, signed always-Enabled versioning and all-private Public Access Block (real boto3), SigV4, AWS CLI, rclone and shared storage catalog |
+| CI 2 · Integration | [REST, S3 & Databases](../.github/workflows/integration-storage.yml) | API contracts, signed always-Enabled versioning and all-private Public Access Block (real boto3), SigV4, AWS CLI, rclone and shared storage catalog |
 | 03 · Resilience | [Docker Fault Injection](../.github/workflows/resilience-docker.yml) | Disposable PostgreSQL, two Web instances, crash/restart, corruption and recovery |
 | 04 · Live Telegram | [User MTProto E2E](../.github/workflows/live-telegram-user.yml) | Real Telethon user session, checksum and range recovery |
 | 04 · Live Telegram | [Multiworker PostgreSQL E2E](../.github/workflows/live-telegram-multiworker.yml) | Three independent workers sharing PostgreSQL and a real Telegram test target |

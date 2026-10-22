@@ -10,15 +10,15 @@ GitHub Actions does not support workflow folders in its sidebar. The numeric pre
 
 | Group | Workflow | Validates |
 | --- | --- | --- |
-| 01 · Quality | [Security & Regression](../.github/workflows/quality-security.yml) | Python regression, security checks, dependencies, Docker image and listener smoke tests |
-| CI 2 · Integration | [REST, S3 & Databases](../.github/workflows/integration-storage.yml) | API contracts, signed always-Enabled versioning and all-private Public Access Block (real boto3), SigV4, AWS CLI, rclone and shared storage catalog |
-| 03 · Resilience | [Docker Fault Injection](../.github/workflows/resilience-docker.yml) | Disposable PostgreSQL, two Web instances, crash/restart, corruption and recovery |
-| 04 · Live Telegram | [User MTProto E2E](../.github/workflows/live-telegram-user.yml) | Real Telethon user session, checksum and range recovery |
-| 04 · Live Telegram | [Multiworker PostgreSQL E2E](../.github/workflows/live-telegram-multiworker.yml) | Three independent workers sharing PostgreSQL and a real Telegram test target |
-| 05 · Delivery | [Release Gate & Packages](../.github/workflows/delivery-release.yml) | Release regression, gated Linux/Windows packages and publishing |
-| 06 · Endurance | [Isolated Capacity Soak](../.github/workflows/endurance-capacity.yml) | Manually dispatched 60–110-minute synthetic-media SQLite durability test |
+| CI 1 · Quality | [Static analysis, security & unit tests](../.github/workflows/quality-security.yml) | Compile, Bandit, pip-audit, offline regressions and Compose configuration |
+| CI 2 · Integration | [REST, S3 & Databases](../.github/workflows/integration-storage.yml) | **Two jobs**: signed REST/S3, actual AWS CLI and rclone with synthetic Telegram I/O; PostgreSQL/MySQL/restore validation |
+| CI 3 · Image & Resilience | [Build, scan, smoke & fault injection](../.github/workflows/resilience-docker.yml) | Docker image build, Trivy, single-container smoke, disposable SQL fault scenarios |
+| CI 4 · Live E2E | [Telegram USER MTProto](../.github/workflows/live-telegram-user.yml) | Real user-session media upload/readback and bounded history/recovery checks |
+| CI 4 · Live E2E | [Multiworker PostgreSQL](../.github/workflows/live-telegram-multiworker.yml) | Three worker processes sharing real SQL and a dedicated Telegram test channel |
+| CI 5 · Delivery | [Release gate & packages](../.github/workflows/delivery-release.yml) | Release regression on its own SHA, gated publishing and merged-branch housekeeping |
+| Manual · Endurance | [Capacity soak](../.github/workflows/endurance-capacity.yml) | `workflow_dispatch` 60–110-minute synthetic-media SQLite endurance test |
 
-The **first seven workflows** form the normal `main` validation matrix. The endurance workflow is deliberately manual (`workflow_dispatch`). The live Telegram workflows require dedicated **test** credentials; synthetic Docker validation does not.
+**Six normal workflows** run on each `main` push. CI 2 has two jobs; it is not two workflows. Endurance is manual and not counted in the six. Retired Bot API and desktop workflows are not part of the current matrix. A successful release-gate *verify* job does not mean that a new release was published. Real Telegram tests use dedicated **test** credentials; SQL/HTTP and fault-injection fixtures use synthetic Telegram media.
 
 ### Interpreting CI results
 
@@ -54,7 +54,7 @@ python scripts/ops/acceptance.py
 
 **Purpose:** development acceptance, not a simulated production cutover. The runner creates a randomly named, isolated Compose project with **PostgreSQL 17, two TeleDrive Web containers, and a fault-scenario container** using actual SQLAlchemy and `TelegramObjectStorage`. The Telegram side is persistent, disk-backed synthetic media. Test credentials, a deployed production instance, an original Telegram account and a legacy folder are **not required**.
 
-The **normal production Compose** has only **one** `teledrive` container. The integration suite also tests optional lease-fenced legacy source ingestion through that same WebUI/REST/S3 catalog with no direct Telethon duplicate send. Its single Python process exposes WebUI/REST on port 8080 and S3 on port 9000. Two separate Web containers in **this fault test** deliberately exercise shared-state behavior and crashes; they are not the deployment layout.
+The **normal production Compose** has only **one** `teledrive` container. The integration suite also tests opt-in lease-fenced folder source ingestion through that same WebUI/REST/S3 catalog with no direct Telethon duplicate send. Its single Python process exposes WebUI/REST on port 8080 and S3 on port 9000. Two separate Web containers in **this fault test** deliberately exercise shared-state behavior and crashes; they are not the deployment layout.
 
 ## 3. Fault-injection acceptance gates
 
@@ -110,7 +110,7 @@ An actual PASS requires the complete four-stage evidence and `stages.acceptance.
 
 - The USER MTProto shared flood-wait cooldown must be preceded by `reserve_send_slot`; tests cannot bypass send fencing to manufacture a passing flood observation.
 - The Web `/api/health` endpoint alone does not validate full configuration; fault tests use the actual `load_config` parser, including `sleep_min_seconds`, `sleep_max_seconds`, `max_files_per_run` and `max_files_per_day`.
-- `tests/web/test_unified_service.py` verifies REST-to-S3, S3-to-REST, local-job-to-S3 data visibility and the shared generation/catalog. The Security workflow checks both listeners **inside one container**.
+- `tests/web/test_unified_service.py` verifies REST-to-S3, S3-to-REST, local-job-to-S3 data visibility and the shared generation/catalog. CI 1/CI 2 test cross-interface contracts with synthetic Telegram I/O, while CI 3 checks both listeners **inside one built container**.
 - Live User and Multiworker E2E are distinct from synthetic fault tests. A generated flood observation is not a measured production rate limit.
 - Normal Security and Storage CI run adversarial GC reference-graph tests. The live User MTProto E2E job creates one owned Telegram marker fixture, validates bounded read-only history inventory, reconciles independently known marker coordinates, creates a fresh isolated catalog after full byte/SHA verification, then cleans up only its own fixture. This does not exercise production garbage collection.
 - Offline marker inventory and independent-plan reconciliation tests cover bounded Telegram history reads, forged/non-media messages, scan truncation, duplicate ordinals and private non-overwriting reports; discovery is not a recovery plan or full historic inventory.
@@ -130,6 +130,8 @@ An actual PASS requires the complete four-stage evidence and `stages.acceptance.
 For feature status and production release boundaries, see [Project Status](IMPLEMENTATION_STATUS.md). For actual database backups and restore procedures, see [Backup and Restore](BACKUP_RESTORE.md). For security reporting, see [Security Policy](SECURITY.md).
 
 **S3 P2-0 selector gate:** `tests/s3/test_s3_route_guard.py` is mandatory in both Quality and REST/S3 workflow regressions. It verifies 116/116 operation statuses in the machine-readable inventory against `docs/S3_SPECS.md` and rejects unrecognized signed bucket/object selectors without exposing or mutating data.
+
+**Config-only job-root contract:** `jobs.source_root` in `config/config.yaml` is authoritative. An empty root yields HTTP 503; an out-of-root source path is rejected with 422. The retired `TELEDRIVE_JOB_SOURCE_ROOT` environment setting is ignored. Test fixtures must explicitly configure the validated source root.
 
 **Unified transport policy:** Live REST/S3/local-job I/O is USER MTProto only; there is no Bot API transport. The delivery workflow automatically prunes proven merged, unchanged and unprotected PR branches.
 

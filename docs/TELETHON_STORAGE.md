@@ -40,15 +40,21 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 
-# The script asks for the API credentials interactively (never commit them);
-# it prompts for the Telegram sign-in code once and writes the session.
+# The helper reads app API ID/hash from the owner shell environment.
+# Enter them without typing credentials into shell history. The hash is hidden.
+read -r -p "Telegram API ID: " TELEDRIVE_STORAGE_MTPROTO_API_ID
+read -r -s -p "Telegram API hash: " TELEDRIVE_STORAGE_MTPROTO_API_HASH
+printf '\n'
+export TELEDRIVE_STORAGE_MTPROTO_API_ID TELEDRIVE_STORAGE_MTPROTO_API_HASH
+# The helper then requests the USER phone login code and optional 2FA.
 python scripts/dev/create_storage_user_session.py --output config/mtproto-user.session
+unset TELEDRIVE_STORAGE_MTPROTO_API_ID TELEDRIVE_STORAGE_MTPROTO_API_HASH
 chmod 600 config/mtproto-user.session
 ```
 
 Obtain API credentials from [my.telegram.org/apps](https://my.telegram.org/apps).
-Generate the session **before** starting a configured TeleDrive container;
-the script refuses to overwrite an existing session. Alternatively, create
+The helper currently **requires** these two environment values; it does not prompt for the application API credentials itself. Export them only in a trusted, interactive operator shell and clear them immediately afterward. It does prompt for the Telegram USER login code and optional 2FA. Generate the session **before** starting a configured TeleDrive container; the
+script refuses to overwrite an existing session. Alternatively, create
 the session interactively from the WebUI **Storage** page after startup:
 it posts the API credentials to
 `POST /api/v1/admin/storage/telegram-session/request-code`, asks for the
@@ -62,7 +68,7 @@ under the **`storage:`** section as an `apis:` list there (do not commit it):
 # config/config.yaml — storage.apis is the authoritative credential source.
 storage:
   channel: "YOUR_PRIVATE_CHANNEL_ID_OR_USERNAME"
-  strategy: round_robin       # round_robin (default) | failover
+  strategy: round_robin       # single | round_robin (default) | failover | parallel
   apis:
     - api_id: 111111
       api_hash: "YOUR_TELEGRAM_API_HASH_1"
@@ -74,12 +80,27 @@ storage:
       account: mtproto-user-2      # optional label
 ```
 
-Every set must resolve the **same** dedicated `storage.channel`.
-`storage.strategy` selects `round_robin` (default) or `failover`: round_robin
-distributes sends across the sets; failover keeps one set until a definite
-flood-wait rejection, then switches to the next with a fresh send intent.
-Ambiguous send outcomes never trigger cross-set retries. Account labels
-default to `mtproto-user`, `mtproto-user-2`, … when omitted.
+Every set must resolve the **same** dedicated `storage.channel`. Routing
+supports `single` (first account), `round_robin` (default; rotate preferred
+writers), `failover` (switch only after an unambiguous flood rejection), or
+`parallel` (account-affine concurrent chunks). An **uncertain** send
+acknowledgment is never retried across accounts; it stays fenced in SQL.
+Account labels default to `mtproto-user`, `mtproto-user-2`, etc.
+
+**Multi-account administration:** the Storage page shows each session's
+masked identity, tracked storage use and shared FloodWait cooldowns. Operators
+can change the strategy without a restart. Per-account soft quotas affect
+writer selection but **do not reject uploads**; enforced per-bucket quotas are
+separate. A bucket can be pinned to a known account, but an unavailable pin
+falls back to the configured routing strategy. Pinning is not replication.
+Removing an account does not delete its remote bytes; objects stored there
+cannot be read until the appropriate session becomes authorized again.
+
+**Still missing:** periodic `is_authorized` probes, automated expired-session
+repair and independently verified second-account payload replication. Do not
+interpret the dashboard's current connectivity check as periodic account
+reauthorization. See [TODO](../TODO.md#7-phase-5-multi-account-telegram-storage).
+
 There are no service settings in environment variables: the
 config section is the only source.
 
@@ -167,7 +188,7 @@ catalog); see [Backup and Restore](BACKUP_RESTORE.md).
 
 ## 5. Status, CI and unfinished safety gates
 
-The current matrix is **seven mandatory workflows** plus the manually
+The current matrix is **six mandatory main-push workflows** plus the manually
 dispatched endurance soak (see [CI and Test Guide](CI_WORKFLOWS.md)):
 Quality/Security, REST & S3, Databases, Docker fault injection, live
 USER MTProto E2E, live Multiworker PostgreSQL and the release gate —

@@ -205,10 +205,18 @@ def test_admin_job_endpoints_require_root_auth_csrf_and_do_not_expose_tokens(
     assert client.get(url).status_code in (401, 403)
     payload = {"bucket": "job-admin", "key": "single.bin",
                "source_path": str(source)}
-    monkeypatch.delenv("TELEDRIVE_JOB_SOURCE_ROOT", raising=False)
+    # Job source root comes from config, not TELEDRIVE_JOB_SOURCE_ROOT.
+    # An unconfigured root yields a 503; paths outside a configured root
+    # yield 422. This is independent of auth and CSRF enforcement.
+    monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", "")
     assert client.post(url, auth=auth, json=payload).status_code == 403
     assert client.post(url, auth=auth, json=payload,
                        headers={"x-teledrive-csrf": "1"}).status_code == 503
+    disallowed_root = tmp_path / "other"
+    disallowed_root.mkdir()
+    monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(disallowed_root))
+    assert client.post(url, auth=auth, json=payload,
+                       headers={"x-teledrive-csrf": "1"}).status_code == 422
     monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(root))
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
     start = client.post(url, auth=auth, json=payload,

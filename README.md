@@ -14,8 +14,10 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 | --- | --- |
 | **[README](README.md)** | Installation, configuration, primary workflows and supported interfaces |
 | [CI and Test Guide](docs/CI_WORKFLOWS.md) | GitHub Actions, local tests, Docker fault injection and development acceptance |
+| [2026-10-22 Verification Report](docs/VERIFICATION_2026-10-22.md) | Exact baseline CI failure, fixes, outstanding development and owner gates |
 | [Project Status and Acceptance](docs/IMPLEMENTATION_STATUS.md) | P0/P1/P2 capabilities, release boundaries, original-data production acceptance and recovery risks |
 | [Backup and Restore](docs/BACKUP_RESTORE.md) | Database backup commands, isolation and restore checks |
+| [Telethon Storage](docs/TELETHON_STORAGE.md) | USER account authorization, channel requirements, multiple sessions, recovery and migration |
 | [Security Policy](docs/SECURITY.md) | Responsible disclosure, trusted components, credentials and network isolation |
 | [Reverse Proxy](docs/REVERSE_PROXY.md) | nginx/Caddy/Traefik TLS termination, SigV4 Host rules, bucket path-style vs virtual-hosted, upload size limits |
 | [Contributing](CONTRIBUTING.md) | Development workflow and documentation rules |
@@ -38,7 +40,7 @@ cp config.example.yaml config/config.yaml   # optional tidy template
 chmod 600 .env config/config.yaml
 ~~~
 
-Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. The YAML file keeps **all** service settings; `.env` only holds `PUID`/`PGID`/`TZ` and the host-side port/bind mapping (`TELEDRIVE_WEB_PORT`, `TELEDRIVE_S3_PORT`, `TELEDRIVE_BIND_ADDRESS`). Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session before or after starting Docker: either run the interactive helper in [Section 4](#4-s3-compatible-api) on a trusted host, or use the **Storage** page in the WebUI, which walks through the Telegram code request/verification interactively. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
+Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. The YAML file keeps **all** service settings; `.env` only holds `PUID`/`PGID`/`TZ` and the host-side port/bind mapping (`TELEDRIVE_WEB_PORT`, `TELEDRIVE_S3_PORT`, `TELEDRIVE_BIND_ADDRESS`). Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `single`, `round_robin` (default), `failover`, or `parallel` routing. Create the private session before or after starting Docker: either run the interactive helper in [Section 4](#4-s3-compatible-api) on a trusted host, or use the **Storage** page in the WebUI, which walks through the Telegram code request/verification interactively. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
 
 ~~~bash
 docker compose up -d --build
@@ -90,11 +92,11 @@ The Web UI is multi-page. After logging in at `/login` you can switch between:
 | REST `PUT /api/v1/buckets/{bucket}/content` | USER MTProto → `TelegramObjectStorage` → `BucketCatalog` | **Yes** |
 | Signed S3 `PutObject` / multipart upload | Same Telegram chunk engine and SQL catalog | **Yes** |
 | Authenticated local-file upload job | Explicit queued file → same shared object catalog | **Yes**, after the job finishes |
-| Original Telethon folder scan/batch | User-session uploader and its legacy workflow | **Not automatically**; use the shared-job path for REST/S3 visibility |
+| Opt-in folder watcher / admin `import-legacy` | Durable jobs → USER MTProto engine and shared SQL catalog | **Yes**, after successful job completion |
 
 The SQL catalog stores object heads, generations, checksums, version references, job state and encrypted S3 credential metadata. Object payloads remain in Telegram; the temporary upload scratch directory is **not** a second primary storage backend. Completed transfers have SHA-256 checks and byte-range reads. Failed/unknown Telegram acknowledgments remain protected from unsafe physical deletion.
 
-### Telegram USER account and transport
+### Telegram USER accounts and routing
 
 Credential sets are configured as an `apis:` list under `storage:` in `config/config.yaml`; each set has its own session file and optional account label, and every set must resolve the same dedicated channel. The `storage.strategy` setting controls how sends rotate across the sets:
 
@@ -108,6 +110,9 @@ Credential sets are configured as an `apis:` list under `storage:` in `config/co
 **Unified storage never uses Saved Messages or Bot API**: select a private broadcast channel that the authorized user can post to. Historical `me` (Saved Messages) settings from the retired standalone uploader are not enabled in REST/S3. Respect Telegram rate limits, and never reuse a writable session among independent uploader processes.
 
 The **REST/S3/local-job engine requires USER MTProto**: it fails closed without an authorized user session. No Bot credentials exist in the runtime. The same SQL catalog and bounded chunk engine are retained. Existing `api-bot` objects are readable using the authorized USER session only when the original **same channel** is accessible and the immutable SQL manifest retains real message IDs; full checksums are still verified. Old objects in inaccessible channels require a separately verified migration and backup. No existing media is automatically deleted.
+
+**Multi-account operations:** `storage.apis` accepts independently authorized USER sessions sharing one private channel. `storage.strategy` supports `single`, `round_robin`, `failover`, and `parallel`. Per-account soft quotas only guide placement; bucket quotas enforce actual object/byte limits. Admins can pin a bucket to an account, but an unavailable pin **falls back to strategy selection** (not a replication or availability guarantee). Removing an account preserves historical media references, but those chunks require the proper session for readback. Current connection/cooldown data are visible in the dashboard; **periodic re-authorization probes and session repair are still open**. See [Telethon storage](docs/TELETHON_STORAGE.md) and [open tasks](TODO.md#7-phase-5-multi-account-telegram-storage).
+
 
 ## 3. REST API
 
@@ -246,7 +251,7 @@ Before considering stale multipart recovery or garbage collection, inspect the a
 
 ### Mount TeleDrive as a drive with rclone
 
-TeleDrive's S3 listener works with [rclone](https://rclone.org) out of the box, turning the container into a mountable drive on any desktop. Create S3 credentials on the WebUI **S3** page (or via `POST /api/v1/admin/s3-credentials`), then:
+TeleDrive's S3 listener works with [rclone](https://rclone.org) out of the box, turning the container into a mountable drive on any desktop. Create S3 credentials on the WebUI **S3 Credentials** page (or via `POST /api/v1/admin/s3-credentials`), then:
 
 ```ini
 # rclone config
@@ -317,7 +322,7 @@ postgresql+psycopg://user:password@db:5432/teledrive
 mysql+pymysql://user:password@db:3306/teledrive
 ~~~
 
-For additional reviewed packages, set `TELEDRIVE_DB_EXTRA_PACKAGES` in `.env` (see [`.env.example`](.env.example); it is passed to the Docker image as a compose build arg) and rebuild the Docker image. Some database drivers require OS libraries in a derived Docker image. Enable DB TLS remotely and use least-privilege credentials. Back up the DB together with Telegram access and the S3 master key; see [Backup and Restore](docs/BACKUP_RESTORE.md).
+For optional reviewed database drivers, set the **Docker Compose build-only** `TELEDRIVE_DB_EXTRA_PACKAGES` value in `.env` (see [`.env.example`](.env.example); it is passed to the Docker image as a compose build arg) and rebuild the Docker image. Some database drivers require OS libraries in a derived Docker image. Enable DB TLS remotely and use least-privilege credentials. Back up the DB together with Telegram access and the S3 master key; see [Backup and Restore](docs/BACKUP_RESTORE.md).
 
 ## 8. Security and operational limits
 
@@ -350,7 +355,7 @@ docker compose config --quiet
 bash scripts/dev/run_docker_fault_injection.sh
 ~~~
 
-Seven mandatory GitHub Actions workflows validate a given commit. The delivery workflow also includes a guarded housekeeping job that deletes only merged, unchanged, unprotected branches with no open PR, after its release gate passes. Real User MTProto and multiworker tests use private **test-only** Telegram credentials. The test secrets can be configured using `python scripts/dev/setup_telegram_e2e.py --channel "TeleDrive E2E Storage" --create-if-missing` on a trusted local machine. Never upload live credentials to GitHub issues or the repository. See [CI and Test Guide](docs/CI_WORKFLOWS.md) for workflow names, command details, evidence and acceptance boundaries.
+Six mandatory GitHub Actions workflows validate a given commit; the capacity/endurance workflow is manual. The delivery workflow also includes a guarded housekeeping job that deletes only merged, unchanged, unprotected branches with no open PR, after its release gate passes. Real User MTProto and multiworker tests use private **test-only** Telegram credentials. The test secrets can be configured using `python scripts/dev/setup_telegram_e2e.py --channel "TeleDrive E2E Storage" --create-if-missing` on a trusted local machine. Never upload live credentials to GitHub issues or the repository. See [CI and Test Guide](docs/CI_WORKFLOWS.md) for workflow names, command details, evidence and acceptance boundaries.
 
 ## Credits and license
 

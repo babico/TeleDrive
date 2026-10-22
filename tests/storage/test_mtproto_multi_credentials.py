@@ -41,7 +41,7 @@ class FakeClient:
     async def disconnect(self):
         pass
 
-    async def is_connected(self):
+    def is_connected(self):
         return True
 
     async def get_me(self):

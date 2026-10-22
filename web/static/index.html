@@ -138,6 +138,22 @@ tailwind.config = {
     </div>
   </div>
 
+  <div class="card" x-show="usageSeries.length" x-cloak>
+    <h3>Upload activity — last 30 days</h3>
+    <p class="muted text-xs">Published objects per day (hover a bar for detail).</p>
+    <div class="flex items-end gap-1 mt-3" style="height:110px">
+      <template x-for="d in usageSeries" :key="d.date">
+        <div class="flex-1 bg-brand-600 hover:bg-brand-400 rounded-t transition-colors cursor-help min-h-[3px]"
+             :style="'height:' + usagePct(d.bytes) + '%'"
+             :title="d.date + ': ' + d.objects + ' object(s), ' + fmtBytes(d.bytes)"></div>
+      </template>
+    </div>
+    <div class="flex justify-between text-xs muted mt-1">
+      <span x-text="usageSeries[0]?.date"></span>
+      <span x-text="usageSeries[usageSeries.length-1]?.date"></span>
+    </div>
+  </div>
+
   <div class="card" x-show="bucketUsage.length">
     <h3>Storage usage</h3>
     <div class="space-y-3 mt-3">

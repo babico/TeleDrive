@@ -3373,6 +3373,44 @@ def prometheus_metrics(_: None = Depends(require_auth)):
                     media_type="text/plain; charset=utf-8")
 
 
+@app.get("/api/v1/admin/storage/usage", tags=["Storage jobs"],
+         summary="Daily upload volume (objects, bytes) for the last N days")
+def storage_usage_series(days: int = Query(default=30, ge=1, le=365),
+                         _: None = Depends(require_auth)):
+    """Publication-timestamped usage series for the dashboard chart.
+
+    Aggregation happens in Python: portable across SQLite and
+    PostgreSQL, and defensive when the catalog tables live in another
+    database.
+    """
+    cutoff_ns = (int(time.time()) - days * 86400) * 1_000_000_000
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        try:
+            rows = conn.connection.execute(_text(
+                "SELECT p.committed_ns, o.size FROM "
+                "storage_published_versions p JOIN storage_objects o "
+                "ON o.id = p.object_id WHERE p.committed_ns >= :cutoff "
+                "ORDER BY p.committed_ns"
+            ), {"cutoff": cutoff_ns}).fetchall()
+        except Exception:
+            rows = []
+    finally:
+        conn.close()
+    daily: dict[str, dict] = {}
+    for committed_ns, size in rows:
+        day = time.strftime("%Y-%m-%d",
+                            time.localtime(int(committed_ns) / 1e9))
+        entry = daily.setdefault(day, {"date": day, "objects": 0,
+                                       "bytes": 0})
+        entry["objects"] += 1
+        entry["bytes"] += int(size or 0)
+    return {"days": days, "series": [daily[k] for k in sorted(daily)],
+            "total_objects": len(rows),
+            "total_bytes": sum(int(r[1] or 0) for r in rows)}
+
+
 @app.get("/api/v1/admin/storage/health", tags=["Storage jobs"],
          summary="Read storage jobs, stale leases and protected-media metrics")
 def storage_operations_health(_: None = Depends(require_auth)):

@@ -108,8 +108,10 @@
 
 - [ ] Share links: signed public object links with expiry, max-download
       count and optional password; rate-limited public route.
-- [ ] Usage & health analytics: per-bucket/channel usage over time, daily
-      upload volume, FloodWait-risk indicator, quota history charts.
+- [x] Usage analytics DONE: GET /api/v1/admin/storage/usage?days=N —
+      daily published objects + bytes series (Python-side aggregation,
+      portable and split-DB defensive); the dashboard renders a
+      dependency-free hover bar chart of the last 30 days with totals.
 - [x] Prometheus `/metrics` endpoint (done: `GET /api/v1/metrics`,
       text exposition format — job states, bucket quotas+usage, Telegram
       session health, flood observations and live cooldowns; scrape with

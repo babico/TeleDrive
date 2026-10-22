@@ -17,6 +17,7 @@ function app(){
     // Dashboard / queue / history
     dashboard: {pending:0,failed:0,uploaded:0,alerts:0,strategy:'-'},
     dashAccounts: [],
+    usageSeries: [],
     queueRows: [],
     historyRows: [],
     bucketUsage: [],
@@ -180,6 +181,11 @@ function app(){
 
     navActive(p){ return window.location.pathname === p; },
 
+    usagePct(bytes){
+      const max = Math.max(...this.usageSeries.map(d => d.bytes), 1);
+      return Math.max(3, Math.round(bytes / max * 100));
+    },
+
     // One consistent confirmation helper for every destructive action:
     // same phrasing, same "consequence" hint, same audit note when the
     // action is logged.
@@ -231,6 +237,10 @@ function app(){
         const r = await this.api('/api/v1/admin/storage/telegram-sessions');
         this.dashAccounts = r.sessions||[];
         if(r.strategy) this.dashboard.strategy = r.strategy;
+      } catch(e){}
+      try {
+        const r = await this.api('/api/v1/admin/storage/usage?days=30');
+        this.usageSeries = r.series||[];
       } catch(e){}
       try {
         const r = await this.api('/api/v1/admin/storage/jobs?limit=100');

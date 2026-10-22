@@ -1258,3 +1258,53 @@ def test_logs_websocket_stream(authenv):
     with pytest.raises(Exception):
         with client.websocket_connect("/api/v1/logs/stream") as ws:
             ws.receive_text()
+
+
+def test_storage_usage_series(authenv):
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+
+    # Without catalog tables the endpoint degrades to an empty series.
+    r = client.get("/api/v1/admin/storage/usage", headers=admin)
+    assert r.status_code == 200
+    assert r.json()["series"] == []
+
+    # Seed publications on two consecutive days.
+    db = authenv["connect"]()
+    try:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "CREATE TABLE storage_objects (id VARCHAR(36) PRIMARY KEY, "
+            "bucket VARCHAR(63), object_key TEXT, status VARCHAR(16), "
+            "size BIGINT, sha256 VARCHAR(64), created_at BIGINT, "
+            "updated_at BIGINT, error TEXT)"))
+        db.connection.execute(_text(
+            "CREATE TABLE storage_published_versions (object_id "
+            "VARCHAR(36) PRIMARY KEY, bucket VARCHAR(63), key_hash "
+            "VARCHAR(64), committed_ns BIGINT)"))
+        now = int(time.time())
+        day = 86_400
+        db.connection.execute(_text(
+            "INSERT INTO storage_objects VALUES "
+            "('o1','b','k1','ready',100,'x',:n,:n,NULL),"
+            "('o2','b','k2','ready',50,'x',:n,:n,NULL)"), {"n": now})
+        db.connection.execute(_text(
+            "INSERT INTO storage_published_versions VALUES "
+            "('o1','b','h1',:ns1),('o2','b','h2',:ns2)"),
+            {"ns1": now * 1_000_000_000,
+             "ns2": (now - day) * 1_000_000_000})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    r = client.get("/api/v1/admin/storage/usage?days=7", headers=admin)
+    body = r.json()
+    assert body["total_objects"] == 2 and body["total_bytes"] == 150
+    assert len(body["series"]) == 2
+    assert body["series"][0]["bytes"] == 50   # older day first
+    assert body["series"][1]["objects"] == 1
+
+    # Viewer may read.
+    viewer = _bearer(client, "viewuser", "viewer-password-1")
+    assert client.get("/api/v1/admin/storage/usage",
+                      headers=viewer).status_code == 200

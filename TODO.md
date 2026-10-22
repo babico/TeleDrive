@@ -330,34 +330,18 @@ come from simply authorizing more accounts.
       objects, size, live flood cooldown, health verdict) with the
       active routing strategy and an unresolved-alerts badge; existing
       quota bars and job stats stay.
-- [ ] CI overhaul — CONTENT, not just names. Increment 1 DONE
-      (naming scheme + the two Integration workflows genuinely merged
-      into CI 2). Increment 2 DONE: the Docker build + single-container
-      smoke + Trivy scan moved out of CI 1 into a dedicated CI 3 image
-      job, leaving CI 1 as pure static analysis / security audit /
-      unit tests; meta tests migrated first. The CI 1 vs CI 5 pytest
-      overlap is INTENTIONAL and stays: CI 5 is the release gate and
-      must re-verify the exact tagged commit, not trust a main-branch
-      run. Proposed target structure
-      (one concern per workflow, no overlap, consistent naming
-      "CI N · <Area> — <Scope>"):
-      1. CI 1 · Static — lint, compile, dependency audit, secret scan
-         (merge from 01 Quality; keep quality-security.yml path).
-      2. CI 2 · Unit & Contract — the offline storage/S3/API suite
-         currently split between 01 and 05 (deduplicate the two
-         pytest invocations).
-      3. CI 3 · Integration — REST+S3 and Databases in one matrix
-         workflow (merge 02a+02b).
-      4. CI 4 · Image — Docker build, image scan, smoke probe, the
-         fault-injection suite from 03.
-      5. CI 5 · Live E2E — user + multiworker Telegram jobs (keep the
-         manual dispatch gates).
-      6. CI 6 · Delivery — release gate + packages (05).
-      Execution notes: update tests/meta/test_ci_workflows.py to the
-      new names/paths FIRST (it asserts names), keep workflow FILE
-      paths stable to preserve run history where possible, renumber
-      the display names, and delete jobs that only duplicate another
-      workflow's pytest invocation.
+- [x] CI overhaul — CONTENT, not just names. DONE (two increments +
+      final structure): CI 1 · Quality (static analysis, security,
+      unit tests; quality-security.yml), CI 2 · Integration (REST, S3
+      & Databases matrix; integration-storage.yml, unfiltered at every
+      commit SHA), CI 3 · Image & Resilience (build, scan, smoke,
+      fault injection; resilience-docker.yml), CI 4 · Live E2E
+      (Telegram USER + Multiworker PostgreSQL, manual dispatch gates),
+      CI 5 · Delivery (release gate & packages; re-verifies the tagged
+      commit — the CI 1/CI 5 pytest overlap is INTENTIONAL), CI 6 ·
+      Endurance (isolated capacity soak). Meta tests were migrated
+      first and assert the names; every regression module must be
+      scheduled by a real workflow (enforced).
 - [x] Menu-wide consistency DONE: every destructive action across all
       pages goes through one confirmDelete helper with the same
       phrasing pattern ("Delete X?" + consequence hint + audit note),

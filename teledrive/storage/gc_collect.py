@@ -110,12 +110,12 @@ class RetainedMediaGC:
                 "AND EXISTS (SELECT 1 FROM storage_published_versions p "
                 "WHERE p.object_id = o.id)")
         revoked = db.execute(text(
-            f"SELECT COUNT(*) {base} "
-            "AND EXISTS (SELECT 1 FROM storage_removed_versions r "
+            "SELECT COUNT(*) " + base +
+            " AND EXISTS (SELECT 1 FROM storage_removed_versions r "
             "WHERE r.object_id = o.id)")).scalar_one()
         deleted = db.execute(text(
-            f"SELECT COUNT(*) {base} "
-            "AND NOT EXISTS ("
+            "SELECT COUNT(*) " + base +
+            " AND NOT EXISTS ("
             "SELECT 1 FROM storage_published_versions p2 "
             "JOIN storage_object_heads h2 "
             "ON h2.bucket = p2.bucket AND h2.key_hash = p2.key_hash "

@@ -169,7 +169,7 @@ catalog); see [Backup and Restore](BACKUP_RESTORE.md).
 
 ## 5. Status, CI and unfinished safety gates
 
-The current matrix is **seven mandatory workflows** plus the manually
+The current matrix is **six automatically triggered workflows** plus one manually
 dispatched endurance soak (see [CI and Test Guide](CI_WORKFLOWS.md)):
 Quality/Security, REST & S3, Databases, Docker fault injection, live
 USER MTProto E2E, live Multiworker PostgreSQL and the release gate —

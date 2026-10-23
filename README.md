@@ -350,7 +350,7 @@ docker compose config --quiet
 bash scripts/dev/run_docker_fault_injection.sh
 ~~~
 
-Seven mandatory GitHub Actions workflows validate a given commit. The delivery workflow also includes a guarded housekeeping job that deletes only merged, unchanged, unprotected branches with no open PR, after its release gate passes. Real User MTProto and multiworker tests use private **test-only** Telegram credentials. The test secrets can be configured using `python scripts/dev/setup_telegram_e2e.py --channel "TeleDrive E2E Storage" --create-if-missing` on a trusted local machine. Never upload live credentials to GitHub issues or the repository. See [CI and Test Guide](docs/CI_WORKFLOWS.md) for workflow names, command details, evidence and acceptance boundaries.
+Six automatic GitHub Actions workflows validate each `main` commit; the seventh workflow YAML is an **explicitly manual endurance/capacity test** and cannot be counted as an automatic green check. The delivery workflow also includes a guarded housekeeping job that deletes only merged, unchanged, unprotected branches with no open PR, after its release gate passes. Real User MTProto and multiworker tests use private **test-only** Telegram credentials. The test secrets can be configured using `python scripts/dev/setup_telegram_e2e.py --channel "TeleDrive E2E Storage" --create-if-missing` on a trusted local machine. Never upload live credentials to GitHub issues or the repository. See [CI and Test Guide](docs/CI_WORKFLOWS.md) for workflow names, command details, evidence and acceptance boundaries.
 
 ## Credits and license
 

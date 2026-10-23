@@ -18,7 +18,7 @@ GitHub Actions does not support workflow folders in its sidebar. The numeric pre
 | 05 · Delivery | [Release Gate & Packages](../.github/workflows/delivery-release.yml) | Release regression, gated Linux/Windows packages and publishing |
 | 06 · Endurance | [Isolated Capacity Soak](../.github/workflows/endurance-capacity.yml) | Manually dispatched 60–110-minute synthetic-media SQLite durability test |
 
-The **first seven workflows** form the normal `main` validation matrix. The endurance workflow is deliberately manual (`workflow_dispatch`). The live Telegram workflows require dedicated **test** credentials; synthetic Docker validation does not.
+The **six automatic workflows** form the normal `main` validation matrix (CI 1, combined CI 2 with REST/S3 and DB jobs, CI 3, two CI 4 live E2E workflows, CI 5). The seventh YAML is endurance, deliberately manual (`workflow_dispatch`). Count workflow runs, not individual jobs; a passed database job does not make a failed combined CI 2 workflow green. The live Telegram workflows require dedicated **test** credentials; synthetic Docker validation does not.
 
 ### Interpreting CI results
 

@@ -6,7 +6,7 @@
 > commands and CI contracts, see [CI and Test Guide](docs/CI_WORKFLOWS.md).
 > Product/feature analysis that produced the roadmap phases:
 > `.opencode/teledrive/10x/session-1.md` (git-ignored).
-> Last audited: 2026-10-23 (base SHA `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0`; six of seven CI workflows passed, one outdated-test assertion under correction).
+> Last audited: 2026-10-23 (base SHA `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0`; five of six automatic CI workflows passed, one outdated-test assertion subsequently corrected in PR #23).
 
 ---
 

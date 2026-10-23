@@ -62,7 +62,7 @@ under the **`storage:`** section as an `apis:` list there (do not commit it):
 # config/config.yaml — storage.apis is the authoritative credential source.
 storage:
   channel: "YOUR_PRIVATE_CHANNEL_ID_OR_USERNAME"
-  strategy: round_robin       # round_robin (default) | failover
+  strategy: round_robin       # single | round_robin | failover | parallel
   apis:
     - api_id: 111111
       api_hash: "YOUR_TELEGRAM_API_HASH_1"
@@ -75,16 +75,18 @@ storage:
 ```
 
 Every set must resolve the **same** dedicated `storage.channel`.
-`storage.strategy` selects `round_robin` (default) or `failover`: round_robin
-distributes sends across the sets; failover keeps one set until a definite
-flood-wait rejection, then switches to the next with a fresh send intent.
+`storage.strategy` supports `single`, `round_robin` (default),
+`failover` and `parallel`. Single uses the first user session, round_robin
+distributes chunks across sessions, failover switches after a definite
+flood-wait rejection, and parallel distributes chunks concurrently.
 Ambiguous send outcomes never trigger cross-set retries. Account labels
 default to `mtproto-user`, `mtproto-user-2`, … when omitted.
 There are no service settings in environment variables: the
 config section is the only source.
 
-The service never falls back to environment credentials; a missing or
-empty `storage.apis:` section fails closed at startup.
+The service never falls back to environment credentials. Missing or
+unauthorized `storage.apis:` cannot perform uploads; initial login/health
+endpoints may remain available for provisioning, but storage fails closed.
 
 `docker-compose.yml` mounts `./config` at `/config`; the session paths above
 must live under that mount. Ensure owner/group and mode permit the configured

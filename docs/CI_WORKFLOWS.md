@@ -131,7 +131,7 @@ For feature status and production release boundaries, see [Project Status](IMPLE
 
 **S3 P2-0 selector gate:** `tests/s3/test_s3_route_guard.py` is mandatory in both Quality and REST/S3 workflow regressions. It verifies 116/116 operation statuses in the machine-readable inventory against `docs/S3_SPECS.md` and rejects unrecognized signed bucket/object selectors without exposing or mutating data.
 
-**Unified transport policy:** Live REST/S3/local-job I/O is USER MTProto only; there is no Bot API transport. The delivery workflow automatically prunes proven merged, unchanged and unprotected PR branches.
+**Unified transport policy:** Live REST/S3/local-job I/O is USER MTProto only; there is no Bot API transport. The failed 2026-10-23 CI 2 job on `4ff51d44` was a stale test expecting the retired `TELEDRIVE_JOB_SOURCE_ROOT` environment variable to control paths. Validated config-driven outside-root rejection is HTTP 422; missing CSRF remains HTTP 403. The delivery workflow automatically prunes proven merged, unchanged and unprotected PR branches.
 
 **User MTProto unified transport:** `tests/storage/test_storage_user_mode.py` checks signed S3 user-MTProto write/readback, same-channel legacy Bot-media read without any Bot fallback, unknown-ACK SQL fencing, owner isolation and fail-closed transport selection. The ASGI user session has its own encrypted secret handling outside the repository; separate real user E2E tests exercise account/chunk behavior but do not prove live REST/S3 user-mode deployment. Only an authorized USER session supports channel-history enumeration.
 

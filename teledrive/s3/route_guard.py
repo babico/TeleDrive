@@ -18,7 +18,7 @@ _BUCKET_GET_V1 = frozenset({
 })
 _BUCKET_GET_V2 = frozenset({
     "list-type", "prefix", "delimiter", "continuation-token",
-    "start-after", "max-keys", "encoding-type",
+    "start-after", "max-keys", "encoding-type", "fetch-owner",
 })
 _BUCKET_GET_VERSIONS = frozenset({
     "versions", "prefix", "max-keys", "key-marker", "version-id-marker",

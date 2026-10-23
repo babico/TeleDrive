@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 13 supported, 43 partial (6 by code, 37 by design), 60 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 16 supported, 40 partial (3 by code, 37 by design), 60 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -82,6 +82,9 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [PutBucketTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketTagging.html) | ✅ Supported | Full general-purpose private-bucket tagging contract: 0–50 unique tags, 128/256 UTF-16-unit limits, signed checksum-verified XML, atomic replacement and correct HTTP 200; AWS billing/ABAC services not emulated. |
 | [DeleteBucketTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketTagging.html) | ✅ Supported | Removes stored bucket tag set. |
 | [DeleteBucketCors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketCors.html) | ✅ Supported | Removes CORS configuration. |
+| [ListObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html) | ✅ Supported | V1 listing with per-object `Owner` in `Contents` (deployment owner identity, as AWS V1 always includes), prefix, delimiter, marker, CommonPrefixes, encoding-type=url, bounded max-keys and NextMarker continuation (including CommonPrefix markers). |
+| [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html) | ✅ Supported | V2 listing with `fetch-owner` controlling the per-object `Owner` element, HMAC-scoped continuation, start-after, prefix, delimiter, CommonPrefixes, encoding-type=url, KeyCount and bounded max-keys. |
+| [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | ✅ Supported | 1–10,000 part numbers, configured part-size bound, aws-chunked streaming part bodies with the same decoder and trailer verification as PutObject, and every supplied checksum verified before any Telegram send: SHA-256, Content-MD5, SHA-1, CRC32, CRC32C and CRC64NVME. |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -89,12 +92,9 @@ These are ordinary missing features; nothing architectural blocks them.
 
 | AWS S3 API operation | Status | Gap class | Remaining gap | Current scope |
 | --- | --- | --- | --- | --- |
-| [ListObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html) | 🟡 Partial | by code | No per-object `Owner` element in `Contents` (AWS V1 always includes it). | V1 prefix, delimiter, marker, CommonPrefixes, encoding-type, bounded max-keys. |
-| [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html) | 🟡 Partial | by code | No `FetchOwner` / per-object `Owner` element. | HMAC-scoped continuation, start-after, prefix, delimiter, CommonPrefixes, encoding-type=url, KeyCount, bounded max-keys. |
-| [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) | 🟡 Partial | by code | Several AWS version-listing selectors and pagination cursors are not implemented. | Published versions and delete markers, prefix filtering, keyset pagination. |
-| [CopyObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html) | 🟡 Partial | by code | No presigned CopyObject, no ranged copy-source and no date-based copy-source conditions. | Catalog-local source/version copy, metadata/tag directives, ETag source preconditions. |
-| [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | 🟡 Partial | by code | Selected integrity checks only — e.g. CRC64NVME declarations are rejected rather than verified. | 1–10,000 part numbers, configured part-size bound; aws-chunked streaming part bodies use the same decoder and trailer verification as PutObject. |
-| [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | 🟡 Partial | by code | Completion body accepted only with the signed SHA-256 bound; other request checksum modes are unverified. | Fenced, zero-reupload staged-part publication. |
+| [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) | 🟡 Partial | by code | Several AWS version-listing selectors (delimiter, encoding-type) are not implemented. | Published versions and delete markers, prefix filtering, max-keys, key-marker/version-id-marker keyset pagination. |
+| [CopyObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html) | 🟡 Partial | by code | No presigned CopyObject and no ranged copy-source. | Catalog-local source/version copy, metadata/tag directives, ETag source preconditions and date-based copy-source conditions (if-(un)modified-since with AWS precedence: a passing ETag condition overrides the contradicting date condition). |
+| [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | 🟡 Partial | by code | Only SHA-256 completion checksums are verified; FULL_OBJECT completion checksums and non-SHA composite modes are rejected (501) rather than acknowledged unverified. | Fenced, zero-reupload staged-part publication with per-part `ChecksumSHA256` verification, COMPOSITE `x-amz-checksum-sha256` validation from staged part digests and the verified checksum echoed in the result XML. |
 
 ### 3.3 Partial — by design (fail-closed architecture)
 
@@ -160,6 +160,39 @@ Keep private-by-default security. Define either a tested private-only compatibil
 
 **To fully support:** build a real bucket-policy engine — JSON policy documents parsed into per-request rules evaluated against credential principals (the existing per-credential permission scopes become the principal model), with PutBucketPolicy/DeleteBucketPolicy writing the rule store and every S3 route consulting it before scope checks. ACL writes can then map onto the same engine; DeletePublicAccessBlock needs a deliberate public-exposure decision first. Best-effort candidate if the owner accepts exposing policy configuration on a private gateway.
 
+**Researched design — ACL grants mapped onto S3 credentials (owner
+decision pending).** TeleDrive S3 credentials already carry per-operation
+scopes (s3:GetObject, s3:PutObject, …) enforced on every request; an ACL
+layer can reuse them as the grant model without building the full policy
+engine:
+
+- **Principal mapping.** An ACL grantee `CanonicalUser` ID maps to an S3
+  access key's owner identity (the HMAC-scoped ID already returned by
+  ListBuckets/ListObjects `Owner`). Email/Group grantees and the
+  `AllUsers`/`AuthenticatedUsers` groups stay unsupported — that is the
+  private-only line, unchanged.
+- **PutBucketAcl** parses `AccessControlPolicy` grants
+  (READ/WRITE/FULL_CONTROL) and stores bucket-level credential grants in
+  a new `storage_bucket_acl_grants` table (bucket, grantee access key,
+  permission). `FULL_CONTROL` implies READ+WRITE. Owner retains implicit
+  FULL_CONTROL; revocation is grant-row deletion.
+- **PutObjectAcl** stores per-object grants the same way; object grants
+  only ADD access to their exact key, never to siblings.
+- **Enforcement is fail-closed intersection.** At authorization time the
+  effective permission set of a credential becomes
+  `own scopes ∩ (bucket grants ∪ object grants ∪ owner grants)`.
+  A credential never gains an operation its scopes do not already carry;
+  ACLs can only NARROW or delegate within existing scope. GetObject on an
+  ACL-protected bucket therefore requires BOTH s3:GetObject scope AND a
+  matching grant.
+- **Reads.** GetBucketAcl/GetObjectAcl return the stored grants as
+  AWS-shaped XML; DeleteBucketAcl/DeleteObjectAcl clear them.
+
+This is bounded work (one table, two parsers, one enforcement hook in
+the credential resolution path) and stays honest: it does NOT emulate
+AWS account principals, cross-account semantics or public access. If
+the owner approves, implement best-effort per this design.
+
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
 | [DeletePublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeletePublicAccessBlock.html) | ❌ Unsupported | P2-C |
@@ -202,7 +235,7 @@ Support copy-part source ranges, signing and ownership, checksum composition and
 
 **Status:** no unsupported operations remain in this group — UploadPartCopy
 (inclusive copy-source ranges) shipped and the remaining protocol gaps
-(trailer checksum composition on completion, per-object Owner in listings)
+(trailer checksum composition on completion, version-listing selectors)
 are tracked as by-code partials in section 3.2.
 
 ### P2-F — Website, notifications and access logging

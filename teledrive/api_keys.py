@@ -67,11 +67,17 @@ def expand_scopes(scopes) -> frozenset[str]:
     into the concrete set of endpoint permissions they grant."""
     granted: set[str] = set()
     for scope in scopes or ():
-        if scope in ENDPOINT_PERMISSIONS:
+        if scope in ENDPOINT_PERMISSIONS or is_route_permission(scope):
             granted.add(scope)
         else:
             granted.update(LEGACY_SCOPE_EXPANSION.get(scope, ()))
     return frozenset(granted)
+
+
+def is_route_permission(scope: str) -> bool:
+    """True for canonical per-route permissions like 'get:/api/v1/...'."""
+    return scope.startswith(("get:", "post:", "put:", "delete:", "head:",
+                             "patch:"))
 
 
 @dataclass(frozen=True)
@@ -88,9 +94,14 @@ class ApiKeyStore:
         _metadata.create_all(db.engine)
 
     @staticmethod
-    def _check_scopes(scopes: list[str]) -> tuple[str, ...]:
+    def _check_scopes(scopes: list[str],
+                       extra_allowed: frozenset | set = frozenset()) -> tuple[str, ...]:
+        """Validate a scope list. extra_allowed carries the live route
+        registry's canonical per-endpoint permissions (supplied by the
+        web layer) so keys can be scoped to ANY single API route."""
+        allowed = ALLOWED_SCOPES | frozenset(extra_allowed)
         if not isinstance(scopes, list) or not scopes or any(
-            not isinstance(s, str) or s not in ALLOWED_SCOPES for s in scopes
+            not isinstance(s, str) or s not in allowed for s in scopes
         ):
             raise ValueError("Unknown or empty permission scope")
         normalized = tuple(sorted(set(scopes)))
@@ -103,11 +114,12 @@ class ApiKeyStore:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def create(self, name: str, scopes: list[str], *, expires_at: int | None = None,
-               now: int | None = None) -> IssuedKey:
+               now: int | None = None,
+               extra_allowed: frozenset | set = frozenset()) -> IssuedKey:
         now = int(time.time()) if now is None else now
         if not isinstance(name, str) or not (1 <= len(name.strip()) <= 120):
             raise ValueError("Invalid API key name")
-        permissions = self._check_scopes(scopes)
+        permissions = self._check_scopes(scopes, extra_allowed)
         if expires_at is not None and (expires_at <= now or expires_at > now + 10 * 365 * 86400):
             raise ValueError("API key expiration must be in the future (max 10 years)")
         identifier = secrets.token_hex(16)

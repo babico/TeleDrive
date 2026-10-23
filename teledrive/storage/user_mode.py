@@ -809,6 +809,27 @@ class UnifiedUserTransport:
             "MTProto send outcome uncertain; reconcile protected intent before retry"
         )
 
+    async def delete(self, reference):
+        """Physically delete a chunk's Telegram message (owner-gated GC).
+
+        Account resolution mirrors download(): only the account that
+        owns the message may revoke it; coordinates are never remapped.
+        """
+        transports = getattr(self.runtime, "transports", None)
+        if callable(transports) and reference.account in transports():
+            client, channel = transports()[reference.account]
+            await TelethonChunkTransport({
+                reference.account: (client, channel),
+            }).delete(reference)
+            return
+        if reference.account == self.runtime.account:
+            await self.runtime.require().delete(reference)
+            return
+        raise FileNotFoundError(
+            "Historical source inaccessible to authorized Telethon user; "
+            "do not remap remote media"
+        )
+
     async def download(self, reference, destination):
         transports = getattr(self.runtime, "transports", None)
         if callable(transports) and reference.account in transports():

@@ -396,6 +396,56 @@ come from simply authorizing more accounts.
 
 ## 12. User feedback round 2 (2026-10-23)
 
+- [x] **Unified per-endpoint permissions for EVERY API route** DONE.
+      The permission registry is derived from the live FastAPI route
+      table (method + path template — it can never drift); the 9 REST
+      bearer endpoints keep their curated short names, every other
+      route carries a canonical "method:path" permission. require_auth
+      accepts bearer API keys on ANY route when the key holds exactly
+      that route's permission (no role policy for keys; session/Basic
+      behavior unchanged). admin:* stays a legacy REST wildcard that
+      does NOT unlock admin routes. Key creation validates against
+      registry ∪ legacy scopes; the API management UI builds a
+      per-endpoint grid with select-all/category shortcuts. This is
+      the foundation for permission-group-based user management.
+- [x] **GC status, toggle and physical/logical metrics in the UI** DONE.
+      GET /api/v1/admin/storage/gc (state + logical vs physical
+      objects/bytes + reclaimable backlog + collected totals); PUT
+      toggles GC behind typed confirm "PHYSICAL-GC" with loud audit;
+      POST /gc/collect dry-runs the fail-closed candidate set
+      (scope=revoked: version-revoked objects; scope=deleted: also
+      delete-marker/unlinked keys — never historical versions of live
+      keys, never dedup-alias sources) and executes with confirm
+      "DELETE-RETAINED" only when enabled. Execution re-verifies each
+      candidate, deletes Telegram messages through the new
+      UnifiedUserTransport.delete, journals into storage_gc_collected,
+      drops chunk rows and hides the object from history and dedup.
+      Dashboard gained a Physical GC card (state badge, logical/
+      physical/retained/collected metrics, scope selector, preview,
+      collect). The gc-owner-gate is now an explicit owner-controlled
+      UI toggle rather than a hardcoded False.
+- [x] **By-code partial closures (round 1)** DONE: per-object Owner in
+      ListObjects (V1 always) and ListObjectsV2 (fetch-owner=true,
+      route-guard allowlisted); CopyObject date-based copy-source
+      conditions (if-(un)modified-since with AWS precedence and
+      malformed-date rejection); CompleteMultipartUpload COMPOSITE
+      SHA-256 validation from staged part digests + per-part
+      ChecksumSHA256 verification + checksum echo in the result XML;
+      UploadPart's stale spec row corrected (CRC64NVME was already
+      verified). Inventory now 16 supported / 40 partial (3 by code,
+      37 by design) / 60 unsupported. Remaining by-code gaps:
+      ListObjectVersions delimiter/encoding-type selectors, presigned
+      and ranged CopyObject, CompleteMultipartUpload FULL_OBJECT and
+      non-SHA composite modes.
+- [x] **Research: ACL-style grants through S3 credentials** DONE —
+      design documented in the spec's P2-C group. Grantee
+      CanonicalUser maps to an S3 access key's owner identity; bucket/
+      object grants stored per (bucket, grantee, permission);
+      enforcement is a fail-closed INTERSECTION with the credential's
+      own scopes (ACLs can only narrow, never expand); no public/
+      group/email grantees (private-only unchanged). Bounded work
+      (one table, two XML parsers, one enforcement hook) — awaiting
+      owner approval to implement best-effort.
 - [x] **Dashboard/history vs bucket-browser inconsistency** FIXED
       (owner report: "uploaded 2 objects, deleted them — still visible
       in the dashboard, gone from the bucket browser, nothing in

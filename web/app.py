@@ -39,6 +39,7 @@ from teledrive.api_keys import ApiKeyStore
 from teledrive.s3.credentials import S3CredentialStore, load_master_key, DEFAULT_PERMISSIONS
 from teledrive.s3.multipart import MultipartStore
 from teledrive.storage.gc import StorageGCInventory
+from teledrive.storage.gc_collect import RetainedMediaGC
 from teledrive.storage.manifest import ManifestStore
 from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
@@ -501,8 +502,51 @@ def _enforce_role_policy(request: Request, user: dict) -> None:
         raise HTTPException(403, "Insufficient permissions for this action")
 
 
+_permission_registry_cache: "PermissionRegistry | None" = None
+
+
+def permission_registry() -> "PermissionRegistry":
+    """The per-endpoint permission catalog, built from the live route
+    table (lazily: routes are declared while this module loads)."""
+    global _permission_registry_cache
+    if _permission_registry_cache is None:
+        from web.permissions import PermissionRegistry
+        _permission_registry_cache = PermissionRegistry(app.routes)
+    return _permission_registry_cache
+
+
 def require_auth(request: Request) -> None:
-    # Session token (Bearer header or httpOnly cookie) is the primary mechanism.
+    # Bearer API keys: every route is individually permissionable.
+    # A key granted exactly this endpoint's permission passes; anything
+    # else is 403. Keys are not users — no role policy applies.
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer td_live_"):
+        token = auth[7:].strip()
+        permission = permission_registry().permission_for(
+            request.method, request.url.path)
+        conn = db_connect()
+        try:
+            name = ApiKeyStore(conn).name_for_token(token)
+            authorized = (permission is not None
+                          and ApiKeyStore(conn).authorize(
+                              token, permission))
+        finally:
+            conn.close()
+        if authorized:
+            request.state.user = {
+                "id": -1,
+                "username": f"api-key:{name or 'unknown'}",
+                "role": "api-key",
+            }
+            return
+        _log(f"denied: api-key {request.method} {request.url.path}",
+             "auth")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key is invalid or lacks this endpoint's permission",
+        )
+
+    # Session token (httpOnly cookie) is the primary mechanism.
     user = _get_current_user(request)
     if user is not None:
         request.state.user = user
@@ -1081,6 +1125,21 @@ class KeyCreateRequest(BaseModel):
     expires_at: int | None = Field(default=None, description="Optional Unix expiry time")
 
 
+class GCToggleRequest(BaseModel):
+    enabled: bool
+    confirm: str | None = Field(
+        default=None, description='Typed confirmation "PHYSICAL-GC" to enable')
+
+
+class GCCollectRequest(BaseModel):
+    scope: str = Field(default="revoked", description="revoked | deleted")
+    dry_run: bool = Field(default=True)
+    min_age_seconds: int = Field(default=86400, ge=3600, le=90 * 86400)
+    limit: int = Field(default=50, ge=1, le=1000)
+    confirm: str | None = Field(
+        default=None, description='Typed confirmation "DELETE-RETAINED" to execute')
+
+
 class S3KeyCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     permissions: list[str] = Field(default_factory=lambda: list(DEFAULT_PERMISSIONS))
@@ -1469,15 +1528,21 @@ def list_api_keys(_: None = Depends(require_auth)):
 @app.get("/api/v1/admin/keys/permissions", tags=["API keys"],
          summary="The per-endpoint permission catalog for key issuance")
 def list_api_key_permissions(_: None = Depends(require_auth)):
-    """Every REST bearer endpoint is individually permissionable. Legacy
-    grouped scopes remain valid as aliases (existing keys keep working)
-    and are shown for reference; new keys should use endpoint names."""
+    """EVERY API route is individually permissionable — the catalog is
+    derived from the live route table, so it can never drift. The nine
+    REST bearer endpoints keep their curated short names; every other
+    route carries a canonical "method:path" permission. Legacy grouped
+    scopes remain valid as aliases (existing keys keep working)."""
     from teledrive.api_keys import (ENDPOINT_PERMISSIONS,
                                      LEGACY_SCOPE_EXPANSION)
+    registry = permission_registry()
+    routes = registry.catalog()
+    curated = set(ENDPOINT_PERMISSIONS)
+    for entry in routes:
+        if entry["name"] in curated:
+            entry["description"] = ENDPOINT_PERMISSIONS[entry["name"]]
     return {
-        "endpoint_permissions": [
-            {"name": name, "description": description}
-            for name, description in sorted(ENDPOINT_PERMISSIONS.items())],
+        "routes": routes,
         "legacy_scopes": [
             {"name": name, "expands_to": sorted(expansion)}
             for name, expansion in sorted(LEGACY_SCOPE_EXPANSION.items())],
@@ -1491,7 +1556,13 @@ def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends
     conn = db_connect()
     try:
         try:
-            key = ApiKeyStore(conn).create(payload.name, payload.scopes, expires_at=payload.expires_at)
+            # Keys may carry ANY single-route permission from the live
+            # registry plus the legacy grouped scopes.
+            route_permissions = frozenset(
+                entry["name"] for entry in permission_registry().catalog())
+            key = ApiKeyStore(conn).create(
+                payload.name, payload.scopes, expires_at=payload.expires_at,
+                extra_allowed=route_permissions)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"id": key.id, "token": key.value, "prefix": key.prefix, "scopes": key.scopes}
@@ -3852,7 +3923,7 @@ def admin_delete_bucket_pin(bucket: str, request: Request,
     return {"ok": True}
 
 
-@app.get("/api/v1/admin/storage/versions", tags=["Object catalog"],
+@app.get("/api/v1/admin/storage/version-history", tags=["Object catalog"],
          summary="Object version history incl. delete markers (WebUI)")
 def admin_list_object_versions(
         bucket: str | None = Query(None),
@@ -3863,7 +3934,8 @@ def admin_list_object_versions(
     This is the UI's object-history view: unlike the upload-job history,
     it covers EVERY write path (S3 browser, REST, multipart, copies)
     and shows delete markers, so deleted objects remain traceable until
-    physical GC removes their retained media."""
+    physical GC removes their retained media. Distinct from
+    /storage/versions, which lists ONE key's versions for restore."""
     conn = db_connect()
     try:
         catalog = BucketCatalog(ManifestStore(conn))
@@ -3889,6 +3961,98 @@ def admin_list_object_versions(
         entries.sort(key=lambda e: (e["committed_at"], e["version_id"]),
                      reverse=True)
         return {"versions": entries[:limit], "count": len(entries)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/storage/gc", tags=["Storage GC"],
+         summary="Physical GC state, logical vs physical metrics (WebUI)")
+def gc_status(_: None = Depends(require_auth)):
+    """Owner-facing GC view: the toggle state, the split between
+    LOGICAL usage (current heads) and PHYSICAL Telegram storage, the
+    reclaimable backlog and what previous collections removed. The
+    informational gates mirror the GC plan contract."""
+    conn = db_connect()
+    try:
+        gcx = RetainedMediaGC(conn)
+        return {
+            "state": gcx.state(),
+            "metrics": gcx.metrics(),
+            "gates": {
+                "independent_payload_backup_verified": False,
+                "restore_drill_verified": False,
+                "writer_barrier_verified": True,
+                "owner_toggle_required": not gcx.state()["enabled"],
+            },
+        }
+    finally:
+        conn.close()
+
+
+@app.put("/api/v1/admin/storage/gc", tags=["Storage GC"],
+         summary="Enable or disable physical GC (owner decision)")
+def gc_toggle(request: Request, payload: GCToggleRequest,
+              _: None = Depends(require_auth)):
+    _same_origin(request)
+    if payload.enabled and payload.confirm != "PHYSICAL-GC":
+        raise HTTPException(
+            422, 'Enabling physical GC requires confirm="PHYSICAL-GC"')
+    user = getattr(request.state, "user", {}) or {}
+    conn = db_connect()
+    try:
+        gcx = RetainedMediaGC(conn)
+        gcx.set_enabled(payload.enabled, by=str(user.get("username", "?")))
+        _log(f"physical gc {'ENABLED' if payload.enabled else 'disabled'} "
+             f"by {user.get('username', '?')} — Telegram media of logically "
+             f"deleted objects becomes reclaimable via collect",
+             "gc")
+        return {"ok": True, "state": gcx.state()}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/storage/gc/collect", tags=["Storage GC"],
+          summary="Preview (dry-run) or execute physical collection of retained media")
+async def gc_collect(request: Request, payload: GCCollectRequest,
+                     _: None = Depends(require_auth)):
+    """Dry-run (default) enumerates the fail-closed candidate set.
+    Execution additionally requires GC enabled and the typed
+    confirmation. Every candidate is re-verified immediately before its
+    Telegram messages are deleted; partial failures stay retryable."""
+    _same_origin(request)
+    conn = db_connect()
+    try:
+        gcx = RetainedMediaGC(conn)
+        try:
+            candidates = gcx.candidates(
+                scope=payload.scope, min_age_seconds=payload.min_age_seconds,
+                limit=payload.limit)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if payload.dry_run:
+            return {"dry_run": True, "scope": payload.scope,
+                    "count": len(candidates), "candidates": candidates}
+        if payload.confirm != "DELETE-RETAINED":
+            raise HTTPException(
+                422, 'Executing collection requires confirm="DELETE-RETAINED"')
+        if not gcx.state()["enabled"]:
+            raise HTTPException(
+                409, "Physical GC is disabled; enable it first (owner gate)")
+        transport = storage_transport(conn)
+        user = getattr(request.state, "user", {}) or {}
+        _log(f"physical gc collect START scope={payload.scope} "
+             f"candidates={len(candidates)} by {user.get('username', '?')}",
+             "gc")
+        report = await gcx.collect(
+            transport, scope=payload.scope,
+            min_age_seconds=payload.min_age_seconds,
+            chunk_refs=candidates)
+        _log(f"physical gc collect DONE scope={payload.scope} "
+             f"collected={len(report['collected'])} "
+             f"skipped={len(report['skipped'])} "
+             f"failed={len(report['failed'])}", "gc")
+        return {"dry_run": False, "scope": payload.scope, **report,
+                "metrics": gcx.metrics()}
     finally:
         conn.close()
 

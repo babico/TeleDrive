@@ -18,6 +18,48 @@ function app(){
     dashboard: {pending:0,failed:0,uploaded:0,alerts:0,strategy:'-'},
     dashAccounts: [],
     usageSeries: [],
+    gc: {},
+    gcScope: 'revoked',
+    gcPreview: [],
+    async refreshGC(){
+      try {
+        const r = await this.api('/api/v1/admin/storage/gc');
+        this.gc = r;
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async toggleGC(){
+      const enabling = !this.gc.state?.enabled;
+      const confirmWord = enabling ? prompt('Type PHYSICAL-GC to enable physical deletion of retained Telegram media:') : null;
+      if(enabling && confirmWord !== 'PHYSICAL-GC'){ this.toast('Confirmation did not match', true); return; }
+      try {
+        const r = await this.api('/api/v1/admin/storage/gc',{method:'PUT',body:JSON.stringify({enabled:enabling, confirm:confirmWord})});
+        this.gc.state = r.state;
+        this.toast(enabling ? 'Physical GC ENABLED — collect now to reclaim' : 'Physical GC disabled');
+        await this.refreshGC();
+      } catch(e){ this.toast(e.message,true); }
+    },
+    async collectGC(dryRun){
+      const body = {scope:this.gcScope, dry_run:dryRun, limit:50};
+      if(!dryRun){
+        if(!this.gc.state?.enabled){ this.toast('Enable GC first', true); return; }
+        const word = prompt('Type DELETE-RETAINED to physically delete the previewed Telegram media:');
+        if(word !== 'DELETE-RETAINED'){ this.toast('Confirmation did not match', true); return; }
+        body.confirm = word;
+      }
+      try {
+        const r = await this.api('/api/v1/admin/storage/gc/collect',{method:'POST',body:JSON.stringify(body)});
+        if(dryRun){
+          this.gcPreview = r.candidates||[];
+          this.toast('Preview: ' + r.count + ' candidate(s) [' + this.gcScope + ']');
+          await this.refreshGC();
+        } else {
+          this.toast('Collected ' + (r.collected?.length||0) + ', skipped ' + (r.skipped?.length||0) + ', failed ' + (r.failed?.length||0));
+          this.gcPreview = [];
+          await this.refreshGC();
+          await this.refreshDashboard();
+        }
+      } catch(e){ this.toast(e.message,true); }
+    },
     queueRows: [],
     historyRows: [],
     bucketUsage: [],
@@ -79,11 +121,14 @@ function app(){
     async loadPermissionCatalog(){
       try {
         const r = await this.api('/api/v1/admin/keys/permissions');
-        this.endpointPermissions = r.endpoint_permissions||[];
         this.legacyScopes = r.legacy_scopes||[];
+        const routes = r.routes||[];
+        this.endpointPermissions = routes;
+        // Group routes by path with {params} as '*' (trailing /* dropped).
         const cats = {};
-        for(const p of this.endpointPermissions){
-          const cat = p.name.split(':')[1];
+        for(const p of routes){
+          let cat = p.path.replace(/\{[^}]+\}/g, '*');
+          if(cat.endsWith('/*')) cat = cat.slice(0, -2);
           (cats[cat] = cats[cat]||[]).push(p.name);
         }
         this.endpointCategories = cats;
@@ -190,6 +235,7 @@ function app(){
       }
       if(path === '/' || path === '/dashboard' || path === '/queue'){
         await this.refreshDashboard();
+        await this.refreshGC();
         setInterval(()=>this.refreshDashboard(), 30000);
       } else if(path === '/settings/general'){
         await this.loadSettings();
@@ -309,7 +355,7 @@ function app(){
     async refreshVersions(){
       try {
         const q = this.versionBucket ? ('?bucket=' + encodeURIComponent(this.versionBucket)) : '';
-        const r = await this.api('/api/v1/admin/storage/versions'+q);
+        const r = await this.api('/api/v1/admin/storage/version-history'+q);
         this.versionRows = r.versions||[];
       } catch(e){ this.toast(e.message,true); }
     },

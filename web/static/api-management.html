@@ -113,9 +113,9 @@ tailwind.config = {
           <button class="btn btn-sm" @click="toggleEndpointCategory(cat)" x-text="(cat + ': ' + (categoryFullySelected(cat) ? '✓' : 'select'))"></button>
         </template>
       </div>
-      <div class="grid grid-cols-1 gap-1">
+      <div class="scroll mt-1" style="max-height:420px">
         <template x-for="p in endpointPermissions" :key="p.name">
-          <label class="flex items-center gap-2 text-xs"><input type="checkbox" :value="p.name" x-model="selectedScopes"> <span class="font-mono" x-text="p.name"></span> <span class="muted" x-text="p.description"></span></label>
+          <label class="flex items-center gap-2 text-xs"><input type="checkbox" :value="p.name" x-model="selectedScopes"> <span class="font-mono" x-text="p.name"></span> <span class="muted" x-show="p.description" x-text="p.description"></span></label>
         </template>
       </div>
       <details class="mt-2">

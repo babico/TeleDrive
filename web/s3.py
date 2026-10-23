@@ -17,6 +17,7 @@ import tempfile
 import time
 import zlib
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import unquote, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
@@ -475,7 +476,8 @@ def _list_xml(bucket: str, keys: list, common: list[str], prefix: str,
               limit: int, after: str, delimiter: str,
               more: bool, next_token: str | None, etag_for=None, *,
               version_one: bool = False, next_marker: str | None = None,
-              encoding_type: str | None = None) -> bytes:
+              encoding_type: str | None = None,
+              include_owner: bool = False, owner: str = "") -> bytes:
     root = ET.Element("ListBucketResult", xmlns=NAMESPACE)
     # S3 EncodingType=url percent-encodes UTF-8 keys *inside XML* so names
     # containing XML control characters remain safely representable.
@@ -504,6 +506,11 @@ def _list_xml(bucket: str, keys: list, common: list[str], prefix: str,
             ("StorageClass", "STANDARD"),
         ):
             ET.SubElement(c, field).text = str(value)
+        # V1 always carries Owner; V2 only when fetch-owner=true.
+        if include_owner:
+            owner_node = ET.SubElement(c, "Owner")
+            ET.SubElement(owner_node, "ID").text = owner
+            ET.SubElement(owner_node, "DisplayName").text = "teledrive"
     for name in common:
         ET.SubElement(ET.SubElement(root, "CommonPrefixes"), "Prefix").text = encoded(name)
     if next_token:
@@ -1139,6 +1146,9 @@ def _list_objects(ctx: _S3RequestContext) -> Response:
     encoding_type = request.query_params.get("encoding-type")
     if encoding_type not in (None, "url"):
         return _error("InvalidArgument", "Unsupported list encoding-type", 400)
+    fetch_owner = request.query_params.get("fetch-owner")
+    if fetch_owner not in (None, "true", "false"):
+        return _error("InvalidArgument", "fetch-owner must be true or false", 400)
     if len(prefix.encode("utf-8")) > 1024 or len(delimiter.encode("utf-8")) > 16:
         return _error("InvalidArgument", "Prefix or delimiter is too large", 400)
     if version_one:
@@ -1177,7 +1187,10 @@ def _list_objects(ctx: _S3RequestContext) -> Response:
                               delimiter, more, next_token,
                               lambda obj: tags.object_etag(obj.id, obj.sha256),
                               version_one=version_one, next_marker=next_marker,
-                              encoding_type=encoding_type),
+                              encoding_type=encoding_type,
+                              include_owner=(version_one
+                                             or fetch_owner == "true"),
+                              owner=ctx.owner),
                     media_type="application/xml")
 
 
@@ -1351,6 +1364,7 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
         if document.tag.rsplit("}", 1)[-1] != "CompleteMultipartUpload":
             raise ValueError("Wrong XML root")
         selected = []
+        part_checksums: dict[int, str] = {}
         for element in document:
             if element.tag.rsplit("}", 1)[-1] != "Part":
                 raise ValueError("Unexpected XML element")
@@ -1358,9 +1372,68 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
             etag = element.findtext("{*}ETag")
             if not number or not number.isdigit() or not etag:
                 raise ValueError("Missing part number or ETag")
+            declared_sha = element.findtext("{*}ChecksumSHA256")
+            if declared_sha is not None:
+                part_checksums[int(number)] = declared_sha
             selected.append((int(number), etag.strip('"').lower()))
     except (ValueError, ET.ParseError) as exc:
         raise MultipartError("MalformedXML", "Invalid CompleteMultipartUpload XML") from exc
+    # Request-level checksum mode. Only COMPOSITE is verifiable without
+    # re-streaming assembled bytes: it hashes the concatenated per-part
+    # SHA-256 digests, which the staged parts already carry.
+    checksum_type = request.headers.get("x-amz-checksum-type")
+    if checksum_type not in (None, "COMPOSITE", "FULL_OBJECT"):
+        raise MultipartError(
+            "InvalidArgument", "Unsupported x-amz-checksum-type")
+    requested_checksum = (
+        request.headers.get("x-amz-checksum-sha256"))
+    if requested_checksum is not None and checksum_type == "FULL_OBJECT":
+        # Verifying a FULL_OBJECT digest would require streaming every
+        # assembled byte; never acknowledge an unverified declaration.
+        raise MultipartError(
+            "NotImplemented",
+            "FULL_OBJECT completion checksums are unsupported", 501)
+    for algo in ("x-amz-checksum-crc32", "x-amz-checksum-crc32c",
+                 "x-amz-checksum-sha1", "x-amz-checksum-crc64nvme"):
+        if request.headers.get(algo) is not None:
+            raise MultipartError(
+                "NotImplemented",
+                "Only SHA-256 completion checksums are supported", 501)
+    from teledrive.s3.multipart import parts as _parts_table
+    from teledrive.storage.manifest import objects as _objects_table
+    part_digests: dict[int, str] = {
+        number: sha for number, sha in db.connection.execute(
+            select(_parts_table.c.number, _objects_table.c.sha256)
+            .select_from(_parts_table.join(
+                _objects_table,
+                _objects_table.c.id == _parts_table.c.object_id))
+            .where(_parts_table.c.upload_id == upload_id))
+    }
+    for number, declared in part_checksums.items():
+        stored = part_digests.get(number)
+        if stored is None:
+            raise MultipartError(
+                "InvalidPart", "Checksum declared for an unknown part")
+        actual = base64.b64encode(bytes.fromhex(stored)).decode("ascii")
+        if not hmac.compare_digest(declared, actual):
+            raise MultipartError(
+                "BadDigest", f"Part {number} SHA-256 checksum mismatch")
+    composite_checksum = None
+    if requested_checksum is not None:
+        try:
+            composite = hashlib.sha256(b"".join(
+                bytes.fromhex(part_digests[number])
+                for number, _ in sorted(selected)
+                if (part_digests.get(number) is not None)
+            )).digest()
+        except KeyError as exc:
+            raise MultipartError(
+                "InvalidPart", "Completion references an unstaged part"
+            ) from exc
+        composite_checksum = base64.b64encode(composite).decode("ascii")
+        if not hmac.compare_digest(requested_checksum, composite_checksum):
+            raise MultipartError(
+                "BadDigest", "Composite SHA-256 checksum mismatch")
     transport = storage_transport(db)
     scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
     _secure_mkdir(scratch)
@@ -1369,7 +1442,6 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
     # table directly: list_parts() enforces upload ownership and
     # would reject the idempotent repeat of an already-completed
     # upload.
-    from teledrive.s3.multipart import parts as _parts_table
     selected_numbers = {number for number, _ in selected}
     part_rows = db.connection.execute(
         select(_parts_table.c.number, _parts_table.c.size).where(
@@ -1398,9 +1470,12 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
             if expected_completion_head else None
         ),
     )
-    return Response(_xml("CompleteMultipartUploadResult", [
-        ("Bucket", bucket), ("Key", key), ("ETag", '"' + finished.etag + '"'),
-    ]), status_code=200, media_type="application/xml")
+    result_fields = [("Bucket", bucket), ("Key", key),
+                     ("ETag", '"' + finished.etag + '"')]
+    if composite_checksum is not None:
+        result_fields.append(("ChecksumSHA256", composite_checksum))
+    return Response(_xml("CompleteMultipartUploadResult", result_fields),
+                    status_code=200, media_type="application/xml")
 
 
 async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
@@ -1689,13 +1764,13 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
         raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
     qualifiers = (
         "x-amz-copy-source-if-match", "x-amz-copy-source-if-none-match",
+        "x-amz-copy-source-if-modified-since",
+        "x-amz-copy-source-if-unmodified-since",
     )
     for condition in qualifiers:
         if request.headers.get(condition) is not None and condition not in signed_headers:
             raise SigV4Error("AccessDenied", "Copy precondition must be signed")
     unsupported_headers = (
-        "x-amz-copy-source-if-modified-since",
-        "x-amz-copy-source-if-unmodified-since",
         "x-amz-copy-source-range",
         "x-amz-server-side-encryption", "x-amz-storage-class",
     )
@@ -1788,6 +1863,36 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
     if (if_match is not None and if_match not in (quoted_tag, "*")
             or if_none_match is not None and if_none_match in (quoted_tag, "*")):
         return _error("PreconditionFailed", "CopySource ETag precondition failed", 412)
+    # Date-based copy-source conditions with AWS precedence: a passing
+    # ETag condition overrides the contradicting date condition.
+    def _http_date(name):
+        raw = request.headers.get(name)
+        if raw is None:
+            return None
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return None
+        if parsed is None or parsed.tzinfo is None:
+            return _error("InvalidArgument", "Malformed CopySource date condition", 400)
+        return parsed.timestamp()
+    if_modified_since = _http_date("x-amz-copy-source-if-modified-since")
+    if_unmodified_since = _http_date("x-amz-copy-source-if-unmodified-since")
+    if if_modified_since is None and request.headers.get(
+            "x-amz-copy-source-if-modified-since") is not None:
+        return _error("InvalidArgument", "Malformed CopySource date condition", 400)
+    if if_unmodified_since is None and request.headers.get(
+            "x-amz-copy-source-if-unmodified-since") is not None:
+        return _error("InvalidArgument", "Malformed CopySource date condition", 400)
+    source_mtime = float(source_item.created_at)
+    if (if_unmodified_since is not None and if_match is None
+            and source_mtime > if_unmodified_since):
+        return _error("PreconditionFailed",
+                      "CopySource modified since the requested date", 412)
+    if (if_modified_since is not None and if_none_match is None
+            and source_mtime <= if_modified_since):
+        return _error("PreconditionFailed",
+                      "CopySource not modified since the requested date", 412)
     # CopyObject is a metadata-only operation and has no upload body.
     # Consume streaming requests safely rather than trusting Content-Length.
     async for block in request.stream():

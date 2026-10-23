@@ -31,15 +31,13 @@
     },
     {
       "name": "ListObjects",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by code"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "ListObjectsV2",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by code"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "ListObjectVersions",
@@ -96,9 +94,8 @@
     },
     {
       "name": "UploadPart",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by code"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "ListParts",

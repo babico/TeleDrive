@@ -154,6 +154,37 @@ tailwind.config = {
     </div>
   </div>
 
+  <div class="card">
+    <div class="row" style="align-items:baseline">
+      <h3>Physical GC</h3>
+      <span class="badge ml-2" :class="gc.state?.enabled ? 'badge-red' : 'badge-green'"
+            x-text="gc.state?.enabled ? 'ENABLED' : 'OFF'"></span>
+      <span class="muted text-xs" x-show="gc.state" x-text="'by ' + (gc.state?.updated_by||'-')"></span>
+    </div>
+    <p class="muted text-xs">Deleted objects keep their Telegram media until you physically collect it (recovery journal). Logical usage is what the bucket browser shows; physical is what Telegram holds.</p>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs" x-show="gc.metrics">
+      <div><span class="muted">Logical</span><br><b x-text="(gc.metrics?.logical_objects||0) + ' obj / ' + fmtBytes(gc.metrics?.logical_bytes||0)"></b></div>
+      <div><span class="muted">Physical</span><br><b x-text="(gc.metrics?.physical_objects||0) + ' obj / ' + fmtBytes(gc.metrics?.physical_bytes||0)"></b></div>
+      <div><span class="muted">Retained backlog</span><br><b class="text-amber-400" x-text="(gc.metrics?.retained_objects||0) + ' obj / ' + fmtBytes(gc.metrics?.retained_bytes||0)"></b></div>
+      <div><span class="muted">Collected so far</span><br><b class="text-green-400" x-text="(gc.metrics?.collected_objects||0) + ' obj / ' + fmtBytes(gc.metrics?.collected_bytes||0)"></b></div>
+    </div>
+    <div class="row mt-3 flex-wrap gap-2">
+      <button class="btn btn-sm" @click="toggleGC()">Toggle GC</button>
+      <select x-model="gcScope" class="input" style="flex:0 0 200px;padding:.25rem .5rem">
+        <option value="revoked">scope: revoked versions</option>
+        <option value="deleted">scope: all deleted objects</option>
+      </select>
+      <button class="btn btn-sm" @click="collectGC(true)">Preview</button>
+      <button class="btn btn-sm btn-primary" :disabled="!gc.state?.enabled" @click="collectGC(false)">Collect now</button>
+    </div>
+    <div class="mt-2 text-xs scroll" x-show="gcPreview.length" x-cloak>
+      <b class="muted">Preview (reclaimable: <span x-text="(gc.metrics?.reclaimable?.[gcScope]||0)"></span> candidates):</b>
+      <template x-for="c in gcPreview" :key="c.object_id">
+        <div class="font-mono text-xs" x-text="c.bucket + '/' + c.key + ' — ' + fmtBytes(c.bytes) + ' (' + c.chunk_count + ' chunks)'"></div>
+      </template>
+    </div>
+  </div>
+
   <div class="card" x-show="bucketUsage.length">
     <h3>Storage usage</h3>
     <div class="space-y-3 mt-3">

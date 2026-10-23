@@ -118,11 +118,19 @@ def test_bucket_crud_and_object_metadata_scopes(api):
 
 def test_bearer_token_does_not_unlock_basic_admin(api):
     client, _ = api
+    # admin:* is the legacy REST-object wildcard: it must NOT unlock
+    # admin routes. The bearer path recognizes the key (403, not 401)
+    # but the route permission is missing.
     key = create_key(client, ["admin:*"])
     token = {"Authorization": f"Bearer {key['token']}"}
-    assert client.get("/api/v1/admin/keys", headers=token).status_code == 401
+    assert client.get("/api/v1/admin/keys", headers=token).status_code == 403
     assert client.post("/api/v1/admin/keys", headers=token,
-                       json={"name": "escalation", "scopes": ["admin:*"]}).status_code == 401
+                       json={"name": "escalation", "scopes": ["admin:*"]}
+                       ).status_code == 403
+    # Only the explicitly granted route permission unlocks it.
+    scoped = create_key(client, ["get:/api/v1/admin/keys"])
+    assert client.get("/api/v1/admin/keys", headers={
+        "Authorization": f"Bearer {scoped['token']}"}).status_code == 200
 
 
 def test_openapi_documents_rest_key_and_bucket_routes(api):

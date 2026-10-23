@@ -114,6 +114,10 @@ function app(){
     apiKeys: [],
     newKeyName: '',
     newKeyExpiry: '',
+    newKeyExpiryPreset: 30,
+    createOpen: false,
+    permSearch: '',
+    catOpen: {},
     keyScopesList: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage','jobs:read','jobs:manage','accounts:read','accounts:manage','settings:read','settings:manage','keys:manage','admin:*'],
     endpointPermissions: [],
     legacyScopes: [],
@@ -150,11 +154,48 @@ function app(){
     categoryFullySelected(cat){
       return (this.endpointCategories[cat]||[]).every(n => this.selectedScopes.includes(n));
     },
+    endpointsIn(cat){
+      const names = new Set(this.endpointCategories[cat]||[]);
+      return this.endpointPermissions.filter(p => names.has(p.name));
+    },
+    countSelected(names){ return names.filter(n => this.selectedScopes.includes(n)).length; },
+    toggleCatOpen(cat){ this.catOpen[cat] = !this.catOpen[cat]; },
+    categoryMatches(cat){
+      if(!this.permSearch) return true;
+      const q = this.permSearch.toLowerCase();
+      return cat.toLowerCase().includes(q) ||
+        this.endpointsIn(cat).some(p => this.permMatches(p));
+    },
+    permMatches(p){
+      if(!this.permSearch) return true;
+      const q = this.permSearch.toLowerCase();
+      return p.name.toLowerCase().includes(q) ||
+        p.method.toLowerCase().includes(q) ||
+        p.path.toLowerCase().includes(q) ||
+        (p.description||'').toLowerCase().includes(q);
+    },
+    fmtRel(v){
+      if(!v) return '-';
+      const s = Math.floor(Date.now()/1000) - v;
+      if (s < 60) return 'just now';
+      if (s < 3600) return Math.floor(s/60) + ' min ago';
+      if (s < 86400) return Math.floor(s/3600) + 'h ago';
+      if (s < 30*86400) return Math.floor(s/86400) + 'd ago';
+      if (s < 365*86400) return Math.floor(s/(30*86400)) + 'mo ago';
+      const future = s < 0;
+      const y = Math.floor(Math.abs(s)/(365*86400));
+      return future ? ('in ' + (y?y+'y':Math.floor(Math.abs(s)/(30*86400))+'mo')) : y + 'y ago';
+    },
+    keyExpired(k){
+      return !!(k.expires_at && k.expires_at <= Math.floor(Date.now()/1000));
+    },
     selectedScopes: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage'],
     createdKey: null,
 
     // S3
     s3KeyName: '',
+    s3CreateOpen: false,
+    s3ExpiryPreset: 90,
     s3KeyExpiry: '',
     s3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:GetObjectAttributes','s3:GetObjectTagging','s3:PutObjectTagging','s3:DeleteObjectTagging','s3:GetBucketTagging','s3:GetBucketCORS','s3:PutBucketCORS','s3:PutBucketTagging','s3:DeleteBucketTagging','s3:PutObject','s3:DeleteObject','s3:CreateBucket','s3:DeleteBucket'],
     selectedS3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:PutObject','s3:DeleteObject'],
@@ -620,10 +661,25 @@ function app(){
       try {
         const scopes = this.selectedScopes.slice();
         const body = {name:this.newKeyName.trim()||'key', scopes:scopes};
-        if(this.newKeyExpiry) body.expires_at = Math.floor(new Date(this.newKeyExpiry).getTime()/1000);
+        if(this.newKeyExpiryPreset === 'custom'){
+          if(this.newKeyExpiry) body.expires_at = Math.floor(new Date(this.newKeyExpiry).getTime()/1000);
+        } else if(Number(this.newKeyExpiryPreset) > 0){
+          body.expires_at = Math.floor(Date.now()/1000) + Number(this.newKeyExpiryPreset)*86400;
+        }
         const r = await this.api('/api/v1/admin/keys',{method:'POST',body:JSON.stringify(body)});
         this.createdKey = {prefix:r.prefix, token:r.token};
         this.toast('Key created');
+        this.createOpen = false;
+        await this.refreshKeys();
+      } catch(e){ this.toast(e.message,true); }
+    },
+
+    async rotateKey(id){
+      if(!this.confirmDelete('rotate this API key', 'The current secret stops working immediately; the replacement is shown once.')) return;
+      try {
+        const r = await this.api('/api/v1/admin/keys/'+id+'/rotate',{method:'POST'});
+        this.createdKey = {prefix:r.prefix, token:r.token};
+        this.toast('Key rotated — copy the new secret');
         await this.refreshKeys();
       } catch(e){ this.toast(e.message,true); }
     },
@@ -681,10 +737,15 @@ function app(){
     async createS3Key(){
       try {
         const body = {name:this.s3KeyName.trim()||'s3-key', permissions:this.selectedS3Perms.slice()};
-        if(this.s3KeyExpiry) body.expires_at = Math.floor(new Date(this.s3KeyExpiry).getTime()/1000);
+        if(this.s3ExpiryPreset === 'custom'){
+          if(this.s3KeyExpiry) body.expires_at = Math.floor(new Date(this.s3KeyExpiry).getTime()/1000);
+        } else if(Number(this.s3ExpiryPreset) > 0){
+          body.expires_at = Math.floor(Date.now()/1000) + Number(this.s3ExpiryPreset)*86400;
+        }
         const r = await this.api('/api/v1/admin/s3/credentials',{method:'POST',body:JSON.stringify(body)});
         this.createdS3 = {access:r.access_key, secret:r.secret_key};
         this.toast('S3 credentials created');
+        this.s3CreateOpen = false;
         await this.refreshS3Keys();
       } catch(e){ this.toast(e.message,true); }
     },

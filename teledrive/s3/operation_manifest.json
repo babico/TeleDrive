@@ -41,9 +41,8 @@
     },
     {
       "name": "ListObjectVersions",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by code"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutObject",
@@ -109,9 +108,8 @@
     },
     {
       "name": "CompleteMultipartUpload",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by code"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "AbortMultipartUpload",

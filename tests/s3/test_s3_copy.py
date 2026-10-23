@@ -153,9 +153,11 @@ def test_copy_does_not_ignore_unsupported_metadata_changes(service):
     assert signed(service, "HEAD", "/backup-bucket/out").headers["x-amz-meta-purpose"] == "copy"
     ignored_range = copy(service, "/backup-bucket/source", "/backup-bucket/out",
                          **{"x-amz-copy-source-range": "bytes=0-2"})
-    assert ignored_range.status_code == 501
-    assert service[2].uploads == before
-    assert signed(service, "GET", "/backup-bucket/out").content == b"payload"
+    # Ranged copy is supported: the destination is a NEW 3-byte payload
+    # staged through Telegram (one upload), not a metadata alias.
+    assert ignored_range.status_code == 200
+    assert service[2].uploads == before + 1
+    assert signed(service, "GET", "/backup-bucket/out").content == b"pay"
 
 
 @pytest.mark.parametrize("key", ["folder/a%20space.txt", "caf%C3%A9.bin", "percent%2525.txt"])

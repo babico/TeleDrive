@@ -1007,9 +1007,16 @@ def _list_bucket_versions(ctx: _S3RequestContext) -> Response:
         request.query_params.get("versions") not in ("",)
     ):
         return _error("InvalidArgument", "Invalid versions selector", 400)
-    for marker in ("prefix", "max-keys", "key-marker", "version-id-marker"):
+    for marker in ("prefix", "max-keys", "key-marker", "version-id-marker",
+                   "delimiter", "encoding-type"):
         if len(request.query_params.getlist(marker)) > 1:
             return _error("InvalidArgument", "Ambiguous version listing parameter", 400)
+    delimiter = request.query_params.get("delimiter", "")
+    encoding = request.query_params.get("encoding-type")
+    if encoding not in (None, "url"):
+        return _error("InvalidArgument", "Only encoding-type=url is supported", 400)
+    if len(delimiter.encode("utf-8")) > 16:
+        return _error("InvalidArgument", "Version delimiter is too long", 400)
     try:
         maximum = int(request.query_params.get("max-keys", "1000"))
         key_marker = request.query_params.get("key-marker", "")
@@ -1021,23 +1028,62 @@ def _list_bucket_versions(ctx: _S3RequestContext) -> Response:
         )
     except ValueError:
         return _error("InvalidArgument", "Invalid version list cursor or limit", 400)
+    # Delimiter grouping: keys sharing the prefix up to the first
+    # delimiter collapse into one CommonPrefixes entry, counted against
+    # max-keys exactly like AWS (versions + prefixes share the budget).
+    common: list[str] = []
+    grouped: list[dict] = []
+    seen_prefixes: set[str] = set()
+    grouped_more = has_more
+    if delimiter:
+        for index, entry in enumerate(entries):
+            remainder = entry["key"][len(prefix):]
+            cut = remainder.find(delimiter)
+            if cut >= 0:
+                common_prefix = prefix + remainder[:cut + len(delimiter)]
+                if common_prefix in seen_prefixes:
+                    continue
+                if len(grouped) + len(common) >= maximum:
+                    grouped_more = True
+                    break
+                seen_prefixes.add(common_prefix)
+                common.append(common_prefix)
+            else:
+                if len(grouped) + len(common) >= maximum:
+                    grouped_more = True
+                    break
+                grouped.append(entry)
+        entries = grouped
+        has_more = grouped_more
+    encoded = (lambda value: quote(value, safe="")
+               if encoding == "url" else value)
     root = ET.Element("ListVersionsResult", xmlns=NAMESPACE)
     for label, value in (
-        ("Name", bucket), ("Prefix", prefix),
-        ("KeyMarker", key_marker), ("VersionIdMarker", version_marker),
+        ("Name", bucket), ("Prefix", encoded(prefix)),
+        ("KeyMarker", encoded(key_marker)), ("VersionIdMarker", version_marker),
         ("MaxKeys", maximum), ("IsTruncated", str(has_more).lower()),
     ):
         ET.SubElement(root, label).text = str(value)
-    if has_more and entries:
-        ET.SubElement(root, "NextKeyMarker").text = entries[-1]["key"]
-        ET.SubElement(root, "NextVersionIdMarker").text = entries[-1]["version_id"]
+    if delimiter:
+        ET.SubElement(root, "Delimiter").text = encoded(delimiter)
+    if encoding:
+        ET.SubElement(root, "EncodingType").text = encoding
+    next_key_marker = None
+    if has_more and (entries or common):
+        next_key_marker = (common[-1] if not entries and common
+                           else entries[-1]["key"])
+    if next_key_marker is not None:
+        ET.SubElement(root, "NextKeyMarker").text = encoded(next_key_marker)
+        if entries and not common:
+            ET.SubElement(root, "NextVersionIdMarker").text = \
+                entries[-1]["version_id"]
     mpu = MultipartStore(catalog)
     for entry in entries:
         element = ET.SubElement(
             root, "DeleteMarker" if entry["is_delete_marker"] else "Version"
         )
         fields = [
-            ("Key", entry["key"]), ("VersionId", entry["version_id"]),
+            ("Key", encoded(entry["key"])), ("VersionId", entry["version_id"]),
             ("IsLatest", str(entry["is_current"]).lower()),
             ("LastModified", time.strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z",
@@ -1053,6 +1099,9 @@ def _list_bucket_versions(ctx: _S3RequestContext) -> Response:
             ]
         for label, value in fields:
             ET.SubElement(element, label).text = str(value)
+    for name in common:
+        ET.SubElement(ET.SubElement(root, "CommonPrefixes"),
+                      "Prefix").text = encoded(name)
     return Response(
         ET.tostring(root, encoding="utf-8", xml_declaration=True),
         media_type="application/xml",
@@ -1385,20 +1434,25 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
     if checksum_type not in (None, "COMPOSITE", "FULL_OBJECT"):
         raise MultipartError(
             "InvalidArgument", "Unsupported x-amz-checksum-type")
-    requested_checksum = (
-        request.headers.get("x-amz-checksum-sha256"))
-    if requested_checksum is not None and checksum_type == "FULL_OBJECT":
-        # Verifying a FULL_OBJECT digest would require streaming every
-        # assembled byte; never acknowledge an unverified declaration.
+    checksum_headers = ("x-amz-checksum-sha256", "x-amz-checksum-sha1",
+                        "x-amz-checksum-crc32", "x-amz-checksum-crc32c",
+                        "x-amz-checksum-crc64nvme")
+    declared_checksums = {
+        name: request.headers.get(name) for name in checksum_headers
+        if request.headers.get(name) is not None}
+    non_sha_declared = [name for name in declared_checksums
+                        if name != "x-amz-checksum-sha256"]
+    if non_sha_declared and checksum_type is None:
         raise MultipartError(
-            "NotImplemented",
-            "FULL_OBJECT completion checksums are unsupported", 501)
-    for algo in ("x-amz-checksum-crc32", "x-amz-checksum-crc32c",
-                 "x-amz-checksum-sha1", "x-amz-checksum-crc64nvme"):
-        if request.headers.get(algo) is not None:
-            raise MultipartError(
-                "NotImplemented",
-                "Only SHA-256 completion checksums are supported", 501)
+            "InvalidArgument",
+            "x-amz-checksum-type is required for completion checksums")
+    # FULL_OBJECT checksums and non-SHA composites are verified in one
+    # streaming pass over the assembled bytes (below, once the engine
+    # exists); SHA-256 composites verify from the staged part digests.
+    streaming_verification = bool(
+        declared_checksums and (
+            checksum_type == "FULL_OBJECT"
+            or (checksum_type == "COMPOSITE" and non_sha_declared)))
     from teledrive.s3.multipart import parts as _parts_table
     from teledrive.storage.manifest import objects as _objects_table
     part_digests: dict[int, str] = {
@@ -1419,7 +1473,9 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
             raise MultipartError(
                 "BadDigest", f"Part {number} SHA-256 checksum mismatch")
     composite_checksum = None
-    if requested_checksum is not None:
+    sha256_declaration = declared_checksums.get("x-amz-checksum-sha256")
+    if (sha256_declaration is not None
+            and checksum_type in (None, "COMPOSITE")):
         try:
             composite = hashlib.sha256(b"".join(
                 bytes.fromhex(part_digests[number])
@@ -1431,7 +1487,7 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
                 "InvalidPart", "Completion references an unstaged part"
             ) from exc
         composite_checksum = base64.b64encode(composite).decode("ascii")
-        if not hmac.compare_digest(requested_checksum, composite_checksum):
+        if not hmac.compare_digest(sha256_declaration, composite_checksum):
             raise MultipartError(
                 "BadDigest", "Composite SHA-256 checksum mismatch")
     transport = storage_transport(db)
@@ -1459,6 +1515,76 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
         catalog.manifests, transport,
         chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
     )
+    if streaming_verification:
+        # One streaming pass over the assembled part bytes computes
+        # every algorithm: FULL_OBJECT digests directly, and non-SHA
+        # COMPOSITE values from the concatenated binary part checksums
+        # (little-endian for CRCs, natural digests for SHA).
+        full = {"sha256": hashlib.sha256(),
+                "sha1": hashlib.sha1(usedforsecurity=False)}
+        part_crc32: list[bytes] = []
+        part_crc32c: list[bytes] = []
+        part_crc64: list[bytes] = []
+        crc32_state = crc32c_state = crc64_state = 0
+        try:
+            for number, _etag in sorted(selected):
+                part_object = db.connection.execute(
+                    select(_parts_table.c.object_id).where(
+                        _parts_table.c.upload_id == upload_id,
+                        _parts_table.c.number == number)
+                ).scalar_one()
+                part_crc32_state = part_crc32c_state = part_crc64_state = 0
+                async for piece in engine.iter_bytes(part_object):
+                    full["sha256"].update(piece)
+                    full["sha1"].update(piece)
+                    crc32_state = zlib.crc32(piece, crc32_state)
+                    crc32c_state = crc32c(piece, crc32c_state)
+                    crc64_state = crc64nvme(piece, crc64_state)
+                    part_crc32_state = zlib.crc32(piece, part_crc32_state)
+                    part_crc32c_state = crc32c(piece, part_crc32c_state)
+                    part_crc64_state = crc64nvme(piece, part_crc64_state)
+                part_crc32.append(
+                    (part_crc32_state & 0xffffffff).to_bytes(4, "little"))
+                part_crc32c.append(
+                    (part_crc32c_state & 0xffffffff).to_bytes(4, "little"))
+                part_crc64.append(
+                    part_crc64_state.to_bytes(8, "little"))
+        except FileNotFoundError as exc:
+            raise MultipartError(
+                "InvalidPart", "Completion references an unstaged part"
+            ) from exc
+        # CRC full-object values are finalized big-endian; composite
+        # CRCs checksum the little-endian part concatenation.
+        def _crc_value(state, parts, width, algo):
+            if checksum_type == "COMPOSITE":
+                if algo == "crc32":
+                    value = zlib.crc32(b"".join(parts)) & 0xffffffff
+                elif algo == "crc32c":
+                    value = crc32c(b"".join(parts))
+                else:
+                    value = crc64nvme(b"".join(parts))
+            else:
+                value = state
+            return base64.b64encode(
+                value.to_bytes(width, "big")).decode("ascii")
+        computed = {
+            "x-amz-checksum-sha256":
+                base64.b64encode(full["sha256"].digest()).decode("ascii"),
+            "x-amz-checksum-sha1":
+                base64.b64encode(full["sha1"].digest()).decode("ascii"),
+            "x-amz-checksum-crc32": _crc_value(
+                crc32_state & 0xffffffff, part_crc32, 4, "crc32"),
+            "x-amz-checksum-crc32c": _crc_value(
+                crc32c_state & 0xffffffff, part_crc32c, 4, "crc32c"),
+            "x-amz-checksum-crc64nvme": _crc_value(
+                crc64_state, part_crc64, 8, "crc64nvme"),
+        }
+        for name, declared in declared_checksums.items():
+            actual = computed.get(name)
+            if actual is None or not hmac.compare_digest(declared, actual):
+                raise MultipartError(
+                    "BadDigest", f"Completion {name} checksum mismatch")
+        composite_checksum = computed.get("x-amz-checksum-sha256")
     finished = await mpu.complete(
         upload_id, bucket, key, owner, selected, engine,
         expected_generation=(
@@ -1771,7 +1897,6 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
         if request.headers.get(condition) is not None and condition not in signed_headers:
             raise SigV4Error("AccessDenied", "Copy precondition must be signed")
     unsupported_headers = (
-        "x-amz-copy-source-range",
         "x-amz-server-side-encryption", "x-amz-storage-class",
     )
     if any(request.headers.get(name) is not None for name in unsupported_headers):
@@ -1898,6 +2023,61 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
     async for block in request.stream():
         if block:
             return _error("InvalidRequest", "CopyObject request must have no body", 400)
+    # A ranged copy-source stages REAL bytes: the destination is a new
+    # payload sliced out of the source (exactly like UploadPartCopy),
+    # never a metadata alias. AWS ranges are inclusive.
+    copy_range = request.headers.get("x-amz-copy-source-range")
+    if copy_range is not None:
+        if "x-amz-copy-source-range" not in signed_headers:
+            raise SigV4Error("AccessDenied", "Copy-source range must be signed")
+        match = re.fullmatch(r"bytes=(\d+)-(\d+)", copy_range.strip())
+        if match is None:
+            return _error("InvalidArgument",
+                          "CopySourceRange must be bytes=first-last", 400)
+        range_start, range_end = int(match.group(1)), int(match.group(2))
+        if (range_start > range_end or range_start < 0
+                or range_end >= max(source_item.size, 1)):
+            return _error("InvalidRange",
+                          "Copy-source range is outside the object", 416)
+        scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+        _secure_mkdir(scratch)
+        fd, name = tempfile.mkstemp(prefix="s3-copyrange-", dir=scratch)
+        stage = Path(name)
+        try:
+            os.close(fd)
+            transport = storage_transport(ctx.db)
+            await transport.verify_target()
+            engine = TelegramObjectStorage(
+                catalog.manifests, transport,
+                chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+            )
+            with open(stage, "wb") as out:
+                async for piece in engine.iter_bytes(
+                        source_item.id, start=range_start,
+                        end=range_end + 1):
+                    out.write(piece)
+            item = await engine.put_file(bucket, key, stage, dedup=False)
+            if metadata_directive == "REPLACE" and copy_properties:
+                ObjectMetadataStore(catalog).attach_uncommitted(
+                    item.id, copy_properties)
+            if tag_directive == "REPLACE" and inline_tags:
+                ObjectTagStore(catalog).attach_uncommitted(item.id, inline_tags)
+            try:
+                catalog.publish(item.id, now=int(time.time()))
+            except ValueError as exc:
+                return _error("OperationAborted",
+                              "Concurrent destination mutation", 409)
+            copied = ET.Element("CopyObjectResult", xmlns=NAMESPACE)
+            ET.SubElement(copied, "LastModified").text = time.strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()
+            )
+            ET.SubElement(copied, "ETag").text = '"' + MultipartStore(
+                catalog).object_etag(item.id, item.sha256) + '"'
+            return Response(
+                ET.tostring(copied, encoding="utf-8", xml_declaration=True),
+                media_type="application/xml", status_code=200)
+        finally:
+            stage.unlink(missing_ok=True)
     try:
         result = copy_object(
             catalog, src_bucket, src_key, bucket, key,
@@ -2304,7 +2484,8 @@ async def _handle(request: Request):
         )
         if is_version_listing and any(
             item not in {"versions", "prefix", "max-keys", "key-marker",
-                         "version-id-marker"} and not item.startswith("X-Amz-")
+                         "version-id-marker", "delimiter", "encoding-type"}
+            and not item.startswith("X-Amz-")
             for item in request.query_params
         ):
             return _error("NotImplemented", "Unsupported ListObjectVersions parameter", 501)

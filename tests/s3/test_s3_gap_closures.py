@@ -108,6 +108,91 @@ def test_copy_object_date_conditions(service):
     assert b"InvalidArgument" in malformed.content
 
 
+def test_list_object_versions_delimiter_and_encoding(service):
+    assert signed(service, "PUT", "/owner-bucket").status_code == 200
+    assert signed(service, "PUT", "/owner-bucket/logs/app/1.bin", b"one"
+                  ).status_code == 200
+    assert signed(service, "PUT", "/owner-bucket/logs/app/2.bin", b"two"
+                  ).status_code == 200
+    assert signed(service, "PUT", "/owner-bucket/readme.txt", b"rm"
+                  ).status_code == 200
+
+    # No delimiter: raw version entries for every key.
+    plain = signed(service, "GET", "/owner-bucket?versions")
+    assert plain.status_code == 200
+    body = plain.content
+    assert b"<Version>" in body and b"readme.txt" in body
+    assert b"CommonPrefixes" not in body
+
+    # Delimiter groups the logs/ keys into one CommonPrefixes entry.
+    grouped = signed(service, "GET", "/owner-bucket?versions&delimiter=%2F")
+    assert grouped.status_code == 200, grouped.text
+    gbody = grouped.content
+    assert gbody.count(b"<CommonPrefixes>") == 1
+    assert b"logs/" in gbody
+    assert b"logs/app/1.bin" not in gbody  # collapsed into the prefix
+    assert b"readme.txt" in gbody  # non-grouped keys stay as versions
+
+    # The common prefix counts against max-keys: budget of 1 = the
+    # prefix alone, truncated, with NextKeyMarker pointing at it.
+    tight = signed(service, "GET", "/owner-bucket?versions&delimiter=%2F&max-keys=1")
+    assert tight.status_code == 200
+    tbody = tight.content
+    assert b"IsTruncated>true<" in tbody
+    assert b"logs/" in tbody and b"readme.txt" not in tbody
+
+    # encoding-type=url percent-encodes keys and prefixes inside XML.
+    encoded = signed(service,
+                     "GET", "/owner-bucket?versions&delimiter=%2F&encoding-type=url")
+    assert encoded.status_code == 200
+    assert b"readme.txt" in encoded.content  # ASCII unchanged
+    assert b"<EncodingType>url<" in encoded.content
+
+    # Invalid encoding values fail closed.
+    bad = signed(service, "GET", "/owner-bucket?versions&encoding-type=xml")
+    assert bad.status_code == 400
+    assert b"InvalidArgument" in bad.content
+
+
+def test_ranged_copy_object_stages_new_bytes(service):
+    assert signed(service, "PUT", "/backup-bucket").status_code == 200
+    payload = bytes(range(256)) * 64  # 16 KiB deterministic payload
+    assert signed(service, "PUT", "/backup-bucket/ranged-src.bin", payload
+                  ).status_code == 200
+    # Inclusive range 100..299 → bytes[100:300].
+    result = signed(service, "PUT", "/backup-bucket/ranged-dst.bin", b"",
+                    extra_headers={
+                        "x-amz-copy-source": "/backup-bucket/ranged-src.bin",
+                        "x-amz-copy-source-range": "bytes=100-299"})
+    assert result.status_code == 200, result.text
+    downloaded = signed(service, "GET", "/backup-bucket/ranged-dst.bin")
+    assert downloaded.status_code == 200
+    assert downloaded.content == payload[100:300]
+    assert downloaded.headers["content-length"] == "200"
+
+    # Out-of-range slices fail closed with 416 and never create the key.
+    beyond = signed(service, "PUT", "/backup-bucket/ranged-bad.bin", b"",
+                    extra_headers={
+                        "x-amz-copy-source": "/backup-bucket/ranged-src.bin",
+                        "x-amz-copy-source-range": "bytes=0-999999"})
+    assert beyond.status_code == 416
+    assert b"InvalidRange" in beyond.content
+    assert signed(service, "HEAD", "/backup-bucket/ranged-bad.bin"
+                  ).status_code == 404
+
+    # Malformed ranges are InvalidArgument, never silently ignored.
+    malformed = signed(service, "PUT", "/backup-bucket/ranged-bad2.bin", b"",
+                       extra_headers={
+                           "x-amz-copy-source": "/backup-bucket/ranged-src.bin",
+                           "x-amz-copy-source-range": "bytes=5-"})
+    assert malformed.status_code == 400
+    assert b"InvalidArgument" in malformed.content
+
+    # The source object is untouched by the ranged copy.
+    source = signed(service, "GET", "/backup-bucket/ranged-src.bin")
+    assert source.content == payload
+
+
 def test_complete_multipart_composite_checksum_and_part_digests(service):
     assert signed(service, "PUT", "/backup-bucket").status_code == 200
 
@@ -174,14 +259,64 @@ def test_complete_multipart_composite_checksum_and_part_digests(service):
     assert bad_part.status_code == 400
     assert b"BadDigest" in bad_part.content
 
-    # FULL_OBJECT cannot be verified without streaming: honest 501.
+    # FULL_OBJECT: one streaming pass verifies the assembled digest.
     upload4 = begin(service, "comp4.bin")
     a4 = part(service, upload4, 1, b"f" * (5 * 1024 * 1024), key="comp4.bin")
-    unsupported = _complete(upload4, [(1, a4)], "comp4.bin", {
-        "x-amz-checksum-sha256": composite,
+    full_payload = b"f" * (5 * 1024 * 1024)
+    full_sha = base64.b64encode(
+        hashlib.sha256(full_payload).digest()).decode("ascii")
+    full_ok = _complete(upload4, [(1, a4)], "comp4.bin", {
+        "x-amz-checksum-sha256": full_sha,
         "x-amz-checksum-type": "FULL_OBJECT"})
-    assert unsupported.status_code == 501
-    assert b"NotImplemented" in unsupported.content
+    assert full_ok.status_code == 200, full_ok.text
+    assert full_sha.encode() in full_ok.content
+
+    # FULL_OBJECT with a wrong digest is rejected before publication.
+    upload6 = begin(service, "comp6.bin")
+    a6 = part(service, upload6, 1, b"f" * (5 * 1024 * 1024), key="comp6.bin")
+    full_bad = _complete(upload6, [(1, a6)], "comp6.bin", {
+        "x-amz-checksum-sha256": base64.b64encode(b"0" * 32).decode("ascii"),
+        "x-amz-checksum-type": "FULL_OBJECT"})
+    assert full_bad.status_code == 400
+    assert b"BadDigest" in full_bad.content
+
+    # FULL_OBJECT works for non-SHA algorithms too (same streaming pass).
+    import zlib as _zlib
+    upload7 = begin(service, "comp7.bin")
+    a7 = part(service, upload7, 1, b"f" * (5 * 1024 * 1024), key="comp7.bin")
+    b7 = part(service, upload7, 2, b"s" * 4096, key="comp7.bin")
+    full_crc32 = base64.b64encode((_zlib.crc32(
+        b"f" * (5 * 1024 * 1024) + b"s" * 4096) & 0xffffffff)
+        .to_bytes(4, "big")).decode("ascii")
+    crc_ok = _complete(upload7, [(1, a7), (2, b7)], "comp7.bin", {
+        "x-amz-checksum-crc32": full_crc32,
+        "x-amz-checksum-type": "FULL_OBJECT"})
+    assert crc_ok.status_code == 200, crc_ok.text
+
+    # Non-SHA COMPOSITE: CRC32 over the concatenated little-endian
+    # per-part CRC32s.
+    upload8 = begin(service, "comp8.bin")
+    a8 = part(service, upload8, 1, b"f" * (5 * 1024 * 1024), key="comp8.bin")
+    b8 = part(service, upload8, 2, b"s" * 4096, key="comp8.bin")
+    part_one_crc = _zlib.crc32(b"f" * (5 * 1024 * 1024)) & 0xffffffff
+    part_two_crc = _zlib.crc32(b"s" * 4096) & 0xffffffff
+    composite_crc = _zlib.crc32(
+        part_one_crc.to_bytes(4, "little") + part_two_crc.to_bytes(4, "little")
+    ) & 0xffffffff
+    comp_crc = base64.b64encode(
+        composite_crc.to_bytes(4, "big")).decode("ascii")
+    crc_composite = _complete(upload8, [(1, a8), (2, b8)], "comp8.bin", {
+        "x-amz-checksum-crc32": comp_crc,
+        "x-amz-checksum-type": "COMPOSITE"})
+    assert crc_composite.status_code == 200, crc_composite.text
+
+    # Non-SHA without an explicit checksum-type fails closed.
+    upload9 = begin(service, "comp9.bin")
+    a9 = part(service, upload9, 1, b"f" * (5 * 1024 * 1024), key="comp9.bin")
+    missing_type = _complete(upload9, [(1, a9)], "comp9.bin", {
+        "x-amz-checksum-crc32": full_crc32})
+    assert missing_type.status_code == 400
+    assert b"InvalidArgument" in missing_type.content
 
     # A correct part checksum completes normally.
     upload5 = begin(service, "comp5.bin")

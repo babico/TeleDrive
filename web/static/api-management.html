@@ -54,6 +54,23 @@ tailwind.config = {
   pre{white-space:pre-wrap;word-break:break-all;background:#0f172a;border:1px solid #1f2937;padding:12px;border-radius:8px;font-size:12px;max-height:300px;overflow:auto}
   h3{font-size:16px;font-weight:600;color:#f3f4f6;margin:0 0 4px}
   h4{font-size:13px;font-weight:600;color:#9ca3af;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.05em}
+  .badge-amber{background:#78350f;color:#fcd34d}
+  .chip{display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#1f2937;border:1px solid #374151;color:#9ca3af;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .m-method{display:inline-block;min-width:44px;text-align:center;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.03em}
+  .m-get{background:#064e3b;color:#6ee7b7}
+  .m-post{background:#1e3a8a;color:#93c5fd}
+  .m-put{background:#78350f;color:#fcd34d}
+  .m-delete{background:#7f1d1d;color:#fca5a5}
+  .m-head{background:#374151;color:#d1d5db}
+  .perm-group{border:1px solid #1f2937;border-radius:8px;margin-bottom:6px;overflow:hidden}
+  .perm-group-head{display:flex;align-items:center;gap:8px;padding:8px 10px;background:#0f172a;cursor:default}
+  .perm-group-title{flex:1;text-align:left;background:transparent;border:none;color:#e5e7eb;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer;padding:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .perm-group-title:hover{color:#818cf8}
+  .perm-caret{color:#6b7280;font-size:11px}
+  .perm-item{display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;cursor:pointer;border-top:1px solid #111827}
+  .perm-item:hover{background:#0f172a}
+  .perm-item .font-mono{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .secret-callout{border-color:#78350f;background:linear-gradient(180deg,#1c1408,#111827)}
 </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()">
@@ -96,67 +113,145 @@ tailwind.config = {
 </header>
 
 <main class="flex-1 overflow-y-auto px-6 py-6">
-<section class="space-y-4">
-  <div class="card">
-    <h3>REST API access keys</h3>
-    <p class="muted">Keys are stored hashed. Secret values shown once.</p>
-    <div class="grid grid-cols-2 gap-3 mt-3">
-      <div class="field"><label>Key name</label><input x-model="newKeyName" class="input" placeholder="Backup client"></div>
-      <div class="field"><label>Expiry (optional, UTC)</label><input x-model="newKeyExpiry" class="input" type="datetime-local"></div>
+<section class="space-y-4" style="max-width:1100px">
+  <div class="flex items-start justify-between gap-4 flex-wrap">
+    <div>
+      <h3>REST API keys</h3>
+      <p class="muted">Bearer keys for the REST API. Secrets are stored hashed and shown exactly once — every key is scoped to individual endpoints.</p>
     </div>
-    <div class="field mt-2"><label>Permissions — per endpoint</label>
-      <p class="muted text-xs mb-2">Every REST endpoint is individually permissionable. Legacy grouped scopes on existing keys keep working; category shortcuts just toggle all their endpoints.</p>
-      <div class="row mb-2">
-        <button class="btn btn-sm" @click="toggleAllEndpoints(true)">Select all</button>
-        <button class="btn btn-sm" @click="toggleAllEndpoints(false)">Clear</button>
-        <template x-for="(perms, cat) in endpointCategories" :key="cat">
-          <button class="btn btn-sm" @click="toggleEndpointCategory(cat)" x-text="(cat + ': ' + (categoryFullySelected(cat) ? '✓' : 'select'))"></button>
-        </template>
+    <button class="btn btn-primary" x-show="isAdmin && !createOpen" @click="createOpen=true">+ Generate new key</button>
+  </div>
+
+  <!-- Create panel -->
+  <div class="card" x-show="createOpen" x-cloak>
+    <div class="flex items-center justify-between">
+      <h3>Generate new key</h3>
+      <button class="btn btn-ghost btn-sm" @click="createOpen=false">Cancel</button>
+    </div>
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="field"><label>Key name</label>
+        <input x-model="newKeyName" class="input" placeholder="e.g. Backup client, rclone on nas">
       </div>
-      <div class="scroll mt-1" style="max-height:420px">
-        <template x-for="p in endpointPermissions" :key="p.name">
-          <label class="flex items-center gap-2 text-xs"><input type="checkbox" :value="p.name" x-model="selectedScopes"> <span class="font-mono" x-text="p.name"></span> <span class="muted" x-show="p.description" x-text="p.description"></span></label>
-        </template>
-      </div>
-      <details class="mt-2">
-        <summary class="muted text-xs cursor-pointer">Legacy grouped scopes (compat)</summary>
-        <div class="grid grid-cols-3 gap-1 mt-1">
-          <template x-for="s in legacyScopes" :key="s.name">
-            <label class="flex items-center gap-2 text-xs" :title="'Expands to: ' + (s.expands_to.length ? s.expands_to.join(', ') : 'no REST endpoint yet')"><input type="checkbox" :value="s.name" x-model="selectedScopes"> <span x-text="s.name"></span></label>
+      <div class="field"><label>Expires</label>
+        <div class="flex gap-2 flex-wrap">
+          <template x-for="opt in [{d:7,l:'7 days'},{d:30,l:'30 days'},{d:90,l:'90 days'},{d:365,l:'1 year'},{d:0,l:'Never'}]" :key="opt.d">
+            <button class="btn btn-sm" :class="newKeyExpiryPreset===opt.d?'btn-primary':''" @click="newKeyExpiryPreset=opt.d" x-text="opt.l"></button>
           </template>
+          <button class="btn btn-sm" :class="newKeyExpiryPreset==='custom'?'btn-primary':''" @click="newKeyExpiryPreset='custom'">Custom…</button>
         </div>
-      </details>
+        <input x-show="newKeyExpiryPreset==='custom'" x-model="newKeyExpiry" class="input mt-2" type="datetime-local">
+      </div>
+    </div>
+    <div class="field mt-2">
+      <label>Permissions <span class="badge badge-blue ml-1" x-text="selectedScopes.length + ' selected'"></span></label>
+      <p class="muted text-xs mb-2">Grant exactly the endpoints this key needs — nothing more. Search by method, path or description.</p>
+      <input x-model="permSearch" class="input" placeholder="Search endpoints… (e.g. buckets, GET, admin/storage)">
+      <div class="scroll mt-2" style="max-height:380px">
+        <template x-for="(perms, cat) in endpointCategories" :key="cat">
+          <div class="perm-group" x-show="categoryMatches(cat)">
+            <div class="perm-group-head">
+              <input type="checkbox" :checked="categoryFullySelected(cat)" @change="toggleEndpointCategory(cat)">
+              <button class="perm-group-title" @click="toggleCatOpen(cat)" x-text="cat"></button>
+              <span class="muted text-xs" x-text="countSelected(perms) + '/' + perms.length"></span>
+              <span class="perm-caret" x-text="catOpen[cat] ? '▾' : '▸'"></span>
+            </div>
+            <div x-show="catOpen[cat] || permSearch">
+              <template x-for="p in endpointsIn(cat)" :key="p.name">
+                <label class="perm-item" x-show="permMatches(p)">
+                  <input type="checkbox" :value="p.name" x-model="selectedScopes">
+                  <span class="m-method" :class="'m-' + p.method.toLowerCase()" x-text="p.method"></span>
+                  <span class="font-mono text-xs text-gray-200" x-text="p.path"></span>
+                  <span class="muted text-xs" x-show="p.description" x-text="p.description"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+        </template>
+        <details class="mt-3">
+          <summary class="muted text-xs cursor-pointer">Legacy grouped scopes (compat)</summary>
+          <div class="grid grid-cols-3 gap-1 mt-2">
+            <template x-for="s in legacyScopes" :key="s.name">
+              <label class="flex items-center gap-2 text-xs" :title="'Expands to: ' + (s.expands_to.length ? s.expands_to.join(', ') : 'no REST endpoint yet')"><input type="checkbox" :value="s.name" x-model="selectedScopes"> <span x-text="s.name"></span></label>
+            </template>
+          </div>
+        </details>
+      </div>
+      <p class="muted text-xs mt-1" x-show="!permSearch && !Object.keys(endpointCategories).length">Loading endpoint catalog…</p>
     </div>
     <div class="row mt-3">
-      <button class="btn btn-primary btn-sm" x-show="isAdmin" @click="createKey()">Create API key</button>
-      <button class="btn btn-sm" @click="refreshKeys()">Refresh</button>
-    </div>
-    <div class="mt-3" x-show="createdKey">
-      <div class="card bg-gray-900">
-        <b class="text-amber-400">New API key — copy now; it will not be shown again</b>
-        <div class="field mt-2"><label>Access Key ID</label><input class="input" :value="createdKey.prefix+'…'" readonly></div>
-        <div class="field"><label>Secret</label><input class="input" :value="createdKey.token" readonly></div>
-        <button class="btn btn-sm mt-2" @click="copyText(createdKey.token)">Copy secret</button>
-      </div>
-    </div>
-    <div class="scroll mt-3">
-      <table><thead><tr><th>Name</th><th>Prefix</th><th>Permissions</th><th>Created</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody><template x-for="k in apiKeys" :key="k.id"><tr>
-        <td x-text="k.name"></td><td x-text="k.prefix+'…'"></td><td x-text="(k.scopes||[]).join(', ')"></td>
-        <td x-text="fmtTs(k.created_at)"></td><td x-text="k.revoked?'Revoked':'Active'"></td>
-        <td><button class="btn btn-danger btn-sm" x-show="isAdmin" @click="revokeKey(k.id)">Revoke</button></td>
-      </tr></template></tbody></table>
+      <button class="btn btn-primary" x-show="isAdmin" @click="createKey()">Create key</button>
+      <button class="btn" @click="createOpen=false">Cancel</button>
     </div>
   </div>
+
+  <!-- Secret reveal: shown once -->
+  <div class="card secret-callout" x-show="createdKey" x-cloak>
+    <div class="flex items-center gap-2">
+      <span class="text-amber-400 font-bold">⚠ Secret created — copy it now</span>
+    </div>
+    <p class="muted text-xs mt-1">This is the only time the full secret is shown. It is stored hashed and cannot be recovered.</p>
+    <div class="grid md:grid-cols-2 gap-3 mt-3">
+      <div class="field"><label>Key ID (prefix)</label>
+        <div class="flex gap-2"><input class="input font-mono" :value="createdKey.prefix+'…'" readonly><button class="btn btn-sm" @click="copyText(createdKey.prefix)">Copy</button></div>
+      </div>
+      <div class="field"><label>Secret token</label>
+        <div class="flex gap-2"><input class="input font-mono" :value="createdKey.token" readonly><button class="btn btn-sm" @click="copyText(createdKey.token)">Copy</button></div>
+      </div>
+    </div>
+    <p class="muted text-xs mt-1">Use it as <code>Authorization: Bearer &lt;token&gt;</code>. Writes also need the <code>X-TeleDrive-CSRF: 1</code> header.</p>
+    <button class="btn btn-primary btn-sm mt-2" @click="createdKey=null; createOpen=false">Done — I saved the secret</button>
+  </div>
+
+  <!-- Keys table -->
+  <div class="card">
+    <div class="flex items-center justify-between">
+      <h3>Keys</h3>
+      <button class="btn btn-sm btn-ghost" @click="refreshKeys()">Refresh</button>
+    </div>
+    <div class="scroll mt-3">
+      <table><thead><tr><th>Name</th><th>Permissions</th><th>Created</th><th>Last used</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody><template x-for="k in apiKeys" :key="k.id"><tr :class="k.revoked?'opacity-50':''">
+        <td>
+          <div x-text="k.name"></div>
+          <div class="font-mono text-xs muted" x-text="k.prefix+'…'"></div>
+        </td>
+        <td>
+          <div class="flex flex-wrap gap-1" style="max-width:340px">
+            <template x-for="s in (k.scopes||[]).slice(0,3)" :key="s">
+              <span class="chip" :title="s" x-text="s"></span>
+            </template>
+            <span class="chip" x-show="(k.scopes||[]).length>3" :title="(k.scopes||[]).join('\n')" x-text="'+' + ((k.scopes||[]).length-3) + ' more'"></span>
+          </div>
+        </td>
+        <td><span :title="fmtTs(k.created_at)" x-text="fmtRel(k.created_at)"></span></td>
+        <td><span :title="k.last_used_at?fmtTs(k.last_used_at):''" x-text="k.last_used_at?fmtRel(k.last_used_at):'never'"></span></td>
+        <td>
+          <span class="badge badge-amber" x-show="keyExpired(k) && !k.revoked">expired</span>
+          <span x-show="!keyExpired(k)" :title="k.expires_at?fmtTs(k.expires_at):''" x-text="k.expires_at?fmtRel(k.expires_at):'never'"></span>
+        </td>
+        <td>
+          <span class="badge" :class="k.revoked?'badge-gray':(keyExpired(k)?'badge-amber':'badge-green')" x-text="k.revoked?'revoked':(keyExpired(k)?'expired':'active')"></span>
+        </td>
+        <td>
+          <div class="flex gap-1">
+            <button class="btn btn-sm" x-show="isAdmin && !k.revoked" @click="rotateKey(k.id)">Rotate</button>
+            <button class="btn btn-danger btn-sm" x-show="isAdmin && !k.revoked" @click="revokeKey(k.id)">Revoke</button>
+          </div>
+        </td>
+      </tr></template></tbody></table>
+    </div>
+    <p class="muted text-xs mt-2" x-show="!apiKeys.length">No keys yet. Generate one to grant programmatic access to specific endpoints.</p>
+  </div>
+
   <div class="card">
     <h3>Documentation</h3>
-    <div class="space-y-2 text-sm">
+    <div class="grid md:grid-cols-3 gap-2 text-sm mt-2">
       <div><a class="text-brand-400 hover:underline" href="/docs" target="_blank">Interactive API reference (Swagger UI)</a></div>
       <div><a class="text-brand-400 hover:underline" href="/redoc" target="_blank">API reference (ReDoc)</a></div>
-      <div><a class="text-brand-400 hover:underline" href="/openapi.json" target="_blank">OpenAPI 3 schema (openapi.json)</a></div>
+      <div><a class="text-brand-400 hover:underline" href="/openapi.json" target="_blank">OpenAPI 3 schema</a></div>
       <div><a class="text-brand-400 hover:underline" href="https://github.com/babico/TeleDrive/tree/main/docs" target="_blank">Project docs (GitHub)</a></div>
       <div><a class="text-brand-400 hover:underline" href="https://github.com/babico/TeleDrive/blob/main/docs/S3_SPECS.md" target="_blank">S3 compatibility matrix</a></div>
-      <div><a class="text-brand-400 hover:underline" href="https://github.com/babico/TeleDrive/blob/main/docs/REVERSE_PROXY.md" target="_blank">Reverse proxy guide (nginx / Caddy / Traefik, TLS, SigV4)</a></div>
+      <div><a class="text-brand-400 hover:underline" href="https://github.com/babico/TeleDrive/blob/main/docs/REVERSE_PROXY.md" target="_blank">Reverse proxy guide</a></div>
     </div>
     <p class="muted text-xs mt-3">REST API keys authenticate with an <code>Authorization: Bearer</code> header; S3 credentials sign SigV4 requests against the S3 port. Sessions use the httpOnly cookie set at login.</p>
   </div>

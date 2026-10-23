@@ -80,10 +80,13 @@ def test_version_listing_cursor_prefix_and_invalid_marker(service):
     for query in (
         "?versions&max-keys=0", "?versions&version-id-marker=missing",
         "?versions&key-marker=a.bin&version-id-marker=missing",
-        "?versions&versions", "?versions&delimiter=/",
+        "?versions&versions", "?versions&encoding-type=xml",
     ):
         denied = signed(service, "GET", "/backup-bucket" + query)
         assert denied.status_code in (400, 501), denied.text
+    # Delimiter grouping is now a supported selector.
+    grouped = signed(service, "GET", "/backup-bucket?versions&delimiter=%2F")
+    assert grouped.status_code == 200
 
 
 def test_version_listing_revocation_and_unlink_preserve_remote_bytes(service):

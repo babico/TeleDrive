@@ -432,11 +432,34 @@ come from simply authorizing more accounts.
       SHA-256 validation from staged part digests + per-part
       ChecksumSHA256 verification + checksum echo in the result XML;
       UploadPart's stale spec row corrected (CRC64NVME was already
-      verified). Inventory now 16 supported / 40 partial (3 by code,
-      37 by design) / 60 unsupported. Remaining by-code gaps:
-      ListObjectVersions delimiter/encoding-type selectors, presigned
-      and ranged CopyObject, CompleteMultipartUpload FULL_OBJECT and
-      non-SHA composite modes.
+      verified).
+- [x] **By-code partial closures (round 2)** DONE: ListObjectVersions
+      delimiter grouping (CommonPrefixes share the max-keys budget
+      exactly like AWS, NextKeyMarker carries the cut) and
+      encoding-type=url — now fully SUPPORTED; CopyObject inclusive
+      ranged copy-source (bytes=first-last, 416 InvalidRange,
+      destination staged as a NEW payload through Telegram with
+      REPLACE metadata/tags applied on publish); CompleteMultipartUpload
+      FULL_OBJECT checksums (SHA-256/SHA-1/CRC32/CRC32C/CRC64NVME over
+      the assembled bytes in one streaming pass) and non-SHA COMPOSITE
+      modes (CRCs from concatenated little-endian per-part values) —
+      now fully SUPPORTED. Non-SHA declarations require an explicit
+      x-amz-checksum-type. Inventory: 18 supported / 38 partial (1 by
+      code, 37 by design) / 60 unsupported. Sole remaining by-code gap:
+      presigned CopyObject.
+- [x] **API management + S3 credentials page redesign** DONE (owner
+      feedback: the pages looked terrible). Both pages rebuilt on the
+      GitHub/Stripe token-page pattern: create flows hidden behind a
+      Generate button; expiry PRESETS (7d/30d/90d/1y/never/custom);
+      permission pickers as grouped collapsible cards with per-group
+      tri-state toggles, selected counters and (API page) a search box
+      filtering by method/path/description; HTTP METHOD chips (GET
+      green, POST blue, PUT amber, DELETE red); key tables show
+      permission chips with +N overflow, relative timestamps, expiry
+      and status badges (active/expired/revoked), last-used; secret
+      reveals are amber callouts with separate copy buttons and an
+      explicit "Done — I saved it" dismissal; REST keys gained a
+      Rotate action (backend existed, UI did not expose it).
 - [x] **Research: ACL-style grants through S3 credentials** DONE —
       design documented in the spec's P2-C group. Grantee
       CanonicalUser maps to an S3 access key's owner identity; bucket/

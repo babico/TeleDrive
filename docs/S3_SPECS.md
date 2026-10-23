@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 16 supported, 40 partial (3 by code, 37 by design), 60 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 18 supported, 38 partial (1 by code, 37 by design), 60 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -85,6 +85,8 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [ListObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html) | ✅ Supported | V1 listing with per-object `Owner` in `Contents` (deployment owner identity, as AWS V1 always includes), prefix, delimiter, marker, CommonPrefixes, encoding-type=url, bounded max-keys and NextMarker continuation (including CommonPrefix markers). |
 | [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html) | ✅ Supported | V2 listing with `fetch-owner` controlling the per-object `Owner` element, HMAC-scoped continuation, start-after, prefix, delimiter, CommonPrefixes, encoding-type=url, KeyCount and bounded max-keys. |
 | [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | ✅ Supported | 1–10,000 part numbers, configured part-size bound, aws-chunked streaming part bodies with the same decoder and trailer verification as PutObject, and every supplied checksum verified before any Telegram send: SHA-256, Content-MD5, SHA-1, CRC32, CRC32C and CRC64NVME. |
+| [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) | ✅ Supported | Published versions and delete markers, prefix filtering, max-keys, key-marker/version-id-marker keyset pagination, delimiter grouping into CommonPrefixes (versions and prefixes share the max-keys budget exactly like AWS, NextKeyMarker carries the cut) and encoding-type=url. |
+| [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | ✅ Supported | Fenced, zero-reupload staged-part publication. Per-part `ChecksumSHA256` verification; COMPOSITE checksums (SHA-256 from staged part digests; CRC32/CRC32C/CRC64NVME from concatenated little-endian per-part values in one streaming pass) and FULL_OBJECT checksums (SHA-256/SHA-1/CRC32/CRC32C/CRC64NVME over the assembled bytes); the verified checksum is echoed in the result XML. Non-SHA declarations require an explicit x-amz-checksum-type. |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -92,9 +94,7 @@ These are ordinary missing features; nothing architectural blocks them.
 
 | AWS S3 API operation | Status | Gap class | Remaining gap | Current scope |
 | --- | --- | --- | --- | --- |
-| [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) | 🟡 Partial | by code | Several AWS version-listing selectors (delimiter, encoding-type) are not implemented. | Published versions and delete markers, prefix filtering, max-keys, key-marker/version-id-marker keyset pagination. |
-| [CopyObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html) | 🟡 Partial | by code | No presigned CopyObject and no ranged copy-source. | Catalog-local source/version copy, metadata/tag directives, ETag source preconditions and date-based copy-source conditions (if-(un)modified-since with AWS precedence: a passing ETag condition overrides the contradicting date condition). |
-| [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | 🟡 Partial | by code | Only SHA-256 completion checksums are verified; FULL_OBJECT completion checksums and non-SHA composite modes are rejected (501) rather than acknowledged unverified. | Fenced, zero-reupload staged-part publication with per-part `ChecksumSHA256` verification, COMPOSITE `x-amz-checksum-sha256` validation from staged part digests and the verified checksum echoed in the result XML. |
+| [CopyObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html) | 🟡 Partial | by code | No presigned CopyObject. | Catalog-local source/version copy, metadata/tag directives, ETag source preconditions, date-based copy-source conditions (if-(un)modified-since with AWS precedence), and inclusive ranged copy-source (`bytes=first-last`, 416 on out-of-range): the destination is staged as a NEW payload through Telegram exactly like UploadPartCopy, with REPLACE metadata/tags applied on publish. |
 
 ### 3.3 Partial — by design (fail-closed architecture)
 
@@ -236,7 +236,7 @@ Support copy-part source ranges, signing and ownership, checksum composition and
 **Status:** no unsupported operations remain in this group — UploadPartCopy
 (inclusive copy-source ranges) shipped and the remaining protocol gaps
 (trailer checksum composition on completion, version-listing selectors)
-are tracked as by-code partials in section 3.2.
+— only presigned CopyObject remains, tracked as a by-code partial in section 3.2.
 
 ### P2-F — Website, notifications and access logging
 

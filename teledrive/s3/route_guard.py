@@ -22,6 +22,7 @@ _BUCKET_GET_V2 = frozenset({
 })
 _BUCKET_GET_VERSIONS = frozenset({
     "versions", "prefix", "max-keys", "key-marker", "version-id-marker",
+    "delimiter", "encoding-type",
 })
 _BUCKET_GET_MULTIPART = frozenset({
     "uploads", "prefix", "delimiter", "encoding-type",

@@ -18,7 +18,7 @@
 
 **Published release:** [v1.0.7](https://github.com/babico/TeleDrive/releases/tag/v1.0.7), source SHA `747747652cd1ca36878453d49daf627d8c0a60ad`. Published release contents are not automatically updated when new development commits reach `main`. Release notes and binaries belong on [GitHub Releases](https://github.com/babico/TeleDrive/releases), not in a separate per-version Markdown file.
 
-**Current CI audit (2026-10-23):** the seven workflows on `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0` produced six successes and **one failure** (CI 2 · Integration). The failure was an obsolete environment-variable test expecting HTTP 503 instead of the actual HTTP 422 outside-root rejection; it does not demonstrate data corruption. This is being corrected in regression tests. Earlier nine-workflow baseline `c2b76880b4ada3d61d47a7926ea819244047fa33` passed under the now-retired Bot/Desktop architecture. Do not infer success on newer revisions; check [exact-SHA Actions](https://github.com/babico/TeleDrive/actions).
+**Current CI audit (2026-10-23):** the six automatic workflows on `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0` produced five successes and **one failure** (CI 2 · Integration). The failure was an obsolete environment-variable test expecting HTTP 503 instead of the actual HTTP 422 outside-root rejection; it does not demonstrate data corruption. This is being corrected in regression tests. Earlier nine-workflow baseline `c2b76880b4ada3d61d47a7926ea819244047fa33` passed under the now-retired Bot/Desktop architecture. Do not infer success on newer revisions; check [exact-SHA Actions](https://github.com/babico/TeleDrive/actions).
 
 ### P0: implementation boundaries
 
@@ -194,7 +194,7 @@ Only SQL-only incomplete-multipart lifecycle abort is now supported, applied by 
 - [x] Publish bounded v1.0.7 development milestone with separate release artifacts and evidence.
 - [x] Implement disposable 13-gate Docker validation and distinct live test-channel User/Multiworker workflows (historical Bot exercises retired with the Bot layer).
 - [x] Implement fail-closed recovery guards, owner-proofed isolated one/multi-object rebuild and an offline dual-approval evidence verifier.
-- [x] Verify nine normal workflows on the newer `aa44bd6` development baseline (not the published v1.0.7 SHA). The current matrix has **seven workflows**: Security, REST & S3, Databases, Docker Fault Injection, User MTProto E2E, Multiworker PostgreSQL E2E and the Release Gate. Release packaging now ships the single-container Docker image instead of desktop installers.
+- [x] Verify nine normal workflows on the newer `aa44bd6` development baseline (not the published v1.0.7 SHA). The current matrix has **six automatic workflows**: Security, combined REST/S3 & Databases (two CI jobs within one workflow), Docker Image & Resilience, User MTProto E2E, Multiworker PostgreSQL E2E and the Delivery Gate. The seventh YAML is manual-only endurance/capacity. Release packaging now ships the single-container Docker image instead of desktop installers.
 - [ ] Verify **every required workflow on the exact SHA** of any subsequent release candidate.
 - [x] Native PostgreSQL restore drill performed on 192.168.21.2 (source teledrivetest -> restored teledriverestoredrill): pg_dump -Fc exit 0, pg_restore exit 0, 20 tables + row counts identical, TeleDrive container healthy against restored DB. Evidence in .opencode/teledrive-handoff/progress.md.
 - [ ] Implement and independently rehearse the complete physical GC safety/rollback alternative before authorizing deletion.

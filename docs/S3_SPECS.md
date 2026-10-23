@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 11 supported, 42 partial, 63 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 13 supported, 43 partial (6 by code, 37 by design), 60 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -50,66 +50,105 @@ Each bucket can carry an optional per-bucket quota: a maximum total size in byte
 
 ## 3. Implemented and partially implemented AWS S3 actions
 
-The following operations have a routed implementation. Every qualification in the right column is part of the contract.
+Every qualification below is part of the contract. Partial operations are
+classified by **why** they are partial:
 
-| AWS S3 API operation | Status | Implemented scope / explicit gap |
+- **Partial — by code**: a genuinely closeable gap. The missing piece is
+  implementable within the current architecture; it is tracked work, not a
+  decision. Closing one is a normal feature increment.
+- **Partial — by design**: the "gap" is a deliberate architectural decision —
+  the immutable private-only model, owner-gated physical Telegram deletion,
+  or AWS-external semantics that cannot honestly exist over Telegram.
+  "Implementing" these would mean faking AWS behavior the platform does not
+  have, so they stay fail-closed on purpose.
+
+The [machine-readable manifest](../teledrive/s3/operation_manifest.json)
+carries each partial's `gap_class` and is synchronized with this table by CI.
+
+### 3.1 Supported — the full contract for this deployment class
+
+| AWS S3 API operation | Status | Implemented scope |
 | --- | --- | --- |
 | [CreateBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html) | ✅ Supported | Creates a bucket in the shared catalog; re-creating an existing (owned) bucket is idempotent and answers 200, matching AWS us-east-1 semantics that clients such as rclone rely on during pre-upload bucket preparation. |
 | [HeadBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadBucket.html) | ✅ Supported | Authenticated existence check. |
 | [DeleteBucket](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucket.html) | ✅ Supported | Requires an empty/deletable catalog bucket. |
 | [ListBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html) | ✅ Supported | Private single-region us-east-1 contract: signed GET, creation date, owner ID, 1–10,000 max-buckets, prefix/region filters, HMAC-scoped continuation token and keyset pagination. AWS account quota APIs, multi-region and directory buckets do not exist in TeleDrive. |
 | [GetBucketLocation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLocation.html) | ✅ Supported | Single-region us-east-1 contract: an empty LocationConstraint, exactly as AWS returns it for us-east-1. |
-| [ListObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html) | 🟡 Partial | V1 prefix, delimiter, marker and bounded max-keys. |
-| [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html) | 🟡 Partial | V2 continuation, start-after, prefix, delimiter, encoding-type=url; bounded max-keys. |
-| [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) | 🟡 Partial | Published versions/delete markers; restricted selectors and pagination. |
-| [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) | 🟡 Partial | Size-bounded, checksum-verified upload with metadata/tags and version creation; aws-chunked streaming bodies are decoded and verified (signed chunk-signature chains seeded by the request signature, unsigned-payload trailers with declared checksums, decoded-length accounting). No SSE or Object Lock. |
-| [GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html) | 🟡 Partial | Full, byte-range and selected VersionId reads, ETag/date conditions; no archive or SSE behavior. |
-| [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html) | 🟡 Partial | Basic object metadata and selected VersionId/read preconditions; not all AWS headers. |
-| [DeleteObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html) | 🟡 Partial | Creates logical delete marker or deletes an explicit published VersionId; does not delete Telegram messages. |
-| [DeleteObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html) | 🟡 Partial | Up to 1,000 entries with per-entry VersionId (AWS per-entry Deleted/Error semantics: unknown versions report NoSuchVersion inside a 200 response); no MFA or governance bypass. |
-| [CopyObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html) | 🟡 Partial | Catalog-local source/version copy, directives and ETag conditions; no presigned/range/date-based copy. |
 | [GetObjectAttributes](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAttributes.html) | ✅ Supported | Documented private single-region general-purpose contract: signed ETag, ObjectSize, SHA-256 FULL_OBJECT Checksum, fixed STANDARD StorageClass, published historical VersionId, LastModified header, and immutable completed-multipart ObjectParts (selected part number/size/SHA-256). Supports signed MaxParts 1–1,000, PartNumberMarker 0–10,000, IsTruncated/NextPartNumberMarker and copied version snapshots. Non-MPU objects never fabricate parts; old SQL completion journals are read only and strictly checked. Fails closed on invalid/unsigned inputs and inconsistent history. AWS SSE-C, RequestPayer, directory buckets and provider-managed tiers are outside the TeleDrive contract. |
-| [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | 🟡 Partial | Signed initiation and selected metadata; no SSE/retention/storage-tier variants. |
-| [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | 🟡 Partial | 1–10,000 part numbers, configured part-size bound and selected integrity checks; aws-chunked streaming part bodies use the same decoder and trailer verification as PutObject. |
 | [UploadPartCopy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html) | ✅ Supported | PUT ?uploadId&partNumber with a signed x-amz-copy-source: the source bytes are staged through Telegram exactly like a normal UploadPart (completion physically re-owns chunk rows per part). Inclusive x-amz-copy-source-range slices (signed), part numbers 1–10,000, and signed copy-source preconditions. |
 | [ListParts](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListParts.html) | ✅ Supported | TeleDrive private general-purpose contract: scoped active uploads, SQL-bounded 1–1,000 part pages, part-number marker 0–10,000, sparse/replaced parts, accurate ETag, Size, LastModified, STANDARD StorageClass, IsTruncated/NextPartNumberMarker. Invalid/over-limit cursors and wrong-owner/inactive IDs fail closed without Telegram reads. AWS Owner/Initiator account identities, multipart composite checksums, other tiers/directory buckets remain outside the contract. |
 | [ListMultipartUploads](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListMultipartUploads.html) | ✅ Supported | TeleDrive private general-purpose contract: scoped active sessions, bounded SQL keyset pages 1–1,000, prefix, delimiter/CommonPrefixes, UTF-8 encoding-type=url, same-key UploadId cursors, Initiated/StorageClass and NextKeyMarker/NextUploadIdMarker. Completed, aborted and foreign-owner sessions excluded. AWS billing/requester pays, account ownership identities and directory buckets remain outside scope. |
-| [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | 🟡 Partial | Fenced, zero-reupload staged-part publication; selected SHA-bound requests only. |
-| [AbortMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_AbortMultipartUpload.html) | 🟡 Partial | Logical abort; remote orphan media remains protected pending approved GC. |
 | [GetBucketTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketTagging.html) | ✅ Supported | Reads bucket tags; missing tag set reports NoSuchTagSet. |
 | [PutBucketTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketTagging.html) | ✅ Supported | Full general-purpose private-bucket tagging contract: 0–50 unique tags, 128/256 UTF-16-unit limits, signed checksum-verified XML, atomic replacement and correct HTTP 200; AWS billing/ABAC services not emulated. |
 | [DeleteBucketTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketTagging.html) | ✅ Supported | Removes stored bucket tag set. |
-| [GetObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTagging.html) | 🟡 Partial | Current/published VersionId tags with scoped access. |
-| [PutObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectTagging.html) | 🟡 Partial | Current/published VersionId tags with ownership checks. |
-| [DeleteObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectTagging.html) | 🟡 Partial | Current/published VersionId tags with ownership checks. |
-| [GetBucketCors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketCors.html) | 🟡 Partial | Reads restricted CORS rules (maximum 100 rules). |
-| [PutBucketCors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketCors.html) | 🟡 Partial | Limited 64 KiB XML grammar, origins and allowed methods. |
 | [DeleteBucketCors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketCors.html) | ✅ Supported | Removes CORS configuration. |
-| [GetBucketVersioning](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketVersioning.html) | 🟡 Partial | Always Enabled; not AWS unversioned/suspended states. |
-| [PutBucketVersioning](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketVersioning.html) | 🟡 Partial | Idempotent Enabled only; rejects Suspended and MFADelete. |
-| [GetPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetPublicAccessBlock.html) | 🟡 Partial | Fixed all-four-fields true, no public mode. |
-| [GetBucketPolicyStatus](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicyStatus.html) | 🟡 Partial | Read-only IsPublic=false for the enforced private-only gateway; no bucket policy engine or public ACLs. |
-| [PutPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html) | 🟡 Partial | Accepts only all-four-fields true; cannot weaken privacy. |
-| [GetBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycleConfiguration.html) | 🟡 Partial | Read a private bucket's bounded, prefix-scoped AbortIncompleteMultipartUpload-only rules; no AWS expiration/transition support. |
-| [GetBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycle.html) | 🟡 Partial | Deprecated AWS alias: the same `?lifecycle` GET request, served by the GetBucketLifecycleConfiguration handler with identical semantics. |
-| [PutBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycle.html) | 🟡 Partial | Deprecated AWS alias: the same `?lifecycle` PUT request, served by the PutBucketLifecycleConfiguration handler with identical semantics. |
-| [PutBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycleConfiguration.html) | 🟡 Partial | Signed strict XML; only Disabled/Enabled incomplete multipart abort rules with DaysAfterInitiation 1..3650 and Prefix. |
-| [DeleteBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketLifecycle.html) | 🟡 Partial | Removes SQL configuration; it never deletes an object or Telegram media. |
-| [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | 🟡 Partial | Read-only private canned ACL (caller FULL_CONTROL); every ACL configuration attempt fails closed. |
-| [GetObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAcl.html) | 🟡 Partial | Read-only private canned ACL for an existing current object; no VersionId selector, no ACL writes. |
-| [GetBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketOwnershipControls.html) | 🟡 Partial | Always `BucketOwnerEnforced`; ownership configuration fails closed. |
-| [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | 🟡 Partial | Always 404 `NoSuchBucketPolicy`; policy writes fail closed. |
-| [GetBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketReplication.html) | 🟡 Partial | Always 404 not-configured; replication writes fail closed. |
-| [GetBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html) | 🟡 Partial | Always 404 `NoSuchWebsiteConfiguration`; website writes fail closed. |
-| [GetBucketNotification](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotification.html) | 🟡 Partial | Always empty `NotificationConfiguration`; notification writes fail closed. |
-| [GetBucketNotificationConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotificationConfiguration.html) | 🟡 Partial | Same empty read-only contract as GetBucketNotification. |
-| [GetBucketLogging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLogging.html) | 🟡 Partial | Always empty `BucketLoggingStatus`; logging writes fail closed. |
-| [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
-| [GetObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLockConfiguration.html) | 🟡 Partial | Always 404 `ObjectLockConfigurationNotFoundError`; lock configuration fails closed. |
-| [GetObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectRetention.html) | 🟡 Partial | Always 404 not configured on existing objects; retention writes fail closed. |
-| [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | 🟡 Partial | Always 404 not configured on existing objects; legal-hold writes fail closed. |
-| [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | Always `Payer=BucketOwner`; request-payer writes fail closed. |
-| [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | Always `Suspended`; accelerate writes fail closed. |
+
+### 3.2 Partial — by code (closeable gaps)
+
+These are ordinary missing features; nothing architectural blocks them.
+
+| AWS S3 API operation | Status | Gap class | Remaining gap | Current scope |
+| --- | --- | --- | --- | --- |
+| [ListObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html) | 🟡 Partial | by code | No per-object `Owner` element in `Contents` (AWS V1 always includes it). | V1 prefix, delimiter, marker, CommonPrefixes, encoding-type, bounded max-keys. |
+| [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html) | 🟡 Partial | by code | No `FetchOwner` / per-object `Owner` element. | HMAC-scoped continuation, start-after, prefix, delimiter, CommonPrefixes, encoding-type=url, KeyCount, bounded max-keys. |
+| [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) | 🟡 Partial | by code | Several AWS version-listing selectors and pagination cursors are not implemented. | Published versions and delete markers, prefix filtering, keyset pagination. |
+| [CopyObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html) | 🟡 Partial | by code | No presigned CopyObject, no ranged copy-source and no date-based copy-source conditions. | Catalog-local source/version copy, metadata/tag directives, ETag source preconditions. |
+| [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | 🟡 Partial | by code | Selected integrity checks only — e.g. CRC64NVME declarations are rejected rather than verified. | 1–10,000 part numbers, configured part-size bound; aws-chunked streaming part bodies use the same decoder and trailer verification as PutObject. |
+| [CompleteMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html) | 🟡 Partial | by code | Completion body accepted only with the signed SHA-256 bound; other request checksum modes are unverified. | Fenced, zero-reupload staged-part publication. |
+
+### 3.3 Partial — by design (fail-closed architecture)
+
+The design reason column names the decision that keeps the gap open;
+the enforced-behavior column is the actual contract. The reasons and
+what would unlock each of them:
+
+| Design reason | Holds because | To fully support (recommendation) |
+| --- | --- | --- |
+| `private-only` | Public access, ACLs, bucket policies, SSE, requester-pays and transfer acceleration have no backing over a private single-owner Telegram gateway — implementing them naively would fake AWS semantics. | Implement a REAL authorization layer first: a bucket-policy engine (JSON policy → per-request evaluation against credential principals, mapped onto the existing per-credential permission scopes), then let ACL/policy writes configure it. SSE-S3 could be honest as server-side envelope encryption with a deployment-managed key (config-held master key, per-object data keys); SSE-KMS/SSE-C stay out. Website hosting needs an explicit public-exposure decision for the private model. |
+| `gc-owner-gate` | Physical Telegram deletion is owner-gated (`deletion_permitted=False`): every delete is logical, and retained media is the recovery journal until the owner authorizes GC (independent backup + soak + DR rehearsal). | Open the owner gates, then wire the GC planner end-to-end. Lifecycle expiration, AbortMultipartUpload media cleanup and "true" DeleteObject semantics become possible exactly then — the catalog side (delete markers, versions, tombstones) already exists. |
+| `versioning-model` | The store is versioned-by-default with exactly one mode; there is no unversioned or Suspended state to switch into. | Add a per-bucket versioning-state column plus a write-path branch that stops creating new versions in Suspended mode (keep the journal intact). A schema + writer change with no safety conflict — genuinely implementable. |
+| `tagging-scope` | Unpublished READY staging is never addressable through VersionId, and SQL row locks fence concurrent physical metadata changes — deliberate write-fence safety. | Exposing staged manifests would weaken the write fence; the alternative is keeping it. Only worth relaxing if a concrete workflow needs tag edits on in-flight uploads. |
+| `cors-grammar` | The restricted CORS rule grammar (bounded origins/methods, 64 KiB XML) is a security decision, not a parsing limit. | Widen the allowed origin/method grammar while keeping the allowlist fail-closed (e.g. safe wildcard subdomain matching). Pure code, low risk. |
+
+| AWS S3 API operation | Status | Gap class | Design reason | Enforced behavior |
+| --- | --- | --- | --- | --- |
+| [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) | 🟡 Partial | by design | private-only: SSE and Object Lock would be fake semantics over Telegram | Size-bounded, checksum-verified upload with metadata/tags and version creation; aws-chunked streaming bodies decoded and verified (signed chunk-signature chains, unsigned-payload trailers, decoded-length accounting). |
+| [GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html) | 🟡 Partial | by design | private-only: no archive/SSE storage classes exist | Full, byte-range and selected VersionId reads, ETag/date conditions. |
+| [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html) | 🟡 Partial | by design | private-only: absent AWS headers describe features that do not exist here | Basic object metadata and selected VersionId/read preconditions. |
+| [DeleteObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html) | 🟡 Partial | by design | gc-owner-gate: physical Telegram deletion requires owner approval | Creates a logical delete marker or deletes an explicit published VersionId; Telegram messages are never deleted. |
+| [DeleteObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html) | 🟡 Partial | by design | gc-owner-gate + private-only: no MFA/governance bypass exists | Up to 1,000 entries with per-entry VersionId (AWS per-entry Deleted/Error semantics: unknown versions report NoSuchVersion inside a 200 response). |
+| [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | 🟡 Partial | by design | private-only: SSE/retention/storage-tier variants have no backing | Signed initiation and selected metadata. |
+| [AbortMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_AbortMultipartUpload.html) | 🟡 Partial | by design | gc-owner-gate: remote orphan media stays protected pending approved GC | Logical abort only. |
+| [GetObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTagging.html) | 🟡 Partial | by design | tagging-scope: unpublished READY staging is never addressable through VersionId | Current/published VersionId tags with scoped access. |
+| [PutObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectTagging.html) | 🟡 Partial | by design | tagging-scope: unpublished READY staging is never writable; SQL row lock fences concurrent physical metadata changes | Current/published VersionId tags with ownership checks. |
+| [DeleteObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectTagging.html) | 🟡 Partial | by design | tagging-scope: same write fence as PutObjectTagging | Current/published VersionId tags with ownership checks. |
+| [GetBucketCors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketCors.html) | 🟡 Partial | by design | cors-grammar: the restricted rule grammar is a security decision | Reads the rules PutBucketCors accepts (maximum 100 rules). |
+| [PutBucketCors](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketCors.html) | 🟡 Partial | by design | cors-grammar: restricted origins/methods, 64 KiB XML bound | Limited 64 KiB XML grammar, origins and allowed methods. |
+| [GetBucketVersioning](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketVersioning.html) | 🟡 Partial | by design | versioning-model: the store is versioned-by-default, single mode | Always Enabled. |
+| [PutBucketVersioning](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketVersioning.html) | 🟡 Partial | by design | versioning-model: no Suspended/unversioned state exists to switch to | Idempotent Enabled only; rejects Suspended and MFADelete. |
+| [GetPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetPublicAccessBlock.html) | 🟡 Partial | by design | private-only: no public mode exists | Fixed all-four-fields true. |
+| [PutPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html) | 🟡 Partial | by design | private-only: privacy cannot be weakened | Accepts only all-four-fields true. |
+| [GetBucketPolicyStatus](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicyStatus.html) | 🟡 Partial | by design | private-only: no bucket policy engine or public ACLs | Read-only IsPublic=false for the enforced private-only gateway. |
+| [GetBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycleConfiguration.html) | 🟡 Partial | by design | gc-owner-gate: AWS expiration/transition implies physical deletion | Read a private bucket's bounded, prefix-scoped AbortIncompleteMultipartUpload-only rules. |
+| [GetBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLifecycle.html) | 🟡 Partial | by design | gc-owner-gate (deprecated alias of the same request) | The same `?lifecycle` GET, served by the GetBucketLifecycleConfiguration handler. |
+| [PutBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycle.html) | 🟡 Partial | by design | gc-owner-gate (deprecated alias of the same request) | The same `?lifecycle` PUT, served by the PutBucketLifecycleConfiguration handler. |
+| [PutBucketLifecycleConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketLifecycleConfiguration.html) | 🟡 Partial | by design | gc-owner-gate: expiration would delete physical media | Signed strict XML; only Disabled/Enabled incomplete multipart abort rules with DaysAfterInitiation 1..3650 and Prefix. |
+| [DeleteBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketLifecycle.html) | 🟡 Partial | by design | gc-owner-gate: removing rules never touches media | Removes SQL configuration; never deletes an object or Telegram media. |
+| [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | 🟡 Partial | by design | private-only: canned private ACL is the only truth | Read-only private canned ACL (caller FULL_CONTROL); every ACL configuration attempt fails closed. |
+| [GetObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAcl.html) | 🟡 Partial | by design | private-only: no VersionId selector, no ACL writes | Read-only private canned ACL for an existing current object. |
+| [GetBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketOwnershipControls.html) | 🟡 Partial | by design | private-only: BucketOwnerEnforced is the real, enforced state | Always `BucketOwnerEnforced`; ownership configuration fails closed. |
+| [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | 🟡 Partial | by design | private-only: no policy engine exists to read | Always 404 `NoSuchBucketPolicy`; policy writes fail closed. |
+| [GetBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketReplication.html) | 🟡 Partial | by design | private-only: S3 replication has no backing (TeleDrive replication is a storage-engine feature, not this API) | Always 404 not-configured; replication writes fail closed. |
+| [GetBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html) | 🟡 Partial | by design | private-only: website hosting contradicts the private model | Always 404 `NoSuchWebsiteConfiguration`; website writes fail closed. |
+| [GetBucketNotification](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotification.html) | 🟡 Partial | by design | private-only: no notification destinations are configured | Always empty `NotificationConfiguration`; notification writes fail closed. |
+| [GetBucketNotificationConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotificationConfiguration.html) | 🟡 Partial | by design | private-only: same as GetBucketNotification | Same empty read-only contract. |
+| [GetBucketLogging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLogging.html) | 🟡 Partial | by design | private-only: no cross-bucket log delivery exists | Always empty `BucketLoggingStatus`; logging writes fail closed. |
+| [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | by design | private-only: SSE has no backing over Telegram | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
+| [GetObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLockConfiguration.html) | 🟡 Partial | by design | private-only: Object Lock has no backing | Always 404 `ObjectLockConfigurationNotFoundError`; lock configuration fails closed. |
+| [GetObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectRetention.html) | 🟡 Partial | by design | private-only: retention has no backing | Always 404 not configured on existing objects; retention writes fail closed. |
+| [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | 🟡 Partial | by design | private-only: legal hold has no backing | Always 404 not configured on existing objects; legal-hold writes fail closed. |
+| [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | by design | private-only: no requester-pays billing exists | Always `Payer=BucketOwner`; request-payer writes fail closed. |
+| [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | by design | private-only: no transfer acceleration exists | Always `Suspended`; accelerate writes fail closed. |
 
 ## 4. Unsupported AWS S3 actions grouped for the roadmap
 
@@ -118,6 +157,8 @@ The following operations have a routed implementation. Every qualification in th
 ### P2-C — Access control, ACLs, policies and ownership
 
 Keep private-by-default security. Define either a tested private-only compatibility response or a real policy/ownership engine before advertising parity.
+
+**To fully support:** build a real bucket-policy engine — JSON policy documents parsed into per-request rules evaluated against credential principals (the existing per-credential permission scopes become the principal model), with PutBucketPolicy/DeleteBucketPolicy writing the rule store and every S3 route consulting it before scope checks. ACL writes can then map onto the same engine; DeletePublicAccessBlock needs a deliberate public-exposure decision first. Best-effort candidate if the owner accepts exposing policy configuration on a private gateway.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
@@ -133,6 +174,8 @@ Keep private-by-default security. Define either a tested private-only compatibil
 
 Implement actual encryption/key lifecycle and enforce per-version retention and legal-hold semantics across REST/S3/local jobs, copy, version delete and eventual physical GC.
 
+**To fully support:** PutBucketEncryption/GetBucketEncryption pairs become honest with server-side envelope encryption — a deployment-managed master key in config, per-object data keys, encrypted-at-rest chunk payloads, and the existing checksum layer verifying ciphertext integrity (note: this conflicts with content-addressed dedup and cross-account replication, which operate on plaintext bytes — a deployment would choose one or the other). Object Lock/retention/legal-hold need a per-version retention column enforced on EVERY delete path (including batch delete and version delete) with compliance mode immutable at the SQL level. Best-effort candidate: retention/legal-hold first (pure catalog work), SSE second (engine-level, conflicts with dedup).
+
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
 | [PutBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html) | ❌ Unsupported | P2-B |
@@ -145,6 +188,8 @@ Implement actual encryption/key lifecycle and enforce per-version retention and 
 
 Model rules and durable workers without promising AWS transitions that Telegram cannot provide. Physical expiration/deletion requires independent backup, writer fences and two-person authorization.
 
+**To fully support:** PutBucketReplication/DeleteBucketReplication could expose the EXISTING storage-engine cross-account replication (the destination is a second TeleDrive Telegram credential set, not an AWS bucket) — a mapping layer from the S3 replication XML onto the replication runtime is real, bounded work. Expiration/transition rules remain GC-gated (see section 3.3). RestoreObject has no archive tier to restore from — it would require inventing one. Best-effort candidate: the replication configuration surface.
+
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
 | [PutBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketReplication.html) | ❌ Unsupported | P2-D |
@@ -155,12 +200,16 @@ Model rules and durable workers without promising AWS transitions that Telegram 
 
 Support copy-part source ranges, signing and ownership, checksum composition and crash/retry semantics; also address parameter/header gaps for already partial operations.
 
-| AWS S3 API operation | Status | Target |
-| --- | --- | --- |
+**Status:** no unsupported operations remain in this group — UploadPartCopy
+(inclusive copy-source ranges) shipped and the remaining protocol gaps
+(trailer checksum composition on completion, per-object Owner in listings)
+are tracked as by-code partials in section 3.2.
 
 ### P2-F — Website, notifications and access logging
 
 Specify whether private-only hosting permits website mode; use transactional outbox for events, durable retries, scoped destinations and secret-safe log delivery.
+
+**To fully support:** website hosting requires an explicit public-exposure decision (a public static-file route serving bucket objects — directly against the private-only model, so it needs an owner call first). Notifications are honest work: a transactional event outbox (the catalog already versions every mutation) plus scoped webhook destinations with durable retries and backpressure. Logging = delivering the existing audit-log stream into a bucket. Best-effort candidate: notifications first (no security conflict), website only behind a deliberate public-mode decision.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
@@ -173,6 +222,13 @@ Specify whether private-only hosting permits website mode; use transactional out
 ### P3-G — Analytics, inventory, metrics and tier policies
 
 Requires schedulers/report delivery and storage-tier accounting; out of P2 core. Telegram storage has no AWS Glacier/Intelligent-Tiering equivalence.
+
+**To fully support:** pure code with no architectural conflict — report
+schedulers (CSV exports delivered INTO a bucket on a cadence), inventory
+listings (the catalog data already exists) and metrics rollups are
+conventional features; only the tier-policy group would need real storage
+classes to exist (they do not over Telegram). Best-effort candidate if
+reporting workflows are wanted; lowest priority otherwise.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
@@ -196,6 +252,16 @@ Requires schedulers/report delivery and storage-tier accounting; out of P2 core.
 ### P3-H — AWS-managed products, directory buckets, annotations and provider services
 
 Mostly depends on AWS account services (Express sessions, directory buckets, S3 Metadata, Object Lambda, acceleration, billing), not generic S3-compatible object storage.
+
+**To fully support:** most of this group has no honest Telegram mapping
+and should stay unsupported — directory buckets, Express sessions,
+WriteGetObjectResponse (Lambda payload passthrough), billing (request
+payment) and provider metadata tables describe AWS infrastructure that
+does not exist here. SelectObjectContent could be approximated with a
+server-side streaming filter (expensive: it must download and scan bytes,
+and only supports SQL-lite predicates over the first N bytes) — recommend
+keeping it out. GetObjectTorrent is obsolete. RenameObject maps to a
+metadata-level copy+delete and could be supported if a client needs it.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |

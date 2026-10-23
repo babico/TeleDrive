@@ -73,6 +73,38 @@ function app(){
     newKeyName: '',
     newKeyExpiry: '',
     keyScopesList: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage','jobs:read','jobs:manage','accounts:read','accounts:manage','settings:read','settings:manage','keys:manage','admin:*'],
+    endpointPermissions: [],
+    legacyScopes: [],
+    endpointCategories: {},
+    async loadPermissionCatalog(){
+      try {
+        const r = await this.api('/api/v1/admin/keys/permissions');
+        this.endpointPermissions = r.endpoint_permissions||[];
+        this.legacyScopes = r.legacy_scopes||[];
+        const cats = {};
+        for(const p of this.endpointPermissions){
+          const cat = p.name.split(':')[1];
+          (cats[cat] = cats[cat]||[]).push(p.name);
+        }
+        this.endpointCategories = cats;
+      } catch(e){ /* catalog is best-effort; manual scope entry still works */ }
+    },
+    toggleAllEndpoints(on){
+      const names = this.endpointPermissions.map(p => p.name);
+      if(on){ this.selectedScopes = [...new Set([...this.selectedScopes, ...names])]; }
+      else { this.selectedScopes = this.selectedScopes.filter(s => !names.includes(s) && s !== 'admin:*'); }
+    },
+    toggleEndpointCategory(cat){
+      const names = this.endpointCategories[cat]||[];
+      if(this.categoryFullySelected(cat)){
+        this.selectedScopes = this.selectedScopes.filter(s => !names.includes(s));
+      } else {
+        this.selectedScopes = [...new Set([...this.selectedScopes, ...names])];
+      }
+    },
+    categoryFullySelected(cat){
+      return (this.endpointCategories[cat]||[]).every(n => this.selectedScopes.includes(n));
+    },
     selectedScopes: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage'],
     createdKey: null,
 
@@ -177,6 +209,7 @@ function app(){
         await this.loadLogs();
       } else if(path === '/api-management'){
         await this.refreshKeys();
+        await this.loadPermissionCatalog();
       } else if(path === '/history'){
         await this.refreshHistory();
       }
@@ -267,6 +300,17 @@ function app(){
             tg_message_id: j.object_id||'-',
             uploaded_ts: j.updated_at
           }));
+      } catch(e){ this.toast(e.message,true); }
+      await this.refreshBuckets();
+      await this.refreshVersions();
+    },
+    versionRows: [],
+    versionBucket: '',
+    async refreshVersions(){
+      try {
+        const q = this.versionBucket ? ('?bucket=' + encodeURIComponent(this.versionBucket)) : '';
+        const r = await this.api('/api/v1/admin/storage/versions'+q);
+        this.versionRows = r.versions||[];
       } catch(e){ this.toast(e.message,true); }
     },
 

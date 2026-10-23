@@ -982,7 +982,8 @@ def test_real_s3_lifecycle_has_single_process_schedule_and_ci():
 
 def test_s3_compatibility_matrix_cannot_relabel_safe_lifecycle_as_full_aws():
     specs = (ROOT / "docs/S3_SPECS.md").read_text()
-    assert "**Inventory totals:** 11 supported, 42 partial, 63 unsupported;" in specs
+    assert ("**Inventory totals:** 13 supported, 43 partial "
+            "(6 by code, 37 by design), 60 unsupported;") in specs
     for action in (
         "GetBucketLifecycleConfiguration", "PutBucketLifecycleConfiguration",
         "DeleteBucketLifecycle",
@@ -991,6 +992,8 @@ def test_s3_compatibility_matrix_cannot_relabel_safe_lifecycle_as_full_aws():
         matches = [line for line in specs.splitlines() if line.startswith(prefix)]
         assert len(matches) == 1
         assert "🟡 Partial" in matches[0]
+        # Lifecycle expiration is GC-gated, never a code gap.
+        assert "by design" in matches[0]
     assert "AbortIncompleteMultipartUpload" in specs
     assert "never deletes an object or Telegram media" in specs
 
@@ -1073,15 +1076,14 @@ def test_s3_specs_markdown_tables_render_as_complete_gfm_tables():
         assert all(row.count("|") == columns for _, row in group), (
             "mismatched table columns", start
         )
-    # Supported/partial operation table must remain ONE contiguous table.
-    table = next(group for group in groups if group[0][1].startswith(
-        "| AWS S3 API operation | Status | Implemented scope"
-    ))
-    entries = [row for _, row in table[2:]]
+    # Lifecycle operations must appear as classified partial rows in the
+    # section-3 tables (by design, never by code: expiration is GC-gated).
+    all_rows = [row for group in groups for _, row in group[2:]]
     for operation in ("GetBucketLifecycleConfiguration",
                       "PutBucketLifecycleConfiguration",
                       "DeleteBucketLifecycle"):
-        assert any(f"[{operation}]" in row for row in entries), operation
+        row = next(row for row in all_rows if f"[{operation}]" in row)
+        assert "| 🟡 Partial | by design |" in row, operation
     assert sum(
         line.startswith("| [") and
         "](https://docs.aws.amazon.com/AmazonS3/latest/API/" in line

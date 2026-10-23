@@ -99,10 +99,38 @@ tailwind.config = {
 <section class="space-y-4">
   <div class="card">
     <h3>Upload history</h3>
+    <p class="muted text-xs">Terminal upload-job runs (folder-sync and queued jobs). Direct S3/REST uploads do not create jobs — see Object versions below for those.</p>
     <div class="scroll mt-3">
       <table><thead><tr><th>Path</th><th>Account</th><th>Message ID</th><th>Uploaded</th></tr></thead>
       <tbody><template x-for="r in historyRows" :key="r.path"><tr>
         <td x-text="r.path"></td><td x-text="r.tg_account||'-'"></td><td x-text="r.tg_message_id||'-'"></td><td x-text="fmtTs(r.uploaded_ts)"></td>
+      </tr></template></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="row" style="align-items:baseline">
+      <h3>Object versions</h3>
+      <select x-model="versionBucket" @change="refreshVersions()" class="input" style="flex:0 0 240px;padding:.25rem .5rem">
+        <option value="">All buckets</option>
+        <template x-for="b in buckets" :key="b.name"><option :value="b.name" x-text="b.name"></option></template>
+      </select>
+      <button class="btn btn-sm" @click="refreshVersions()">Refresh</button>
+    </div>
+    <p class="muted text-xs">Every published version and delete marker across all write paths (S3 browser, REST, multipart, copies). Deleted objects stay listed here — their Telegram media is retained until the owner authorizes physical GC.</p>
+    <div class="scroll mt-3">
+      <table><thead><tr><th>Bucket / Key</th><th>Type</th><th>Size</th><th>State</th><th>Committed</th></tr></thead>
+      <tbody><template x-for="v in versionRows" :key="v.version_id"><tr>
+        <td class="font-mono text-xs"><span x-text="v.bucket + '/' + v.key"></span></td>
+        <td>
+          <span class="text-red-400" x-show="v.is_delete_marker">delete marker</span>
+          <span x-show="!v.is_delete_marker">version</span>
+        </td>
+        <td x-text="v.is_delete_marker ? '-' : fmtBytes(v.size)"></td>
+        <td>
+          <span class="text-green-400" x-show="v.is_current">current</span>
+          <span class="muted" x-show="!v.is_current">historical</span>
+        </td>
+        <td x-text="fmtTs(v.committed_at)"></td>
       </tr></template></tbody></table>
     </div>
   </div>

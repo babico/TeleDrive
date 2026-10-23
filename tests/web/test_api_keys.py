@@ -27,27 +27,27 @@ def test_credentials_are_hashed_never_listed_and_persisted(keys):
     assert row["prefix"] == created.value[:16]
     assert "value" not in row and "digest" not in row
     assert created.value not in str(keys.list())
-    assert keys.authorize(created.value, "objects:read", now=101)
-    assert keys.authorize(created.value, "objects:write", now=102)
-    assert not keys.authorize(created.value, "objects:delete", now=103)
+    assert keys.authorize(created.value, "rest:objects:get", now=101)
+    assert keys.authorize(created.value, "rest:objects:put", now=102)
+    assert not keys.authorize(created.value, "rest:objects:delete", now=103)
     assert keys.list()[0]["last_used_at"] == 102
 
 
 def test_read_only_and_wrong_key_do_not_escalate(keys):
     key = keys.create("read", ["objects:read"], now=100)
-    assert not keys.authorize(key.value, "objects:write", now=101)
-    assert not keys.authorize(key.value + "x", "objects:read", now=101)
-    assert not keys.authorize("not-a-token", "objects:read", now=101)
-    assert keys.authorize(key.value, "objects:read", now=101)
+    assert not keys.authorize(key.value, "rest:objects:put", now=101)
+    assert not keys.authorize(key.value + "x", "rest:objects:get", now=101)
+    assert not keys.authorize("not-a-token", "rest:objects:get", now=101)
+    assert keys.authorize(key.value, "rest:objects:get", now=101)
 
 
 def test_expiry_and_revoke_fence_future_requests(keys):
     token = keys.create("short", ["objects:read"], now=100, expires_at=150)
-    assert keys.authorize(token.value, "objects:read", now=149)
-    assert not keys.authorize(token.value, "objects:read", now=150)
+    assert keys.authorize(token.value, "rest:objects:get", now=149)
+    assert not keys.authorize(token.value, "rest:objects:get", now=150)
     assert keys.revoke(token.id)
     assert not keys.revoke(token.id)
-    assert not keys.authorize(token.value, "objects:read", now=101)
+    assert not keys.authorize(token.value, "rest:objects:get", now=101)
 
 
 def test_rotation_invalidates_old_token_and_preserves_policy(keys):
@@ -55,9 +55,9 @@ def test_rotation_invalidates_old_token_and_preserves_policy(keys):
     rotated = keys.rotate(previous.id, now=200)
     assert rotated.id != previous.id and rotated.value != previous.value
     assert keys.list()[0]["name"] == "bot"
-    assert not keys.authorize(previous.value, "buckets:manage", now=201)
-    assert keys.authorize(rotated.value, "buckets:manage", now=201)
-    assert not keys.authorize(rotated.value, "objects:read", now=201)
+    assert not keys.authorize(previous.value, "rest:buckets:create", now=201)
+    assert keys.authorize(rotated.value, "rest:buckets:create", now=201)
+    assert not keys.authorize(rotated.value, "rest:objects:get", now=201)
     with pytest.raises(FileNotFoundError):
         keys.rotate(previous.id, now=202)
 
@@ -80,6 +80,61 @@ def test_input_validation_rejects_bad_scopes_and_lifetime(keys):
 
 def test_admin_wildcard_and_scope_distinctions(keys):
     key = keys.create("admin service", ["admin:*"], now=100)
-    for scope in ["buckets:manage", "objects:delete", "keys:manage"]:
+    for scope in ["rest:buckets:create", "rest:objects:delete",
+                  "rest:objects:put", "rest:buckets:list"]:
         assert keys.authorize(key.value, scope, now=110)
-    assert not keys.authorize("", "objects:read", now=110)
+    assert not keys.authorize("", "rest:objects:get", now=110)
+
+
+def test_per_endpoint_permissions(keys):
+    """Every REST endpoint is individually permissionable, and legacy
+    grouped scopes expand to exactly their endpoint sets."""
+    from teledrive.api_keys import (ENDPOINT_PERMISSIONS,
+                                     LEGACY_SCOPE_EXPANSION, expand_scopes)
+
+    # A key with ONE endpoint permission can use that endpoint only.
+    writer = keys.create("put-only", ["rest:objects:put"], now=200)
+    assert keys.authorize(writer.value, "rest:objects:put", now=201)
+    assert not keys.authorize(writer.value, "rest:objects:get", now=202)
+    assert not keys.authorize(writer.value, "rest:objects:head", now=203)
+    assert not keys.authorize(writer.value, "rest:buckets:list", now=204)
+
+    # Legacy groups keep working through expansion.
+    legacy_reader = keys.create("legacy-reader", ["objects:read"], now=210)
+    for endpoint in LEGACY_SCOPE_EXPANSION["objects:read"]:
+        assert keys.authorize(legacy_reader.value, endpoint, now=211), endpoint
+    assert not keys.authorize(legacy_reader.value, "rest:objects:put", now=212)
+    assert not keys.authorize(legacy_reader.value, "rest:objects:delete", now=213)
+
+    # admin:* expands to every endpoint permission.
+    admin = keys.create("admin", ["admin:*"], now=220)
+    for endpoint in ENDPOINT_PERMISSIONS:
+        assert keys.authorize(admin.value, endpoint, now=221), endpoint
+
+    # Expansion is a pure function of the scope list.
+    assert expand_scopes(["objects:read", "rest:buckets:list"]) == frozenset(
+        {"rest:objects:list", "rest:objects:list-versions",
+         "rest:objects:get", "rest:objects:head", "rest:buckets:list"})
+    assert expand_scopes(["jobs:read"]) == frozenset()
+    assert expand_scopes([]) == frozenset()
+
+    # Mixing legacy and endpoint names on one key is allowed.
+    mixed = keys.create("mixed", ["buckets:manage", "rest:objects:get"], now=230)
+    assert keys.authorize(mixed.value, "rest:buckets:create", now=231)
+    assert keys.authorize(mixed.value, "rest:buckets:delete", now=232)
+    assert keys.authorize(mixed.value, "rest:objects:get", now=233)
+    assert not keys.authorize(mixed.value, "rest:objects:put", now=234)
+
+
+def test_endpoint_catalog_covers_every_bearer_route(keys):
+    """Every require_api_scope call site uses a registered endpoint
+    permission — the catalog can never drift from the routes."""
+    import re
+    from pathlib import Path
+    from teledrive.api_keys import ENDPOINT_PERMISSIONS
+
+    source = Path("web/app.py").read_text()
+    used = set(re.findall(r'require_api_scope\("([^"]+)"\)', source))
+    assert used, "no bearer routes found"
+    assert used <= set(ENDPOINT_PERMISSIONS), (
+        f"Routes with unregistered permissions: {used - set(ENDPOINT_PERMISSIONS)}")

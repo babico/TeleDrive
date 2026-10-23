@@ -394,6 +394,55 @@ come from simply authorizing more accounts.
       phrasing pattern ("Delete X?" + consequence hint + audit note),
       including the physical-GC owner-gate reminder on object deletes.
 
+## 12. User feedback round 2 (2026-10-23)
+
+- [x] **Dashboard/history vs bucket-browser inconsistency** FIXED
+      (owner report: "uploaded 2 objects, deleted them — still visible
+      in the dashboard, gone from the bucket browser, nothing in
+      history"). GC itself is correctly OFF (owner-gated;
+      deletion_permitted=False — Telegram media retention is BY
+      DESIGN, that part is not a bug). What WAS wrong:
+      a) FIXED: the accounts card counted PHYSICAL storage
+         (storage_chunks per account) — deleted-but-retained objects
+         kept counting. It now shows CURRENT (heads-joined)
+         objects/bytes plus a separate retained (GC-reclaimable)
+         backlog line labeled as such ("+N retained" / "clean").
+      b) FIXED: the History page only listed terminal upload JOBS —
+         S3-browser uploads never create jobs and object version /
+         delete-marker history was invisible. New admin endpoint
+         GET /api/v1/admin/storage/versions (published versions +
+         delete markers, bucket-filterable, newest first) and an
+         "Object versions" section on the History page with a bucket
+         selector, type (version/delete marker), size and current/
+         historical state.
+- [x] **S3 spec: reason groups + full-support recommendations** DONE.
+      Section 3.3 now documents the five by-design reason groups
+      (private-only, gc-owner-gate, versioning-model, tagging-scope,
+      cors-grammar) with a "To fully support" recommendation per group
+      (policy engine, GC gate opening, versioning-state column,
+      write-fence tradeoff, grammar widening). Section 4 groups
+      (P2-C/B/D/E/F, P3-G/H) each carry a concrete best-effort
+      recommendation: policy engine on the credential-principal model;
+      envelope-encryption SSE (conflicts with dedup/replication) and
+      SQL-level retention; exposing the EXISTING storage-engine
+      replication through the S3 replication API; P2-E now empty
+      (UploadPartCopy shipped); notifications-first for P2-F behind a
+      public-mode owner decision; P3-G as conventional report
+      schedulers; P3-H mostly unmappable (keep unsupported).
+- [x] **Per-endpoint API key permissions** DONE. Every REST bearer
+      endpoint is individually permissionable: 9 fine-grained
+      permissions (rest:buckets:list/create/delete,
+      rest:objects:list/list-versions/get/head/put/delete) with a
+      machine-readable registry (ENDPOINT_PERMISSIONS + descriptions
+      doubling as UI labels). LEGACY grouped scopes remain valid and
+      expand to their endpoint sets — existing keys work unchanged;
+      admin:* expands to everything. authorize() checks the expanded
+      set. New catalog endpoint GET /api/v1/admin/keys/permissions;
+      the API management UI builds a per-endpoint checkbox grid from
+      it with select-all/category shortcuts and a collapsible legacy
+      section. A drift test proves every require_api_scope call site
+      uses a registered permission.
+
 ## 11. Release decision rules
 
 - [ ] Any new release candidate requires all mandatory checks green on that

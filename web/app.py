@@ -1466,6 +1466,24 @@ def list_api_keys(_: None = Depends(require_auth)):
         conn.close()
 
 
+@app.get("/api/v1/admin/keys/permissions", tags=["API keys"],
+         summary="The per-endpoint permission catalog for key issuance")
+def list_api_key_permissions(_: None = Depends(require_auth)):
+    """Every REST bearer endpoint is individually permissionable. Legacy
+    grouped scopes remain valid as aliases (existing keys keep working)
+    and are shown for reference; new keys should use endpoint names."""
+    from teledrive.api_keys import (ENDPOINT_PERMISSIONS,
+                                     LEGACY_SCOPE_EXPANSION)
+    return {
+        "endpoint_permissions": [
+            {"name": name, "description": description}
+            for name, description in sorted(ENDPOINT_PERMISSIONS.items())],
+        "legacy_scopes": [
+            {"name": name, "expands_to": sorted(expansion)}
+            for name, expansion in sorted(LEGACY_SCOPE_EXPANSION.items())],
+    }
+
+
 @app.post("/api/v1/admin/keys", tags=["API keys"], status_code=201, summary="Issue a scoped API key (secret returned once)")
 def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends(require_auth)):
     _same_origin(request)
@@ -2035,14 +2053,28 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
         # Usage, cooldowns and flood observations live in the storage
         # catalog tables; degrade gracefully when this deployment's web
         # database does not carry them.
+        # CURRENT usage joins the object heads: deleted-but-retained
+        # objects (physical GC is owner-gated) do NOT count. The
+        # physical chunk totals are reported separately as the retained
+        # backlog the owner could eventually reclaim through GC.
         usage: dict[str, tuple[int, int]] = {}
+        retained: dict[str, tuple[int, int]] = {}
         cooldowns: dict[str, int] = {}
         floods: dict[str, int] = {}
         try:
             for acct, objects, total in conn.connection.execute(_text(
+                    "SELECT c.account, COUNT(DISTINCT c.object_id), "
+                    "SUM(c.size) FROM storage_chunks c "
+                    "JOIN storage_object_heads h "
+                    "ON h.object_id = c.object_id GROUP BY c.account")):
+                usage[str(acct)] = (int(objects or 0), int(total or 0))
+        except Exception:
+            pass
+        try:
+            for acct, objects, total in conn.connection.execute(_text(
                     "SELECT account, COUNT(DISTINCT object_id), SUM(size) "
                     "FROM storage_chunks GROUP BY account")):
-                usage[str(acct)] = (int(objects or 0), int(total or 0))
+                retained[str(acct)] = (int(objects or 0), int(total or 0))
         except Exception:
             pass
         try:
@@ -2065,6 +2097,7 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
     for account, api_id, phone, channel, strategy, created, updated, \
             authorized, checked, soft_quota in rows:
         objects, total = usage.get(str(account), (0, 0))
+        retained_objects, retained_total = retained.get(str(account), (0, 0))
         remaining_ms = max(0, cooldowns.get(str(account), 0) - now_ms)
         sessions.append({
             "account": account, "api_id": api_id,
@@ -2072,6 +2105,12 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
             "strategy": strategy or "round_robin",
             "created_at": created, "updated_at": updated,
             "objects": objects, "bytes": total,
+            # Physical Telegram storage per account. The difference to
+            # the current numbers is the retained (GC-reclaimable)
+            # backlog: deleted objects whose media survives until the
+            # owner authorizes physical GC.
+            "retained_objects": retained_objects,
+            "retained_bytes": retained_total,
             "cooldown_remaining_s": remaining_ms // 1000,
             "flood_observations": floods.get(str(account), 0),
             "authorized": None if authorized is None else bool(authorized),
@@ -3813,6 +3852,47 @@ def admin_delete_bucket_pin(bucket: str, request: Request,
     return {"ok": True}
 
 
+@app.get("/api/v1/admin/storage/versions", tags=["Object catalog"],
+         summary="Object version history incl. delete markers (WebUI)")
+def admin_list_object_versions(
+        bucket: str | None = Query(None),
+        limit: int = Query(200, ge=1, le=1000),
+        _: None = Depends(require_auth)):
+    """Published versions and delete markers, newest first.
+
+    This is the UI's object-history view: unlike the upload-job history,
+    it covers EVERY write path (S3 browser, REST, multipart, copies)
+    and shows delete markers, so deleted objects remain traceable until
+    physical GC removes their retained media."""
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        buckets = [bucket] if bucket else catalog.list_buckets()
+        entries = []
+        for name in buckets:
+            try:
+                page, _ = catalog.list_bucket_versions(
+                    name, prefix="", key_marker="", version_marker="",
+                    limit=limit)
+            except Exception:
+                continue
+            for entry in page:
+                entries.append({
+                    "bucket": name, "key": entry["key"],
+                    "version_id": entry["version_id"],
+                    "is_current": entry["is_current"],
+                    "is_delete_marker": entry["is_delete_marker"],
+                    "size": entry.get("size"),
+                    "sha256": entry.get("sha256"),
+                    "committed_at": entry["committed_ns"] // 1_000_000_000,
+                })
+        entries.sort(key=lambda e: (e["committed_at"], e["version_id"]),
+                     reverse=True)
+        return {"versions": entries[:limit], "count": len(entries)}
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/admin/storage/usage", tags=["Storage jobs"],
          summary="Daily upload volume (objects, bytes) for the last N days")
 def storage_usage_series(days: int = Query(default=30, ge=1, le=365),
@@ -4369,7 +4449,7 @@ def revoke_s3_credentials(request: Request, identifier: str,
 
 
 @app.get("/api/v1/buckets", tags=["Object catalog"], summary="List Telegram-backed storage buckets")
-def list_storage_buckets(_: None = Depends(require_api_scope("buckets:read"))):
+def list_storage_buckets(_: None = Depends(require_api_scope("rest:buckets:list"))):
     conn = db_connect()
     try:
         return {"buckets": BucketCatalog(ManifestStore(conn)).list_buckets()}
@@ -4379,7 +4459,7 @@ def list_storage_buckets(_: None = Depends(require_api_scope("buckets:read"))):
 
 @app.post("/api/v1/buckets", tags=["Object catalog"], status_code=201, summary="Create a bucket")
 def create_storage_bucket(payload: BucketCreateRequest,
-                          _: None = Depends(require_api_scope("buckets:manage"))):
+                          _: None = Depends(require_api_scope("rest:buckets:create"))):
     conn = db_connect()
     try:
         try:
@@ -4392,7 +4472,7 @@ def create_storage_bucket(payload: BucketCreateRequest,
 
 
 @app.delete("/api/v1/buckets/{bucket}", tags=["Object catalog"], summary="Remove a physically empty bucket")
-def remove_storage_bucket(bucket: str, _: None = Depends(require_api_scope("buckets:manage"))):
+def remove_storage_bucket(bucket: str, _: None = Depends(require_api_scope("rest:buckets:delete"))):
     conn = db_connect()
     try:
         try:
@@ -4411,7 +4491,7 @@ def remove_storage_bucket(bucket: str, _: None = Depends(require_api_scope("buck
 def list_published_object_versions(
     bucket: str, key: str = Query(..., min_length=1, max_length=1024),
     limit: int = Query(default=100, ge=1, le=1000),
-    _: None = Depends(require_api_scope("objects:read")),
+    _: None = Depends(require_api_scope("rest:objects:list-versions")),
 ):
     conn = db_connect()
     try:
@@ -4429,7 +4509,7 @@ def list_current_objects(bucket: str,
                          prefix: str = Query("", max_length=1024),
                          after: str | None = Query(None, max_length=1024),
                          limit: int = Query(100, ge=1, le=1000),
-                         _: None = Depends(require_api_scope("objects:read"))):
+                         _: None = Depends(require_api_scope("rest:objects:list"))):
     conn = db_connect()
     try:
         items = BucketCatalog(ManifestStore(conn)).list_objects(bucket, prefix=prefix, after=after, limit=limit)
@@ -4446,7 +4526,7 @@ def list_current_objects(bucket: str,
 @app.delete("/api/v1/buckets/{bucket}/objects", tags=["Object catalog"], summary="Unlink a current object (Telegram data retained)")
 def unlink_current_object(bucket: str, key: str = Query(..., min_length=1, max_length=1024),
                           generation: int | None = Query(None, ge=1),
-                          _: None = Depends(require_api_scope("objects:delete"))):
+                          _: None = Depends(require_api_scope("rest:objects:delete"))):
     conn = db_connect()
     try:
         try:
@@ -4525,7 +4605,7 @@ async def _stream_object_upload(bucket: str, key: str, request: Request,
 async def put_object_content(
     bucket: str, request: Request, key: str = Query(..., min_length=1, max_length=1024),
     generation: int | None = Query(None, ge=0),
-    _: None = Depends(require_api_scope("objects:write")),
+    _: None = Depends(require_api_scope("rest:objects:put")),
 ):
     return await _stream_object_upload(bucket, key, request, generation)
 
@@ -4534,7 +4614,7 @@ async def put_object_content(
           summary="Read object headers without downloading Telegram bytes")
 def head_object_content(
     bucket: str, key: str = Query(..., min_length=1, max_length=1024),
-    _: None = Depends(require_api_scope("objects:read")),
+    _: None = Depends(require_api_scope("rest:objects:head")),
 ):
     conn = db_connect()
     try:
@@ -4557,7 +4637,7 @@ def head_object_content(
          summary="Stream verified object bytes from Telegram; supports HTTP Range")
 async def get_object_content(
     bucket: str, request: Request, key: str = Query(..., min_length=1, max_length=1024),
-    _: None = Depends(require_api_scope("objects:read")),
+    _: None = Depends(require_api_scope("rest:objects:get")),
 ):
     conn = db_connect()
     try:

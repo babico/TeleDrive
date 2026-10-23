@@ -32,47 +32,56 @@
     {
       "name": "ListObjects",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by code"
     },
     {
       "name": "ListObjectsV2",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by code"
     },
     {
       "name": "ListObjectVersions",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by code"
     },
     {
       "name": "PutObject",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetObject",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "HeadObject",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "DeleteObject",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "DeleteObjects",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "CopyObject",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by code"
     },
     {
       "name": "GetObjectAttributes",
@@ -82,12 +91,14 @@
     {
       "name": "CreateMultipartUpload",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "UploadPart",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by code"
     },
     {
       "name": "ListParts",
@@ -102,12 +113,14 @@
     {
       "name": "CompleteMultipartUpload",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by code"
     },
     {
       "name": "AbortMultipartUpload",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetBucketTagging",
@@ -127,27 +140,32 @@
     {
       "name": "GetObjectTagging",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutObjectTagging",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "DeleteObjectTagging",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetBucketCors",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketCors",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "DeleteBucketCors",
@@ -157,37 +175,44 @@
     {
       "name": "GetBucketVersioning",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketVersioning",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetPublicAccessBlock",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutPublicAccessBlock",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetBucketLifecycleConfiguration",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketLifecycleConfiguration",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "DeleteBucketLifecycle",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "DeletePublicAccessBlock",
@@ -197,7 +222,8 @@
     {
       "name": "GetBucketAcl",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketAcl",
@@ -207,7 +233,8 @@
     {
       "name": "GetObjectAcl",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutObjectAcl",
@@ -217,7 +244,8 @@
     {
       "name": "GetBucketOwnershipControls",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketOwnershipControls",
@@ -232,7 +260,8 @@
     {
       "name": "GetBucketPolicy",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketPolicy",
@@ -247,12 +276,14 @@
     {
       "name": "GetBucketPolicyStatus",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetBucketEncryption",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketEncryption",
@@ -267,7 +298,8 @@
     {
       "name": "GetObjectLockConfiguration",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutObjectLockConfiguration",
@@ -277,7 +309,8 @@
     {
       "name": "GetObjectRetention",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutObjectRetention",
@@ -287,7 +320,8 @@
     {
       "name": "GetObjectLegalHold",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutObjectLegalHold",
@@ -297,17 +331,20 @@
     {
       "name": "GetBucketLifecycle",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketLifecycle",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetBucketReplication",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketReplication",
@@ -332,7 +369,8 @@
     {
       "name": "GetBucketWebsite",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketWebsite",
@@ -347,12 +385,14 @@
     {
       "name": "GetBucketNotification",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "GetBucketNotificationConfiguration",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketNotification",
@@ -367,7 +407,8 @@
     {
       "name": "GetBucketLogging",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketLogging",
@@ -532,7 +573,8 @@
     {
       "name": "GetBucketRequestPayment",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketRequestPayment",
@@ -542,7 +584,8 @@
     {
       "name": "GetBucketAccelerateConfiguration",
       "status": "partial",
-      "workstream": "implemented"
+      "workstream": "implemented",
+      "gap_class": "by design"
     },
     {
       "name": "PutBucketAccelerateConfiguration",

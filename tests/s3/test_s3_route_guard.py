@@ -159,11 +159,28 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     assert Counter(actual.values()) == {
         "supported":13, "partial":43, "unsupported":60,
     }
+    # Every partial is classified by WHY it is partial, and the doc and
+    # the manifest agree on the class.
+    gap_pattern = re.compile(
+        r"^\| \[([A-Za-z0-9]+)\]\("
+        r"https://docs\.aws\.amazon\.com/AmazonS3/latest/API/API_"
+        r"[A-Za-z0-9]+\.html\) \| 🟡 Partial \| (by code|by design) \|",
+        re.MULTILINE)
+    doc_gaps = dict(gap_pattern.findall(doc))
+    manifest_gaps = {item["name"]: item["gap_class"]
+                     for item in data["operations"]
+                     if item["status"] == "partial"}
+    assert doc_gaps == manifest_gaps
+    assert Counter(manifest_gaps.values()) == {"by code": 6, "by design": 37}
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",
     }
-    assert all(set(item) == {"name","status","workstream"}
-               for item in data["operations"])
+    for item in data["operations"]:
+        keys = set(item)
+        if item["status"] == "partial":
+            assert keys == {"name", "status", "workstream", "gap_class"}
+        else:
+            assert keys == {"name", "status", "workstream"}
 
 
 def test_unknown_parameter_is_rejected_before_object_transport():

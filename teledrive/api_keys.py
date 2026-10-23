@@ -29,13 +29,49 @@ api_keys = Table(
     Column("last_used_at", BigInteger),
     Column("revoked", Boolean, nullable=False),
 )
-ALLOWED_SCOPES = frozenset({
-    "objects:read", "objects:write", "objects:delete",
-    "buckets:read", "buckets:manage",
-    "jobs:read", "jobs:manage", "accounts:read",
-    "accounts:manage", "settings:read", "settings:manage",
-    "keys:manage", "admin:*",
-})
+# Per-endpoint permissions: every REST bearer endpoint is individually
+# permissionable. The description doubles as the UI label.
+ENDPOINT_PERMISSIONS = {
+    "rest:buckets:list": "GET /api/v1/buckets — list buckets",
+    "rest:buckets:create": "POST /api/v1/buckets — create a bucket",
+    "rest:buckets:delete": "DELETE /api/v1/buckets/{bucket} — remove an empty bucket",
+    "rest:objects:list": "GET /api/v1/buckets/{bucket}/objects — list current objects",
+    "rest:objects:list-versions": "GET /api/v1/buckets/{bucket}/versions — list a key's published versions",
+    "rest:objects:get": "GET /api/v1/buckets/{bucket}/content — stream object bytes (Range)",
+    "rest:objects:head": "HEAD /api/v1/buckets/{bucket}/content — object headers",
+    "rest:objects:put": "PUT /api/v1/buckets/{bucket}/content — upload object bytes",
+    "rest:objects:delete": "DELETE /api/v1/buckets/{bucket}/objects — unlink a current object",
+}
+
+# Legacy grouped scopes stay valid and expand to endpoint sets, so keys
+# issued before per-endpoint permissions keep working unchanged.
+# Scopes with an empty expansion gate no REST endpoint today.
+LEGACY_SCOPE_EXPANSION = {
+    "buckets:read": ("rest:buckets:list",),
+    "buckets:manage": ("rest:buckets:create", "rest:buckets:delete"),
+    "objects:read": ("rest:objects:list", "rest:objects:list-versions",
+                     "rest:objects:get", "rest:objects:head"),
+    "objects:write": ("rest:objects:put",),
+    "objects:delete": ("rest:objects:delete",),
+    "jobs:read": (), "jobs:manage": (),
+    "accounts:read": (), "accounts:manage": (),
+    "settings:read": (), "settings:manage": (),
+    "keys:manage": (),
+    "admin:*": tuple(ENDPOINT_PERMISSIONS),
+}
+ALLOWED_SCOPES = frozenset(ENDPOINT_PERMISSIONS) | frozenset(LEGACY_SCOPE_EXPANSION)
+
+
+def expand_scopes(scopes) -> frozenset[str]:
+    """Resolve a key's scopes (legacy groups and/or per-endpoint names)
+    into the concrete set of endpoint permissions they grant."""
+    granted: set[str] = set()
+    for scope in scopes or ():
+        if scope in ENDPOINT_PERMISSIONS:
+            granted.add(scope)
+        else:
+            granted.update(LEGACY_SCOPE_EXPANSION.get(scope, ()))
+    return frozenset(granted)
 
 
 @dataclass(frozen=True)
@@ -105,8 +141,7 @@ class ApiKeyStore:
         ).first()
         if not result or result[2] or (result[3] is not None and result[3] <= now):
             return False
-        scopes = json.loads(result[1])
-        if scope not in scopes and "admin:*" not in scopes:
+        if scope not in expand_scopes(json.loads(result[1])):
             return False
         self.db.connection.execute(
             update(api_keys).where(api_keys.c.id == result[0]).values(last_used_at=now)

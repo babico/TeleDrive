@@ -223,6 +223,12 @@ tailwind.config = {
               <td x-text="s.objects"></td>
               <td x-text="fmtBytes(s.bytes)"></td>
               <td>
+                <span class="muted text-xs" x-show="s.retained_bytes > s.bytes"
+                      :title="'Physical Telegram storage incl. deleted-but-retained objects (physical GC is owner-gated). Current: ' + fmtBytes(s.bytes) + ' in ' + s.objects + ' object(s).'"
+                      x-text="'+' + fmtBytes(s.retained_bytes - s.bytes) + ' retained'"></span>
+                <span class="muted text-xs" x-show="s.retained_bytes <= s.bytes" title="No retained backlog — physical storage matches current usage">clean</span>
+              </td>
+              <td>
                 <span x-show="s.soft_quota_bytes" x-text="fmtBytes(s.soft_quota_bytes)" :class="s.bytes > s.soft_quota_bytes ? 'text-red-400 font-bold' : ''"
                       :title="s.bytes > s.soft_quota_bytes ? 'OVER soft quota (' + fmtBytes(s.bytes) + ' used)' : fmtBytes(s.bytes) + ' used'"></span>
                 <span x-show="!s.soft_quota_bytes" class="muted">unlimited</span>

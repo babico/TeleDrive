@@ -18,7 +18,7 @@
 
 **Published release:** [v1.0.7](https://github.com/babico/TeleDrive/releases/tag/v1.0.7), source SHA `747747652cd1ca36878453d49daf627d8c0a60ad`. Published release contents are not automatically updated when new development commits reach `main`. Release notes and binaries belong on [GitHub Releases](https://github.com/babico/TeleDrive/releases), not in a separate per-version Markdown file.
 
-**Verified newer development baseline:** `c2b76880b4ada3d61d47a7926ea819244047fa33`; all nine normal CI workflows completed successfully on that exact SHA. Its guarded delivery job also removed seven merged PR branches; only `main` remained. Since then the matrix has become **seven workflows** (the Bot E2E and Desktop workflows were removed with their features). For any *later* source SHA, read its own [Actions runs](https://github.com/babico/TeleDrive/actions) before making a CI claim. A cancelled, pending or fully skipped required workflow is not evidence of successful live acceptance.
+**Current CI audit (2026-10-23):** the seven workflows on `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0` produced six successes and **one failure** (CI 2 · Integration). The failure was an obsolete environment-variable test expecting HTTP 503 instead of the actual HTTP 422 outside-root rejection; it does not demonstrate data corruption. This is being corrected in regression tests. Earlier nine-workflow baseline `c2b76880b4ada3d61d47a7926ea819244047fa33` passed under the now-retired Bot/Desktop architecture. Do not infer success on newer revisions; check [exact-SHA Actions](https://github.com/babico/TeleDrive/actions).
 
 ### P0: implementation boundaries
 

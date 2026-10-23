@@ -194,7 +194,7 @@ def test_admin_job_endpoints_require_root_auth_csrf_and_do_not_expose_tokens(
     root = tmp_path / "uploads"
     root.mkdir()
     source = root / "actual.bin"
-    source.write_bytes(b"safe-bot-upload")
+    source.write_bytes(b"safe-user-upload")
     conn = connect_database(db_path)
     try:
         BucketCatalog(ManifestStore(conn)).create_bucket("job-admin", int(time.time()))
@@ -205,10 +205,14 @@ def test_admin_job_endpoints_require_root_auth_csrf_and_do_not_expose_tokens(
     assert client.get(url).status_code in (401, 403)
     payload = {"bucket": "job-admin", "key": "single.bin",
                "source_path": str(source)}
+    # Source roots are config-only. A retired env variable must not override
+    # the allowed-root policy. Invalid paths must fail closed with 422.
     monkeypatch.delenv("TELEDRIVE_JOB_SOURCE_ROOT", raising=False)
+    monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(tmp_path / "forbidden"))
     assert client.post(url, auth=auth, json=payload).status_code == 403
-    assert client.post(url, auth=auth, json=payload,
-                       headers={"x-teledrive-csrf": "1"}).status_code == 503
+    rejected = client.post(url, auth=auth, json=payload,
+                           headers={"x-teledrive-csrf": "1"})
+    assert rejected.status_code == 422, rejected.text
     monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(root))
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
     start = client.post(url, auth=auth, json=payload,

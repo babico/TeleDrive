@@ -169,9 +169,9 @@ catalog); see [Backup and Restore](BACKUP_RESTORE.md).
 
 ## 5. Status, CI and unfinished safety gates
 
-The current matrix is **seven mandatory workflows** plus the manually
+The current matrix is **six automatic workflows** plus the manually
 dispatched endurance soak (see [CI and Test Guide](CI_WORKFLOWS.md)):
-Quality/Security, REST & S3, Databases, Docker fault injection, live
+Quality/Security, REST & S3 with Databases, image/fault injection, live
 USER MTProto E2E, live Multiworker PostgreSQL and the release gate —
 historical Bot-compatibility E2E was retired with the Bot layer. Check
 [Actions](https://github.com/babico/TeleDrive/actions)

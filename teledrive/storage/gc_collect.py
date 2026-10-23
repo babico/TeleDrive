@@ -101,20 +101,29 @@ class RetainedMediaGC:
             "FROM storage_chunks")).one()
         # Reclaimable backlog, mirroring candidates()' fail-closed
         # filters as pure counts.
-        base = ("FROM storage_objects o "
-                "WHERE o.status = 'ready' "
-                "AND NOT EXISTS (SELECT 1 FROM storage_object_heads h "
-                "WHERE h.object_id = o.id) "
-                "AND NOT EXISTS (SELECT 1 FROM storage_object_aliases a "
-                "WHERE a.source_object_id = o.id) "
-                "AND EXISTS (SELECT 1 FROM storage_published_versions p "
-                "WHERE p.object_id = o.id)")
+        # Static SQL statements: no interpolated table names or predicates.
+        # Both branches deliberately share the same immutable safety filters.
         revoked = db.execute(text(
-            f"SELECT COUNT(*) {base} "
+            "SELECT COUNT(*) FROM storage_objects o "
+            "WHERE o.status = 'ready' "
+            "AND NOT EXISTS (SELECT 1 FROM storage_object_heads h "
+            "WHERE h.object_id = o.id) "
+            "AND NOT EXISTS (SELECT 1 FROM storage_object_aliases a "
+            "WHERE a.source_object_id = o.id) "
+            "AND EXISTS (SELECT 1 FROM storage_published_versions p "
+            "WHERE p.object_id = o.id) "
             "AND EXISTS (SELECT 1 FROM storage_removed_versions r "
-            "WHERE r.object_id = o.id)")).scalar_one()
+            "WHERE r.object_id = o.id)"
+        )).scalar_one()
         deleted = db.execute(text(
-            f"SELECT COUNT(*) {base} "
+            "SELECT COUNT(*) FROM storage_objects o "
+            "WHERE o.status = 'ready' "
+            "AND NOT EXISTS (SELECT 1 FROM storage_object_heads h "
+            "WHERE h.object_id = o.id) "
+            "AND NOT EXISTS (SELECT 1 FROM storage_object_aliases a "
+            "WHERE a.source_object_id = o.id) "
+            "AND EXISTS (SELECT 1 FROM storage_published_versions p "
+            "WHERE p.object_id = o.id) "
             "AND NOT EXISTS ("
             "SELECT 1 FROM storage_published_versions p2 "
             "JOIN storage_object_heads h2 "

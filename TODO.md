@@ -6,7 +6,7 @@
 > commands and CI contracts, see [CI and Test Guide](docs/CI_WORKFLOWS.md).
 > Product/feature analysis that produced the roadmap phases:
 > `.opencode/teledrive/10x/session-1.md` (git-ignored).
-> Last audited: 2026-10-23 (base SHA `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0`; six of seven CI workflows passed, one outdated-test assertion under correction).
+> Last audited: 2026-10-23 against `65e0b64d32ae548dc44663f789bd2e7acbecdbf4`. The six automatic workflows were **not all green**: Quality and Delivery failed the Bandit B608 check in `teledrive/storage/gc_collect.py`; four others passed. Validate the security fix on its own exact commit before claiming a complete CI pass.
 
 ---
 
@@ -300,6 +300,10 @@ come from simply authorizing more accounts.
       candidate markers without inventing metadata.
 - [ ] Establish longer-duration real-environment capacity benchmarks on
       owner-controlled infrastructure.
+
+### CI/release follow-up (verified open on 2026-10-23)
+- [ ] Obtain Quality and Release Gate green results on the **exact fix SHA** after addressing GC Bandit B608 without changing ownership or deletion decisions.
+- [ ] Before any production activation of physical GC, require independently verified media bytes, isolated restore rehearsal and two-person owner sign-off; a dry-run or a UI toggle alone is not authorization.
 
 ## 9. Owner gates — physical GC prerequisites (BLOCKED_OWNER_ACTION)
 

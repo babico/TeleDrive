@@ -15,7 +15,7 @@ GitHub Actions does not support workflow folders in its sidebar. The numeric pre
 | 03 · Resilience | [Docker Fault Injection](../.github/workflows/resilience-docker.yml) | Disposable PostgreSQL, two Web instances, crash/restart, corruption and recovery |
 | 04 · Live Telegram | [User MTProto E2E](../.github/workflows/live-telegram-user.yml) | Real Telethon user session, checksum and range recovery |
 | 04 · Live Telegram | [Multiworker PostgreSQL E2E](../.github/workflows/live-telegram-multiworker.yml) | Three independent workers sharing PostgreSQL and a real Telegram test target |
-| 05 · Delivery | [Release Gate & Packages](../.github/workflows/delivery-release.yml) | Release regression, gated Linux/Windows packages and publishing |
+| 05 · Delivery | [Release Gate & Packages](../.github/workflows/delivery-release.yml) | Release regression and gated single-container Docker image publishing; no desktop packages |
 | 06 · Endurance | [Isolated Capacity Soak](../.github/workflows/endurance-capacity.yml) | Manually dispatched 60–110-minute synthetic-media SQLite durability test |
 
 The **first seven workflows** form the normal `main` validation matrix. The endurance workflow is deliberately manual (`workflow_dispatch`). The live Telegram workflows require dedicated **test** credentials; synthetic Docker validation does not.
@@ -130,6 +130,8 @@ An actual PASS requires the complete four-stage evidence and `stages.acceptance.
 For feature status and production release boundaries, see [Project Status](IMPLEMENTATION_STATUS.md). For actual database backups and restore procedures, see [Backup and Restore](BACKUP_RESTORE.md). For security reporting, see [Security Policy](SECURITY.md).
 
 **S3 P2-0 selector gate:** `tests/s3/test_s3_route_guard.py` is mandatory in both Quality and REST/S3 workflow regressions. It verifies 116/116 operation statuses in the machine-readable inventory against `docs/S3_SPECS.md` and rejects unrecognized signed bucket/object selectors without exposing or mutating data.
+
+**Verified CI audit (2026-10-23):** Commit `65e0b64d32ae548dc44663f789bd2e7acbecdbf4` passed integration, image/fault injection and both real Telegram E2E workflows, but Quality and Delivery **failed** on two Bandit B608 dynamic SQL-expression findings in `teledrive/storage/gc_collect.py`. The GC SQL is assembled exclusively from constant fragments; the follow-up removes the f-string construction and retains the same filter predicates. A fix must be validated on its own complete CI run before calling the release gate green.
 
 **Unified transport policy:** Live REST/S3/local-job I/O is USER MTProto only; there is no Bot API transport. The failed 2026-10-23 CI 2 job on `4ff51d44` was a stale test expecting the retired `TELEDRIVE_JOB_SOURCE_ROOT` environment variable to control paths. Validated config-driven outside-root rejection is HTTP 422; missing CSRF remains HTTP 403. The delivery workflow automatically prunes proven merged, unchanged and unprotected PR branches.
 

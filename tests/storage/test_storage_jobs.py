@@ -208,7 +208,9 @@ def test_admin_job_endpoints_require_root_auth_csrf_and_do_not_expose_tokens(
     # Source roots are config-only. A retired env variable must not override
     # the allowed-root policy. Invalid paths must fail closed with 422.
     monkeypatch.delenv("TELEDRIVE_JOB_SOURCE_ROOT", raising=False)
-    monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(tmp_path / "forbidden"))
+    forbidden = tmp_path / "forbidden"
+    forbidden.mkdir()
+    monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(forbidden))
     assert client.post(url, auth=auth, json=payload).status_code == 403
     rejected = client.post(url, auth=auth, json=payload,
                            headers={"x-teledrive-csrf": "1"})

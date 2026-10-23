@@ -76,9 +76,8 @@
     },
     {
       "name": "CopyObject",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by code"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetObjectAttributes",

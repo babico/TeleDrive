@@ -64,6 +64,8 @@ tailwind.config = {
   .m-head{background:#374151;color:#d1d5db}
   .perm-group{border:1px solid #1f2937;border-radius:8px;margin-bottom:6px;overflow:hidden}
   .perm-group-head{display:flex;align-items:center;gap:8px;padding:8px 10px;background:#0f172a;cursor:default}
+  .perm-group-desc{padding:4px 10px 8px 34px;font-size:11px;color:#6b7280;border-top:1px solid #111827;line-height:1.4}
+  .perm-summary{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .perm-group-title{flex:1;text-align:left;background:transparent;border:none;color:#e5e7eb;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer;padding:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .perm-group-title:hover{color:#818cf8}
   .perm-caret{color:#6b7280;font-size:11px}
@@ -146,7 +148,7 @@ tailwind.config = {
       <label>Permissions <span class="badge badge-blue ml-1" x-text="selectedScopes.length + ' selected'"></span></label>
       <p class="muted text-xs mb-2">Grant exactly the endpoints this key needs — nothing more. Search by method, path or description.</p>
       <input x-model="permSearch" class="input" placeholder="Search endpoints… (e.g. buckets, GET, admin/storage)">
-      <div class="scroll mt-2" style="max-height:380px">
+      <div class="scroll mt-2" style="max-height:420px">
         <template x-for="(perms, cat) in endpointCategories" :key="cat">
           <div class="perm-group" x-show="categoryMatches(cat)">
             <div class="perm-group-head">
@@ -155,13 +157,14 @@ tailwind.config = {
               <span class="muted text-xs" x-text="countSelected(perms) + '/' + perms.length"></span>
               <span class="perm-caret" x-text="catOpen[cat] ? '▾' : '▸'"></span>
             </div>
+            <div class="perm-group-desc" x-text="groupDescriptions[cat] || ''"></div>
             <div x-show="catOpen[cat] || permSearch">
               <template x-for="p in endpointsIn(cat)" :key="p.name">
-                <label class="perm-item" x-show="permMatches(p)">
+                <label class="perm-item" x-show="permMatches(p)" :title="p.summary || p.name">
                   <input type="checkbox" :value="p.name" x-model="selectedScopes">
                   <span class="m-method" :class="'m-' + p.method.toLowerCase()" x-text="p.method"></span>
                   <span class="font-mono text-xs text-gray-200" x-text="p.path"></span>
-                  <span class="muted text-xs" x-show="p.description" x-text="p.description"></span>
+                  <span class="muted text-xs perm-summary" x-text="p.summary || ''"></span>
                 </label>
               </template>
             </div>

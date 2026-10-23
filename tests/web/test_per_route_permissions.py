@@ -115,6 +115,15 @@ def test_catalog_endpoint_exposes_the_full_registry(api):
     assert "rest:objects:get" in names
     assert "get:/api/v1/admin/keys" in names
     assert any(n.startswith("post:/api/v1/admin/") for n in names)
+    # Groups carry curated descriptions and routes carry summaries.
+    groups = {g["name"]: g for g in body.get("groups", [])}
+    assert groups, "permission groups are missing"
+    assert groups["/api/v1/admin/storage/gc"]["description"]
+    assert "Physical GC" in groups["/api/v1/admin/storage/gc"]["description"]
+    assert any(r.get("summary") for r in body["routes"]), \
+        "route summaries are missing"
+    # Only the JSON API surface is permissionable (no HTML pages).
+    assert all(r["path"].startswith("/api/") for r in body["routes"])
     # Legacy aliases documented with their expansions.
     legacy = {entry["name"]: entry["expands_to"] for entry in body["legacy_scopes"]}
     assert legacy["objects:read"] == [

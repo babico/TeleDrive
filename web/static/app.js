@@ -120,6 +120,8 @@ function app(){
     catOpen: {},
     keyScopesList: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage','jobs:read','jobs:manage','accounts:read','accounts:manage','settings:read','settings:manage','keys:manage','admin:*'],
     endpointPermissions: [],
+    endpointGroups: [],
+    groupDescriptions: {},
     legacyScopes: [],
     endpointCategories: {},
     async loadPermissionCatalog(){
@@ -128,14 +130,20 @@ function app(){
         this.legacyScopes = r.legacy_scopes||[];
         const routes = r.routes||[];
         this.endpointPermissions = routes;
+        this.endpointGroups = r.groups||[];
         // Group routes by path with {params} as '*' (trailing /* dropped).
         const cats = {};
+        const groupDesc = {};
+        for(const g of this.endpointGroups){
+          groupDesc[g.name] = g.description;
+        }
         for(const p of routes){
           let cat = p.path.replace(/\{[^}]+\}/g, '*');
           if(cat.endsWith('/*')) cat = cat.slice(0, -2);
           (cats[cat] = cats[cat]||[]).push(p.name);
         }
         this.endpointCategories = cats;
+        this.groupDescriptions = groupDesc;
       } catch(e){ /* catalog is best-effort; manual scope entry still works */ }
     },
     toggleAllEndpoints(on){

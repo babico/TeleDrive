@@ -1880,10 +1880,14 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
     inline_tags = ctx.inline_tags
     # The source path must be signed. Otherwise a valid PUT signature
     # could be replayed to copy a different private source object.
-    if "X-Amz-Algorithm" in request.query_params:
-        raise SigV4Error("NotImplemented", "Presigned CopyObject unsupported")
-    authorization = request.headers.get("authorization", "")
-    signed_headers = authorization.partition("SignedHeaders=")[2].split(",", 1)[0].split(";")
+    # Presigned URLs carry their signed-header list in the query.
+    presigned = "X-Amz-Algorithm" in request.query_params
+    if presigned:
+        signed_headers = request.query_params.get(
+            "X-Amz-SignedHeaders", "").split(";")
+    else:
+        authorization = request.headers.get("authorization", "")
+        signed_headers = authorization.partition("SignedHeaders=")[2].split(",", 1)[0].split(";")
     source_header = request.headers["x-amz-copy-source"]
     if ("x-amz-copy-source" not in signed_headers
             or store.resolve(owner, "s3:GetObject") is None):

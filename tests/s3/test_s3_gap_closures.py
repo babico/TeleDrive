@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import time
 from email.utils import format_datetime
 from datetime import datetime, timezone
@@ -152,6 +153,85 @@ def test_list_object_versions_delimiter_and_encoding(service):
     bad = signed(service, "GET", "/owner-bucket?versions&encoding-type=xml")
     assert bad.status_code == 400
     assert b"InvalidArgument" in bad.content
+
+
+def test_presigned_copy_object_binds_the_source(service):
+    from datetime import datetime, timezone
+    from urllib.parse import quote as _q
+    client, issued, _, _, _ = service
+    assert signed(service, "PUT", "/backup-bucket").status_code == 200
+    assert signed(service, "PUT", "/backup-bucket/presign-src.bin",
+                  b"presigned-payload").status_code == 200
+
+    def presign_copy(path, copy_source, *, expires=3600):
+        now = datetime.now(timezone.utc)
+        stamp = now.strftime("%Y%m%dT%H%M%SZ")
+        date = now.strftime("%Y%m%d")
+        region, host = "us-east-1", "localhost:9000"
+        scope = f"{issued.access_key}/{date}/{region}/s3/aws4_request"
+        headers = {
+            "host": host,
+            "x-amz-content-sha256": hashlib.sha256(b"").hexdigest(),
+            "x-amz-copy-source": copy_source,
+        }
+        names = sorted(headers)
+        query = "&".join(
+            f"{_q(k, safe='-_.~')}={_q(v, safe='-_.~')}" for k, v in sorted({
+                "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+                "X-Amz-Credential": scope,
+                "X-Amz-Date": stamp,
+                "X-Amz-Expires": str(expires),
+                "X-Amz-SignedHeaders": ";".join(names),
+            }.items()))
+        canonical = (
+            f"PUT\n{path}\n{query}\n"
+            + "".join(f"{n}:{headers[n]}\n" for n in names)
+            + f"\n{';'.join(names)}\n{headers['x-amz-content-sha256']}")
+        string_to_sign = (
+            f"AWS4-HMAC-SHA256\n{stamp}\n{date}/{region}/s3/aws4_request\n"
+            + hashlib.sha256(canonical.encode()).hexdigest())
+        secret = issued.secret_key.encode()
+        key = hmac.new(b"AWS4" + secret, date.encode(), hashlib.sha256).digest()
+        for word in (region, "s3", "aws4_request"):
+            key = hmac.new(key, word.encode(), hashlib.sha256).digest()
+        signature = hmac.new(key, string_to_sign.encode(),
+                             hashlib.sha256).hexdigest()
+        return (f"{path}?{query}&X-Amz-Signature={signature}",
+                {k: v for k, v in headers.items() if k != "host"})
+
+    # A correctly presigned copy works without any Authorization header.
+    url, headers = presign_copy("/backup-bucket/presign-dst.bin",
+                                "/backup-bucket/presign-src.bin")
+    copied = client.put(url, headers=headers)
+    assert copied.status_code == 200, copied.text
+    assert signed(service, "GET", "/backup-bucket/presign-dst.bin"
+                  ).content == b"presigned-payload"
+
+    # Tampering with the signature is rejected.
+    url_bad = url[:-2] + ("00" if not url.endswith("00") else "11")
+    tampered = client.put(url_bad, headers=headers)
+    assert tampered.status_code == 403
+    assert b"SignatureDoesNotMatch" in tampered.content
+
+    # An expired URL is refused.
+    url_old, headers_old = presign_copy("/backup-bucket/presign-dst2.bin",
+                                        "/backup-bucket/presign-src.bin",
+                                        expires=1)
+    import time as _time
+    _time.sleep(2)
+    expired = client.put(url_old, headers=headers_old)
+    assert expired.status_code == 403
+    assert b"expired" in expired.content.lower()
+
+    # The URL cannot be replayed against a DIFFERENT source: the
+    # signature binds x-amz-copy-source, and swapping the header
+    # breaks it.
+    swapped = client.put(url, headers={
+        **headers, "x-amz-copy-source": "/backup-bucket/other-src.bin"})
+    assert swapped.status_code == 403
+    assert b"SignatureDoesNotMatch" in swapped.content
+    # The other source never existed anyway — but the signature guard
+    # fires before the catalog lookup either way.
 
 
 def test_ranged_copy_object_stages_new_bytes(service):

@@ -1540,9 +1540,10 @@ def list_api_key_permissions(_: None = Depends(require_auth)):
     curated = set(ENDPOINT_PERMISSIONS)
     for entry in routes:
         if entry["name"] in curated:
-            entry["description"] = ENDPOINT_PERMISSIONS[entry["name"]]
+            entry["summary"] = ENDPOINT_PERMISSIONS[entry["name"]]
     return {
         "routes": routes,
+        "groups": registry.groups(),
         "legacy_scopes": [
             {"name": name, "expands_to": sorted(expansion)}
             for name, expansion in sorted(LEGACY_SCOPE_EXPANSION.items())],

@@ -157,7 +157,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":18, "partial":38, "unsupported":60,
+        "supported":19, "partial":37, "unsupported":60,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -171,7 +171,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      for item in data["operations"]
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
-    assert Counter(manifest_gaps.values()) == {"by code": 1, "by design": 37}
+    assert Counter(manifest_gaps.values()) == {"by design": 37}
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",
     }

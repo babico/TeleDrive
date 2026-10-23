@@ -147,9 +147,20 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
                 "Presigned multipart initiation must bind an empty request body",
             )
     if request.method == "PUT":
-        # Never expose an S3 write URL which permits arbitrary replacement
-        # with a different payload by anyone who obtains the link.
-        if not {"x-amz-checksum-sha256", "x-amz-content-sha256"}.intersection(signed):
+        if "x-amz-copy-source" in signed:
+            # Presigned CopyObject: the request has no body, so the
+            # signature must bind the EMPTY-body digest — and the
+            # source header being signed (checked here and again in the
+            # copy handler) is what stops the URL being replayed
+            # against a different private source object.
+            if ("x-amz-content-sha256" not in signed
+                    or headers["x-amz-content-sha256"] != _sha(b"")):
+                raise SigV4Error(
+                    "AccessDenied",
+                    "Presigned copy requires the signed empty-body digest")
+        elif not {"x-amz-checksum-sha256", "x-amz-content-sha256"}.intersection(signed):
+            # Never expose an S3 write URL which permits arbitrary replacement
+            # with a different payload by anyone who obtains the link.
             raise SigV4Error("AccessDenied", "Presigned PUT requires signed SHA-256 checksum")
         if "x-amz-content-sha256" in signed and not re.fullmatch(
             r"[0-9a-f]{64}", headers["x-amz-content-sha256"]

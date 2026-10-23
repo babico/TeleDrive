@@ -396,6 +396,49 @@ come from simply authorizing more accounts.
 
 ## 12. User feedback round 2 (2026-10-23)
 
+- [x] **By-code partial closures (round 3)** DONE — the LAST by-code
+      gap is closed and section 3.2 is now EMPTY: presigned CopyObject
+      works through SigV4 query authentication with the source header
+      and the empty-body digest bound into the signature (a leaked URL
+      cannot be replayed against a different private source; expiry
+      and tamper checks shared with all presigned URLs). Inventory:
+      **19 supported / 37 partial (0 by code, 37 by design) / 60
+      unsupported** — every remaining partial is an architectural
+      (fail-closed) decision, nothing is "just missing code" anymore.
+- [x] **API permission catalog descriptions** DONE: the registry now
+      derives per-route summaries from the live FastAPI route table
+      (zero drift) and ships 73 curated group descriptions; the
+      permission picker shows each group's purpose under its header
+      and a one-line summary next to every method+path row. The
+      catalog is restricted to the JSON API surface (HTML pages are
+      session views, not permissionable endpoints).
+- [ ] **Triage and land the open GitHub PRs.** Three PRs are open
+      against main, all branched from OLDER main states than the
+      current 71f3590 (per-route permissions, physical GC, S3 gap
+      closures) — expect conflicts and stale assumptions:
+      - **#25** "fix(gc/security): restore CI gate and reconcile
+        Telethon-only operational docs" — touches the GC/security
+        surface that has since been massively rewritten (gc_collect
+        module, GC UI toggle); review diff-by-diff against current
+        main, reimplement anything still valid on top of the new GC
+        code, close the rest as superseded.
+      - **#24** "docs(ci): count six automatic workflows plus manual
+        endurance correctly" — docs-only CI workflow counting; verify
+        the counts still hold after the quality-security.yml test
+        registrations added since, then merge or redo inline.
+      - **#22** "fix(ci/docs): verify Telethon storage roadmap and
+        repair config-only job regression" — the config-owned job
+        source regression was ALREADY fixed on main in 8c40325
+        (squash-merged as PR #23); check what remains (Telethon
+        roadmap docs), port or close as duplicate.
+      Process per PR: diff against current main → classify
+      (still-valid / superseded / wrong) → reimplement valid parts on
+      a fresh branch → all mandatory checks green on that exact SHA
+      (release rule 11) → squash-merge; close superseded ones with a
+      comment pointing at the main commit that superseded them.
+      Do NOT blind-merge: the GC and permission surfaces moved under
+      them.
+
 - [x] **Unified per-endpoint permissions for EVERY API route** DONE.
       The permission registry is derived from the live FastAPI route
       table (method + path template — it can never drift); the 9 REST

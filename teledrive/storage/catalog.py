@@ -86,6 +86,8 @@ def ensure_versioning_column(db) -> None:
                 f"PRAGMA table_info({table})"))}
         return {row[0] for row in db.connection.execute(_text(
             "SELECT column_name FROM information_schema.columns "
+            # nosec B608 — `table` is a hardcoded internal table name
+            # (storage_buckets/storage_objects), never user input.
             f"WHERE table_name = '{table}'"))}
 
     bucket_columns = columns_of("storage_buckets")

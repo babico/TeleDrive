@@ -180,19 +180,21 @@ class RetainedMediaGC:
                 "WHERE a.source_object_id = o.id) "
                 "AND EXISTS (SELECT 1 FROM storage_published_versions p "
                 "WHERE p.object_id = o.id)")
+        # Both queries are fully static: the f-string only splices the
+        # module-constant `base` fragment above; no user input flows in.
         revoked = db.execute(text(
             f"SELECT COUNT(*) {base} "
             "AND EXISTS (SELECT 1 FROM storage_removed_versions r "
-            "WHERE r.object_id = o.id)")).scalar_one()
+            "WHERE r.object_id = o.id)")).scalar_one()  # nosec B608
         deleted = db.execute(text(
-            f"SELECT COUNT(*) {base} "
+            f"SELECT COUNT(*) {base} "  # nosec B608
             "AND NOT EXISTS ("
             "SELECT 1 FROM storage_published_versions p2 "
             "JOIN storage_object_heads h2 "
             "ON h2.bucket = p2.bucket AND h2.key_hash = p2.key_hash "
             "JOIN storage_objects oh ON oh.id = h2.object_id "
             "WHERE p2.object_id = o.id AND oh.status <> 'delete-marker')"
-        )).scalar_one()
+        )).scalar_one()  # nosec B608
         collected = db.execute(text(
             "SELECT COUNT(*), COALESCE(SUM(bytes), 0) "
             "FROM storage_gc_collected")).one()

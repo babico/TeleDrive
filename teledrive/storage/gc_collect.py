@@ -25,8 +25,8 @@ import json
 import time
 
 from sqlalchemy import (BigInteger, Boolean, Column, Integer, String,
-                        Table, Text, delete, insert, not_, select, text,
-                        update)
+                        Table, Text, delete, func, insert, not_, select,
+                        text, update)
 
 from .catalog import (catalog_metadata, heads, published_versions,
                      removed_versions)
@@ -39,6 +39,18 @@ gc_state = Table(
     Column("enabled", Boolean, nullable=False),
     Column("updated_ns", BigInteger, nullable=False),
     Column("updated_by", String(255), nullable=False),
+    # Added in Phase A; pre-existing deployments get it via
+    # _ensure_grace_column's ALTER TABLE.
+    Column("grace_seconds", Integer),
+)
+# Explicit physical-collection requests: version deletes, multipart
+# aborts and lifecycle expirations enqueue their objects here when GC
+# is enabled; the collector drains them after the grace period.
+gc_queue = Table(
+    "storage_gc_queue", metadata,
+    Column("object_id", String(36), primary_key=True),
+    Column("enqueued_ns", BigInteger, nullable=False),
+    Column("reason", String(64), nullable=False),
 )
 gc_collected = Table(
     "storage_gc_collected", metadata,
@@ -52,9 +64,29 @@ gc_collected = Table(
     Column("collected_ns", BigInteger, nullable=False),
 )
 
-SCOPES = ("revoked", "deleted")
+SCOPES = ("revoked", "deleted", "queued")
 DEFAULT_MIN_AGE_SECONDS = 24 * 3600
 MIN_AGE_FLOOR_SECONDS = 3600
+DEFAULT_GRACE_SECONDS = 24 * 3600
+
+
+def _ensure_grace_column(db):
+    """storage_gc_state.grace_seconds may be missing in deployments
+    created before Phase A; add it defensively (SQLite and PostgreSQL
+    both support ALTER TABLE ... ADD COLUMN)."""
+    from sqlalchemy import text as _text
+    if db.engine.dialect.name == "sqlite":
+        # PRAGMA rows are (cid, name, type, ...): the NAME is index 1.
+        columns = {row[1] for row in db.connection.execute(_text(
+            "PRAGMA table_info(storage_gc_state)"))}
+    else:
+        columns = {row[0] for row in db.connection.execute(_text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'storage_gc_state'"))}
+    if columns and "grace_seconds" not in columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_gc_state ADD COLUMN grace_seconds INTEGER"))
+        db.commit()
 
 
 def _send_intents_table():
@@ -67,27 +99,66 @@ class RetainedMediaGC:
         self.db = db
         metadata.create_all(db.engine)
         catalog_metadata.create_all(db.engine)
+        _ensure_grace_column(db)
 
     # -- state -----------------------------------------------------------
     def state(self) -> dict:
         row = self.db.connection.execute(
             select(gc_state.c.enabled, gc_state.c.updated_ns,
-                   gc_state.c.updated_by).where(gc_state.c.id == 1)
+                   gc_state.c.updated_by,
+                   gc_state.c.grace_seconds).where(gc_state.c.id == 1)
         ).first()
         if row is None:
-            return {"enabled": False, "updated_ns": None, "updated_by": None}
+            return {"enabled": False, "updated_ns": None,
+                    "updated_by": None,
+                    "grace_seconds": DEFAULT_GRACE_SECONDS}
         return {"enabled": bool(row[0]), "updated_ns": row[1],
-                "updated_by": row[2]}
+                "updated_by": row[2],
+                "grace_seconds": int(row[3] or DEFAULT_GRACE_SECONDS)}
 
-    def set_enabled(self, enabled: bool, *, by: str) -> None:
+    def set_enabled(self, enabled: bool, *, by: str,
+                    grace_seconds: int | None = None) -> None:
         now = time.time_ns()
-        values = {"enabled": bool(enabled), "updated_ns": now, "updated_by": by}
+        if grace_seconds is not None:
+            if not MIN_AGE_FLOOR_SECONDS <= grace_seconds <= 90 * 86400:
+                raise ValueError("GC grace outside 1h..90d")
+        values = {"enabled": bool(enabled), "updated_ns": now,
+                  "updated_by": by}
+        if grace_seconds is not None:
+            values["grace_seconds"] = int(grace_seconds)
         changed = self.db.connection.execute(
             update(gc_state).where(gc_state.c.id == 1).values(**values))
         if changed.rowcount != 1:
+            if "grace_seconds" not in values:
+                values["grace_seconds"] = DEFAULT_GRACE_SECONDS
             self.db.connection.execute(
                 insert(gc_state).values(id=1, **values))
         self.db.commit()
+
+    # -- queue -----------------------------------------------------------
+    def enqueue(self, object_ids, reason: str = "manual") -> int:
+        """Idempotently request physical collection for objects once
+        their grace period passes. No-op when the objects are unknown."""
+        if not isinstance(reason, str) or not 1 <= len(reason) <= 64:
+            raise ValueError("Invalid GC queue reason")
+        now = time.time_ns()
+        known = {row for row in self.db.connection.execute(
+            select(objects.c.id).where(objects.c.id.in_(list(object_ids)))
+        ).scalars()} if object_ids else set()
+        already = {row for row in self.db.connection.execute(
+            select(gc_queue.c.object_id).where(
+                gc_queue.c.object_id.in_(list(known)))
+        ).scalars()} if known else set()
+        fresh = sorted(known - already)
+        if fresh:
+            self.db.connection.execute(insert(gc_queue), [
+                {"object_id": oid, "enqueued_ns": now, "reason": reason}
+                for oid in fresh])
+            self.db.commit()
+        return len(fresh)
+
+    def _grace_seconds(self) -> int:
+        return int(self.state().get("grace_seconds") or DEFAULT_GRACE_SECONDS)
 
     # -- metrics ---------------------------------------------------------
     def metrics(self) -> dict:
@@ -125,6 +196,8 @@ class RetainedMediaGC:
         collected = db.execute(text(
             "SELECT COUNT(*), COALESCE(SUM(bytes), 0) "
             "FROM storage_gc_collected")).one()
+        queued = db.execute(select(func.count()).select_from(gc_queue)
+                            ).scalar_one()
         return {
             "logical_objects": int(logical[0] or 0),
             "logical_bytes": int(logical[1] or 0),
@@ -133,6 +206,7 @@ class RetainedMediaGC:
             "retained_objects": int(physical[0] or 0) - int(logical[0] or 0),
             "retained_bytes": int(physical[1] or 0) - int(logical[1] or 0),
             "reclaimable": {"revoked": int(revoked), "deleted": int(deleted)},
+            "queued": int(queued or 0),
             "collected_objects": int(collected[0] or 0),
             "collected_bytes": int(collected[1] or 0),
         }
@@ -149,6 +223,46 @@ class RetainedMediaGC:
             raise ValueError("Invalid GC candidate limit")
         cutoff = (time.time_ns() // 1_000_000_000) - min_age_seconds
         db = self.db.connection
+        if scope == "queued":
+            # Explicit collection requests (version deletes, MPU aborts,
+            # lifecycle expirations): eligible once past the grace
+            # period measured from ENQUEUE time, under the same
+            # fail-closed safety filters as every other scope.
+            grace_ns = self._grace_seconds() * 1_000_000_000
+            queued = db.execute(
+                select(gc_queue.c.object_id, gc_queue.c.reason,
+                       gc_queue.c.enqueued_ns)
+                .where(gc_queue.c.enqueued_ns <= time.time_ns() - grace_ns)
+                .order_by(gc_queue.c.enqueued_ns).limit(limit)
+            ).mappings().all()
+            result = []
+            for entry in queued:
+                row = db.execute(
+                    select(objects.c.id, objects.c.bucket,
+                           objects.c.object_key, objects.c.updated_at)
+                    .where(
+                        objects.c.id == entry["object_id"],
+                        objects.c.status == "ready",
+                        not_(exists(heads.c.object_id, objects.c.id)),
+                        not_(exists_source_alias(objects.c.id)),
+                        exists(published_versions.c.object_id, objects.c.id),
+                    )
+                ).mappings().first()
+                if row is None:
+                    continue
+                size, chunk_count = db.execute(text(
+                    "SELECT COALESCE(SUM(size), 0), COUNT(*) "
+                    "FROM storage_chunks WHERE object_id = :oid"),
+                    {"oid": row["id"]}).one()
+                result.append({
+                    "object_id": row["id"], "bucket": row["bucket"],
+                    "key": row["object_key"],
+                    "updated_at": row["updated_at"],
+                    "reason": entry["reason"],
+                    "enqueued_ns": entry["enqueued_ns"],
+                    "chunk_count": int(chunk_count), "bytes": int(size),
+                })
+            return result
         rows = db.execute(
             select(objects.c.id, objects.c.bucket, objects.c.object_key,
                    objects.c.updated_at)
@@ -221,9 +335,17 @@ class RetainedMediaGC:
                 report["failed"].append({
                     "object_id": object_id, "reason": str(exc)[:200]})
                 continue
+            if scope == "queued" and outcome in ("collected", "skipped"):
+                # Drain the request: collected means done, skipped means
+                # the object no longer qualifies (restored, aliased or
+                # already gone) — keep only failures for retry.
+                self.db.connection.execute(delete(gc_queue).where(
+                    gc_queue.c.object_id == object_id))
+                self.db.commit()
             report[outcome].append({
                 "object_id": object_id, "bucket": candidate.get("bucket"),
                 "key": candidate.get("key"),
+                "reason": candidate.get("reason"),
                 "chunk_count": candidate.get("chunk_count", 0)
                 if outcome == "collected" else 0,
                 "bytes": candidate.get("bytes", 0)

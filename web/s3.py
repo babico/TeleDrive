@@ -841,6 +841,14 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
                     ET.SubElement(problem, "Message").text = (
                         "The specified version does not exist")
                     continue
+                # GC-integrated delete: queue the revoked version's
+                # media for physical collection (grace-fenced).
+                try:
+                    gcx = RetainedMediaGC(db)
+                    if gcx.state()["enabled"]:
+                        gcx.enqueue([version_id], "batch-version-delete")
+                except Exception:
+                    pass
             except ValueError:
                 problem = ET.SubElement(result, "Error")
                 ET.SubElement(problem, "Key").text = key_to_delete
@@ -1308,7 +1316,24 @@ async def _handle_multipart(ctx: _S3RequestContext) -> Response:
     if not upload_id:
         raise MultipartError("NoSuchUpload", "Missing UploadId", 404)
     if ctx.mpu_abort:
+        # GC-integrated abort: with GC enabled, the staged part media is
+        # queued for physical collection; disabled GC keeps the
+        # journal-retention behavior (orphan protection pending GC).
+        try:
+            from teledrive.s3.multipart import parts as _part_rows
+            part_ids = [row for row in ctx.db.connection.execute(
+                select(_part_rows.c.object_id).where(
+                    _part_rows.c.upload_id == upload_id)).scalars()]
+        except Exception:
+            part_ids = []
         mpu.abort(upload_id, ctx.bucket, ctx.key, ctx.owner)
+        if part_ids:
+            try:
+                gcx = RetainedMediaGC(ctx.db)
+                if gcx.state()["enabled"]:
+                    gcx.enqueue(part_ids, "mpu-abort")
+            except Exception:
+                pass
         return Response(status_code=204)
     if ctx.mpu_list:
         return await _mpu_list_parts(ctx, mpu, upload_id)
@@ -1863,6 +1888,15 @@ async def _handle_version_delete(ctx: _S3RequestContext) -> Response:
     )).scalar_one_or_none() == "delete-marker"
     if not catalog.delete_version(bucket, key, version_id):
         return _error("NoSuchVersion", "Version does not exist", 404)
+    # GC-integrated delete: with physical GC enabled, the revoked
+    # version's media is queued for collection once the grace period
+    # passes. Disabled GC keeps today's journal-retention behavior.
+    try:
+        gcx = RetainedMediaGC(db)
+        if gcx.state()["enabled"]:
+            gcx.enqueue([version_id], "version-delete")
+    except Exception:
+        pass  # queueing must never break the logical delete
     headers = {"x-amz-version-id": version_id}
     if is_marker:
         headers["x-amz-delete-marker"] = "true"

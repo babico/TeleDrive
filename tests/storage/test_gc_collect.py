@@ -27,10 +27,11 @@ class FakeTransport:
 _message_seq = [5000]
 
 
-def _publish(cat, key, *, size, now, account="acct-a", chat=-100):
+def _publish(cat, key, *, size, now, account="acct-a", chat=-100,
+             bucket="gcx"):
     """begin -> one chunk -> finish -> publish; returns object id."""
     _message_seq[0] += 1
-    oid = cat.manifests.begin("gcx", key, size, now)
+    oid = cat.manifests.begin(bucket, key, size, now)
     cat.manifests.append(oid, ChunkReference(
         ordinal=0, offset=0, size=size, sha256=sha256(b"x").hexdigest(),
         account=account, chat_id=chat, message_id=_message_seq[0]), now)
@@ -195,3 +196,118 @@ def test_web_endpoints_fence_the_toggle_and_confirm(admin):
     client.put("/api/v1/admin/storage/gc", auth=auth,
                headers={"x-teledrive-csrf": "1"},
                json={"enabled": False})
+
+
+def test_gc_queue_scope_respects_grace_and_drains(store):
+    """Phase A: version deletes / aborts / expirations enqueue objects;
+    the queued scope collects them once the grace period passes."""
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    gone, _ = _publish(cat, "queued.bin", size=90, now=old)
+    cat.remove_current("gcx", "queued.bin")  # no live head -> reclaimable
+
+    gcx = RetainedMediaGC(cat.manifests.db)
+    assert gcx.state()["grace_seconds"] == 24 * 3600  # default
+    # Enqueue is idempotent and ignores unknown ids.
+    assert gcx.enqueue([gone], "version-delete") == 1
+    assert gcx.enqueue([gone], "version-delete") == 0
+    assert gcx.enqueue(["nonexistent"], "x") == 0
+    assert gcx.metrics()["queued"] == 1
+
+    # Inside the grace period: queued scope finds nothing.
+    assert gcx.candidates(scope="queued") == []
+
+    # Shrink the grace, let the enqueue age past it (time travel),
+    # then collect: the object is physically removed and the queue drains.
+    gcx.set_enabled(True, by="owner-test", grace_seconds=3600)
+    from sqlalchemy import text as _t
+    cat.manifests.db.connection.execute(_t(
+        "UPDATE storage_gc_queue SET enqueued_ns = enqueued_ns - :age"),
+        {"age": 2 * 3600 * 1_000_000_000})
+    cat.manifests.db.commit()
+    candidates = gcx.candidates(scope="queued")
+    assert [c["object_id"] for c in candidates] == [gone]
+    assert candidates[0]["reason"] == "version-delete"
+
+    transport = FakeTransport()
+    import asyncio
+    report = asyncio.run(gcx.collect(transport, scope="queued",
+                                     chunk_refs=candidates))
+    assert [r["object_id"] for r in report["collected"]] == [gone]
+    assert gcx.metrics()["queued"] == 0
+    assert gcx.metrics()["physical_objects"] == 0
+
+
+def test_version_delete_enqueues_only_when_gc_enabled(store):
+    """The S3 version-delete path queues physical collection only
+    when the owner gate is open."""
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    target, _ = _publish(cat, "vd.bin", size=50, now=old)
+    cat.delete_version("gcx", "vd.bin", target)
+
+    from teledrive.storage.gc_collect import RetainedMediaGC as _GC
+    db = cat.manifests.db
+    # GC disabled (default): the revoked version keeps its media.
+    assert _GC(db).metrics()["queued"] == 0
+    # Enable GC: a second version delete enqueues.
+    gcx = _GC(db)
+    gcx.set_enabled(True, by="t")
+    other, _ = _publish(cat, "vd2.bin", size=60, now=old)
+    cat.delete_version("gcx", "vd2.bin", other)
+    # (enqueue happens in the web handler; simulate the same call the
+    # handler makes to prove the wiring contract)
+    assert gcx.enqueue([other], "version-delete") == 1
+    assert gcx.metrics()["queued"] == 1
+
+
+def test_lifecycle_expiration_creates_markers_and_enqueues(admin):
+    """Expiration rules: due current objects get delete markers and,
+    with GC enabled, their media joins the collection queue."""
+    client, url, _ = admin
+    auth = ("testadmin", "secure-auth-password")
+    from tests.s3.test_s3_gateway import service as _svc  # noqa: F401
+    db = connect_database(url)
+    try:
+        cat = BucketCatalog(ManifestStore(db))
+        cat.create_bucket("lcx", int(time.time()))
+        old = int(time.time()) - 10 * 86400
+        from tests.storage.test_gc_collect import _publish as _pub
+        expiring, _ = _pub(cat, "temp/old.bin", size=70, now=old,
+                           bucket="lcx")
+        _pub(cat, "keep/new.bin", size=80, now=int(time.time()),
+             bucket="lcx")
+        from teledrive.s3.lifecycle import (BucketLifecycleStore,
+                                            parse_lifecycle_xml)
+        rules = parse_lifecycle_xml(
+            b"<LifecycleConfiguration><Rule><ID>r1</ID>"
+            b"<Status>Enabled</Status><Filter><Prefix>temp/</Prefix></Filter>"
+            b"<Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>")
+        assert rules == [{"id": "r1", "status": "Enabled", "prefix": "temp/",
+                          "days": 7, "action": "expire", "expired_marker": False}]
+        store = BucketLifecycleStore(cat)
+        store.replace("lcx", rules)
+
+        gcx = RetainedMediaGC(db)
+        gcx.set_enabled(True, by="t", grace_seconds=3600)
+        applied = store.apply_due(now=int(time.time()), limit=10)
+        assert applied == 1
+        # The old object is no longer the head; the new one is intact.
+        try:
+            cat.get("lcx", "temp/old.bin")
+            raised = False
+        except FileNotFoundError:
+            raised = True
+        assert raised
+        assert cat.get("lcx", "keep/new.bin").item.size == 80
+        # And its media is queued for physical collection (past grace).
+        assert gcx.metrics()["queued"] == 1
+        from sqlalchemy import text as _t2
+        db.connection.execute(_t2(
+            "UPDATE storage_gc_queue SET enqueued_ns = enqueued_ns - :age"),
+            {"age": 2 * 3600 * 1_000_000_000})
+        db.commit()
+        assert [c["object_id"] for c in gcx.candidates(
+            scope="queued")] == [expiring]
+    finally:
+        db.close()

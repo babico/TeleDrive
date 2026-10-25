@@ -982,8 +982,8 @@ def test_real_s3_lifecycle_has_single_process_schedule_and_ci():
 
 def test_s3_compatibility_matrix_cannot_relabel_safe_lifecycle_as_full_aws():
     specs = (ROOT / "docs/S3_SPECS.md").read_text()
-    assert ("**Inventory totals:** 19 supported, 37 partial "
-            "(0 by code, 37 by design), 60 unsupported;") in specs
+    assert ("**Inventory totals:** 27 supported, 29 partial "
+            "(0 by code, 29 by design), 60 unsupported;") in specs
     for action in (
         "GetBucketLifecycleConfiguration", "PutBucketLifecycleConfiguration",
         "DeleteBucketLifecycle",
@@ -991,11 +991,18 @@ def test_s3_compatibility_matrix_cannot_relabel_safe_lifecycle_as_full_aws():
         prefix = "| [" + action + "](https://docs.aws.amazon.com"
         matches = [line for line in specs.splitlines() if line.startswith(prefix)]
         assert len(matches) == 1
-        assert "🟡 Partial" in matches[0]
-        # Lifecycle expiration is GC-gated, never a code gap.
-        assert "by design" in matches[0]
+        # Phase A promoted lifecycle to Supported — but the row must
+        # document the GC integration honestly, not claim unconditional
+        # physical deletion.
+        assert "✅ Supported" in matches[0]
+        if action == "PutBucketLifecycleConfiguration":
+            assert "GC" in matches[0]
     assert "AbortIncompleteMultipartUpload" in specs
-    assert "never deletes an object or Telegram media" in specs
+    assert "grace-fenced collection queue" in specs
+    # The lifecycle E2E suite and the hourly evaluator are required.
+    assert "tests/s3/test_s3_lifecycle.py" in (ROOT /
+        ".github/workflows/quality-security.yml").read_text()
+    assert "lifecycle_scheduler_loop()" in (ROOT / "web/app.py").read_text()
 
 def test_s3_fail_closed_116_operation_manifest_suite_is_required():
     for name in ("quality-security.yml", "integration-storage.yml"):
@@ -1076,14 +1083,18 @@ def test_s3_specs_markdown_tables_render_as_complete_gfm_tables():
         assert all(row.count("|") == columns for _, row in group), (
             "mismatched table columns", start
         )
-    # Lifecycle operations must appear as classified partial rows in the
-    # section-3 tables (by design, never by code: expiration is GC-gated).
+    # Lifecycle operations are Supported since Phase A and must appear
+    # as full rows in the section-3.1 table with the GC integration
+    # documented.
     all_rows = [row for group in groups for _, row in group[2:]]
     for operation in ("GetBucketLifecycleConfiguration",
                       "PutBucketLifecycleConfiguration",
                       "DeleteBucketLifecycle"):
         row = next(row for row in all_rows if f"[{operation}]" in row)
-        assert "| 🟡 Partial | by design |" in row, operation
+        assert "| ✅ Supported |" in row, operation
+        if operation == "PutBucketLifecycleConfiguration":
+            # The write row must document the GC-integrated evaluator.
+            assert "GC" in row, operation
     assert sum(
         line.startswith("| [") and
         "](https://docs.aws.amazon.com/AmazonS3/latest/API/" in line

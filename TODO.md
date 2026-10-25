@@ -402,11 +402,21 @@ state, enforcement on every violating path, and GET observability —
 the backing is TeleDrive metadata, not AWS infrastructure. Phases in
 dependency order, each independently shippable; A and B first.
 
-- [ ] **Phase A — GC-integrated deletes**: storage_gc_queue +
-      storage.gc_grace_seconds; DeleteObject(versionId)/DeleteObjects
-      entries/AbortMultipartUpload physically collect when GC enabled;
-      lifecycle Expiration rules + daily evaluator. Converts 7
-      by-design partials.
+- [x] **Phase A — GC-integrated deletes** DONE: storage_gc_queue +
+      grace_seconds (on storage_gc_state, defensively ALTERed for
+      existing deployments); DeleteObject(versionId), DeleteObjects
+      per-entry versions and AbortMultipartUpload enqueue their media
+      for grace-fenced physical collection when GC is enabled
+      (disabled GC keeps journal-retention behavior); lifecycle rules
+      gained Expiration (Days 1..3650, ExpiredObjectDeleteMarker,
+      Prefix) alongside AbortIncompleteMultipartUpload, with the
+      hourly evaluator creating delete markers for due current objects
+      and enqueueing their media; queued collection scope in the
+      collector drains the queue (collected + stale-skipped entries
+      removed, failures retried); the GC card shows queue depth,
+      grace and the queued scope. gc-owner-gate is now a RESOLVED
+      design reason — 8 operations promoted to Supported. Inventory:
+      **27 supported / 29 partial (0 by code) / 60 unsupported**.
 - [ ] **Phase B — bucket versioning states**: versioning_state column
       (ENABLED/SUSPENDED), publish/delete branches for suspended
       buckets, PutBucketVersioning accepts Suspended. Converts 2.

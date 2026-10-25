@@ -1129,6 +1129,9 @@ class GCToggleRequest(BaseModel):
     enabled: bool
     confirm: str | None = Field(
         default=None, description='Typed confirmation "PHYSICAL-GC" to enable')
+    grace_seconds: int | None = Field(
+        default=None, ge=3600, le=90 * 86400,
+        description="Grace period for queued physical collections")
 
 
 class GCCollectRequest(BaseModel):
@@ -4002,7 +4005,11 @@ def gc_toggle(request: Request, payload: GCToggleRequest,
     conn = db_connect()
     try:
         gcx = RetainedMediaGC(conn)
-        gcx.set_enabled(payload.enabled, by=str(user.get("username", "?")))
+        try:
+            gcx.set_enabled(payload.enabled, by=str(user.get("username", "?")),
+                            grace_seconds=payload.grace_seconds)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         _log(f"physical gc {'ENABLED' if payload.enabled else 'disabled'} "
              f"by {user.get('username', '?')} — Telegram media of logically "
              f"deleted objects becomes reclaimable via collect",

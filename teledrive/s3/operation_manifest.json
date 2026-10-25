@@ -64,15 +64,13 @@
     },
     {
       "name": "DeleteObject",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteObjects",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "CopyObject",
@@ -112,9 +110,8 @@
     },
     {
       "name": "AbortMultipartUpload",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketTagging",
@@ -192,21 +189,18 @@
     },
     {
       "name": "GetBucketLifecycleConfiguration",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketLifecycleConfiguration",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteBucketLifecycle",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeletePublicAccessBlock",
@@ -324,15 +318,13 @@
     },
     {
       "name": "GetBucketLifecycle",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketLifecycle",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketReplication",

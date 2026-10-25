@@ -105,6 +105,15 @@ The design reason column names the decision that keeps the gap open;
 the enforced-behavior column is the actual contract. The reasons and
 what would unlock each of them:
 
+**Resolution program:** [Metadata-Backed S3 Parity Plan](METADATA_PARITY_PLAN.md)
+— the stance is that an emulated feature is honest when it has real
+SQL state, enforcement on every violating path and GET observability.
+Phases A–J convert 35 of these 37 partials to Supported with
+metadata-backed work (GC-integrated deletes, versioning states, object
+lock, ACL grants, PAB, notifications, replication surface, CORS
+grammar, website mode, tagging journal); only RequestPayment and
+Accelerate stay by-design (no honest backing exists).
+
 | Design reason | Holds because | To fully support (recommendation) |
 | --- | --- | --- |
 | `private-only` | Public access, ACLs, bucket policies, SSE, requester-pays and transfer acceleration have no backing over a private single-owner Telegram gateway — implementing them naively would fake AWS semantics. | Implement a REAL authorization layer first: a bucket-policy engine (JSON policy → per-request evaluation against credential principals, mapped onto the existing per-credential permission scopes), then let ACL/policy writes configure it. SSE-S3 could be honest as server-side envelope encryption with a deployment-managed key (config-held master key, per-object data keys); SSE-KMS/SSE-C stay out. Website hosting needs an explicit public-exposure decision for the private model. |

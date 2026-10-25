@@ -394,6 +394,50 @@ come from simply authorizing more accounts.
       phrasing pattern ("Delete X?" + consequence hint + audit note),
       including the physical-GC owner-gate reminder on object deletes.
 
+## 13. Metadata-backed parity program (2026-10-25)
+
+Full design: [docs/METADATA_PARITY_PLAN.md](docs/METADATA_PARITY_PLAN.md).
+Stance change: an emulated feature is honest when it has real SQL
+state, enforcement on every violating path, and GET observability —
+the backing is TeleDrive metadata, not AWS infrastructure. Phases in
+dependency order, each independently shippable; A and B first.
+
+- [ ] **Phase A — GC-integrated deletes**: storage_gc_queue +
+      storage.gc_grace_seconds; DeleteObject(versionId)/DeleteObjects
+      entries/AbortMultipartUpload physically collect when GC enabled;
+      lifecycle Expiration rules + daily evaluator. Converts 7
+      by-design partials.
+- [ ] **Phase B — bucket versioning states**: versioning_state column
+      (ENABLED/SUSPENDED), publish/delete branches for suspended
+      buckets, PutBucketVersioning accepts Suspended. Converts 2.
+- [ ] **Phase C — object lock**: retention_until_ns/legal_hold columns,
+      bucket default retention, enforcement hooks in every delete path
+      AND the GC collector; compliance mode extend-only. Converts 3 +
+      promotes the P2-B write ops.
+- [ ] **Phase D — ACL grants**: storage_bucket/object_acl_grants,
+      fail-closed INTERSECTION with credential scopes, AWS-shaped XML.
+      Converts 2 + promotes 4 unsupported writes. (Matches the
+      researched P2-C design.)
+- [ ] **Phase E — PAB/policy status/ownership controls** on the grant
+      store. Converts 3.
+- [ ] **Phase F — notifications + logging**: config tables +
+      transactional event outbox + retry worker; audit-log delivery
+      into a target bucket. Converts 2 + promotes writes.
+- [ ] **Phase G — replication API surface**: per-bucket replication
+      configs driving the EXISTING engine replication; repair becomes
+      AWS-shaped reconciliation. Converts 1 + promotes writes.
+- [ ] **Phase H — CORS grammar widening**: wildcard subdomain origins,
+      expose-headers, full method list, compiled patterns. Converts 2.
+- [ ] **Phase I — website hosting**: per-bucket website configs behind
+      an explicit audited public_read flag; /site/{bucket} route.
+      Converts 1 + promotes writes.
+- [ ] **Phase J — tagging scope**: pending-tag journal applied at
+      publish (attach_uncommitted pattern). Converts 3.
+- [ ] **Phase K — SSE envelope** (owner decision, conflicts with
+      dedup/replication/search). Converts 1.
+- Kept by-design forever: RequestPayment, Accelerate — no honest
+  backing exists (billing/network).
+
 ## 12. User feedback round 2 (2026-10-23)
 
 - [x] **By-code partial closures (round 3)** DONE — the LAST by-code

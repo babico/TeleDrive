@@ -34,9 +34,6 @@ REQUESTS = {
     # P2-B — encryption and retention writes
     "PutBucketEncryption": ("PUT", "/sweep-bucket?encryption"),
     "DeleteBucketEncryption": ("DELETE", "/sweep-bucket?encryption"),
-    "PutObjectLockConfiguration": ("PUT", "/sweep-bucket?object-lock"),
-    "PutObjectRetention": ("PUT", "/sweep-bucket/asset.bin?retention"),
-    "PutObjectLegalHold": ("PUT", "/sweep-bucket/asset.bin?legal-hold"),
     # P2-D — replication and restore
     "PutBucketReplication": ("PUT", "/sweep-bucket?replication"),
     "DeleteBucketReplication": ("DELETE", "/sweep-bucket?replication"),

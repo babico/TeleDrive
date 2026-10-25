@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from sqlalchemy import (
-    BigInteger, Column, ForeignKey, MetaData, String, Table, Index,
-    and_, or_, delete, insert, select, update, inspect, text,
+    BigInteger, Boolean, Column, ForeignKey, Integer, MetaData, String,
+    Table, Index, and_, or_, delete, false, insert, select, update,
+    inspect, text,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -30,6 +31,12 @@ buckets = Table(
     # ALTER (see ensure_versioning_column).
     Column("versioning_state", String(16), nullable=False,
            server_default="Enabled"),
+    # Phase C: object lock. One-way enable (AWS semantics): once a
+    # bucket has object lock enabled it cannot be disabled.
+    Column("object_lock_enabled", Boolean, nullable=False,
+           server_default=false()),
+    Column("object_lock_default_mode", String(16)),
+    Column("object_lock_default_days", Integer),
 )
 heads = Table(
     "storage_object_heads", catalog_metadata,
@@ -64,23 +71,59 @@ _versioning_column_ensured = False
 
 
 def ensure_versioning_column(db) -> None:
-    """storage_buckets.versioning_state may be missing in deployments
-    created before Phase B; add it defensively. Cached per process."""
+    """storage_buckets.versioning_state (Phase B) and the Phase C
+    object-lock columns on both tables may be missing in older
+    deployments; add them defensively. Cached per process."""
     global _versioning_column_ensured
     if _versioning_column_ensured:
         return
     from sqlalchemy import text as _text
-    if db.engine.dialect.name == "sqlite":
-        columns = {row[1] for row in db.connection.execute(_text(
-            "PRAGMA table_info(storage_buckets)"))}
-    else:
-        columns = {row[0] for row in db.connection.execute(_text(
+    sqlite = db.engine.dialect.name == "sqlite"
+
+    def columns_of(table):
+        if sqlite:
+            return {row[1] for row in db.connection.execute(_text(
+                f"PRAGMA table_info({table})"))}
+        return {row[0] for row in db.connection.execute(_text(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'storage_buckets'"))}
-    if columns and "versioning_state" not in columns:
+            f"WHERE table_name = '{table}'"))}
+
+    bucket_columns = columns_of("storage_buckets")
+    if bucket_columns and "versioning_state" not in bucket_columns:
         db.connection.execute(_text(
             "ALTER TABLE storage_buckets ADD COLUMN versioning_state "
             "VARCHAR(16) NOT NULL DEFAULT 'Enabled'"))
+        db.commit()
+    if bucket_columns and "object_lock_enabled" not in bucket_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN object_lock_enabled "
+            "BOOLEAN NOT NULL DEFAULT 0"))
+        db.commit()
+    if bucket_columns and "object_lock_default_mode" not in bucket_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN "
+            "object_lock_default_mode VARCHAR(16)"))
+        db.commit()
+    if bucket_columns and "object_lock_default_days" not in bucket_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN "
+            "object_lock_default_days INTEGER"))
+        db.commit()
+    object_columns = columns_of("storage_objects")
+    if object_columns and "retention_until_ns" not in object_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN retention_until_ns "
+            "BIGINT"))
+        db.commit()
+    if object_columns and "legal_hold" not in object_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN legal_hold "
+            "BOOLEAN NOT NULL DEFAULT 0"))
+        db.commit()
+    if object_columns and "retention_mode" not in object_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN retention_mode "
+            "VARCHAR(16)"))
         db.commit()
     _versioning_column_ensured = True
 
@@ -146,6 +189,107 @@ class BucketCatalog:
         if changed.rowcount != 1:
             raise FileNotFoundError("Bucket does not exist")
         self.db.commit()
+
+    # -- object lock (Phase C) -------------------------------------------
+    def object_lock_config(self, bucket: str) -> dict | None:
+        """(enabled, default_mode, default_days) or None when unset."""
+        row = self.db.connection.execute(
+            select(buckets.c.object_lock_enabled,
+                   buckets.c.object_lock_default_mode,
+                   buckets.c.object_lock_default_days)
+            .where(buckets.c.name == bucket)).first()
+        if row is None:
+            raise FileNotFoundError("Bucket does not exist")
+        if not row[0]:
+            return None
+        return {"default_mode": row[1], "default_days": row[2]}
+
+    def set_object_lock_config(self, bucket: str, *, mode: str,
+                               days: int | None) -> None:
+        """One-way enable (AWS): once enabled, object lock cannot be
+        disabled; the default retention may only be tightened."""
+        if mode not in ("COMPLIANCE", "GOVERNANCE"):
+            raise ValueError("Invalid object lock mode")
+        if days is not None and not 1 <= days <= 3650:
+            raise ValueError("Default retention days outside 1..3650")
+        current = self.db.connection.execute(
+            select(buckets.c.object_lock_enabled,
+                   buckets.c.object_lock_default_days)
+            .where(buckets.c.name == bucket)).first()
+        if current is None:
+            raise FileNotFoundError("Bucket does not exist")
+        if current[0] and days is not None and current[1] is not None \
+                and days < int(current[1]):
+            raise ValueError(
+                "Object lock default retention can only be extended")
+        self.db.connection.execute(
+            update(buckets).where(buckets.c.name == bucket).values(
+                object_lock_enabled=True,
+                object_lock_default_mode=mode,
+                object_lock_default_days=days))
+        self.db.commit()
+
+    def object_lock_state(self, object_id: str) -> dict:
+        row = self.db.connection.execute(
+            select(objects.c.retention_mode, objects.c.retention_until_ns,
+                   objects.c.legal_hold)
+            .where(objects.c.id == object_id)).first()
+        if row is None:
+            raise FileNotFoundError("Object does not exist")
+        return {"mode": row[0], "retain_until_ns": row[1],
+                "legal_hold": bool(row[2])}
+
+    def is_locked(self, object_id: str) -> bool:
+        state = self.object_lock_state(object_id)
+        now_ns = time.time_ns()
+        return (state["legal_hold"]
+                or (state["retain_until_ns"] is not None
+                    and int(state["retain_until_ns"]) > now_ns))
+
+    def set_retention(self, object_id: str, *, mode: str,
+                      until_ns: int) -> None:
+        """COMPLIANCE retention is extend-only (AWS immutability)."""
+        if mode not in ("COMPLIANCE", "GOVERNANCE"):
+            raise ValueError("Invalid retention mode")
+        current = self.object_lock_state(object_id)
+        if (current["mode"] == "COMPLIANCE"
+                and current["retain_until_ns"] is not None
+                and int(until_ns) < int(current["retain_until_ns"])):
+            raise ValueError(
+                "COMPLIANCE retention can only be extended")
+        self.db.connection.execute(
+            update(objects).where(objects.c.id == object_id).values(
+                retention_mode=mode, retention_until_ns=until_ns))
+        self.db.commit()
+
+    def clear_retention(self, object_id: str) -> None:
+        current = self.object_lock_state(object_id)
+        if current["mode"] == "COMPLIANCE" and current["retain_until_ns"] \
+                and int(current["retain_until_ns"]) > time.time_ns():
+            raise ValueError(
+                "Active COMPLIANCE retention cannot be removed")
+        self.db.connection.execute(
+            update(objects).where(objects.c.id == object_id).values(
+                retention_mode=None, retention_until_ns=None))
+        self.db.commit()
+
+    def set_legal_hold(self, object_id: str, held: bool) -> None:
+        self.db.connection.execute(
+            update(objects).where(objects.c.id == object_id).values(
+                legal_hold=bool(held)))
+        self.db.commit()
+
+    def apply_default_lock(self, object_id: str) -> None:
+        """At publish time: apply the bucket's default retention."""
+        item = self.manifests.get(object_id)
+        config = self.object_lock_config(item.bucket)
+        if config and config.get("default_days"):
+            self.db.connection.execute(
+                update(objects).where(objects.c.id == object_id).values(
+                    retention_mode=config["default_mode"],
+                    retention_until_ns=time.time_ns()
+                    + int(config["default_days"]) * 86400 * 1_000_000_000))
+            self.db.commit()
 
     def list_buckets(self) -> list[str]:
         return list(self.db.connection.execute(select(buckets.c.name).order_by(buckets.c.name)).scalars())
@@ -318,6 +462,18 @@ class BucketCatalog:
             ):
                 self.db.connection.rollback()
                 return False
+            # Object lock (Phase C): a retained or legal-held version
+            # refuses explicit deletion — WORM enforced at the same
+            # write lock that serializes the revocation.
+            locked = self.db.connection.execute(
+                select(objects.c.retention_until_ns, objects.c.legal_hold)
+                .where(objects.c.id == version_id)).first()
+            if locked is not None and (
+                    locked[1]
+                    or (locked[0] is not None
+                        and int(locked[0]) > time.time_ns())):
+                self.db.connection.rollback()
+                raise PermissionError("Object is under retention")
             head = self.db.connection.execute(select(
                 heads.c.object_id, heads.c.generation,
             ).where(heads.c.bucket == bucket, heads.c.key_hash == digest)).first()
@@ -610,6 +766,9 @@ class BucketCatalog:
                 raise ValueError("Concurrent object creation; retry with generation") from exc
             self._record_published_uncommitted(item)
             self.db.commit()
+            # Phase C: buckets with a default retention lock every new
+            # version at publish time (WORM from the first byte).
+            self.apply_default_lock(item.id)
             return ObjectHead(item, 1)
 
         old = self.db.connection.execute(select(
@@ -645,6 +804,7 @@ class BucketCatalog:
             ))
         self._record_published_uncommitted(item)
         self.db.commit()
+        self.apply_default_lock(item.id)
         return ObjectHead(item, generation + 1)
 
     def list_objects(self, bucket: str, *, prefix: str = "",

@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 29 supported, 27 partial (0 by code, 27 by design), 60 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 35 supported, 24 partial (0 by code, 24 by design), 57 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -98,6 +98,12 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [DeleteBucketLifecycle](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketLifecycle.html) | ✅ Supported | Removes the bucket's SQL lifecycle configuration; AWS-conformant (removing rules never touches stored objects). |
 | [GetBucketVersioning](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketVersioning.html) | ✅ Supported | Reports the bucket's true persisted state: Enabled (the versioned-by-default store) or Suspended. |
 | [PutBucketVersioning](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketVersioning.html) | ✅ Supported | Enabled and Suspended transitions (persisted per bucket, metadata-backed). In Suspended buckets a new write replaces the current version — the superseded version retires from the journal in the same transaction — and DELETE removes the head without a marker (AWS unversioned-style semantics; pre-suspension history is retained). MFADelete is rejected (no MFA backing). |
+| [GetObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLockConfiguration.html) | ✅ Supported | Reads the bucket's true persisted Object Lock configuration or an honest 404 when never configured. |
+| [PutObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLockConfiguration.html) | ✅ Supported | One-way enable (AWS semantics: lock cannot be disabled once enabled). DefaultRetention with COMPLIANCE/GOVERNANCE mode and Days 1..3650, applied to every new version at publish time; the default can only be extended, never shortened. |
+| [GetObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectRetention.html) | ✅ Supported | Reads the retention (Mode + RetainUntilDate) of the current object or a selected published VersionId; honest 404 when no retention is set. |
+| [PutObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectRetention.html) | ✅ Supported | Sets GOVERNANCE/COMPLIANCE retention with a future RetainUntilDate (extend-only for active COMPLIANCE); an empty Mode clears retention unless COMPLIANCE is active. Retained versions refuse explicit and batch version deletes (AccessDenied). |
+| [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | ✅ Supported | Reads the legal-hold status (ON/OFF) of the current object or a selected published VersionId. |
+| [PutObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLegalHold.html) | ✅ Supported | Toggles the legal hold. A held version refuses explicit and batch version deletes until the hold is released; the GC collector and lifecycle expiration never touch retained or held media. |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -156,9 +162,6 @@ Accelerate stay by-design (no honest backing exists).
 | [GetBucketNotificationConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketNotificationConfiguration.html) | 🟡 Partial | by design | private-only: same as GetBucketNotification | Same empty read-only contract. |
 | [GetBucketLogging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketLogging.html) | 🟡 Partial | by design | private-only: no cross-bucket log delivery exists | Always empty `BucketLoggingStatus`; logging writes fail closed. |
 | [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | by design | private-only: SSE has no backing over Telegram | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
-| [GetObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLockConfiguration.html) | 🟡 Partial | by design | private-only: Object Lock has no backing | Always 404 `ObjectLockConfigurationNotFoundError`; lock configuration fails closed. |
-| [GetObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectRetention.html) | 🟡 Partial | by design | private-only: retention has no backing | Always 404 not configured on existing objects; retention writes fail closed. |
-| [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | 🟡 Partial | by design | private-only: legal hold has no backing | Always 404 not configured on existing objects; legal-hold writes fail closed. |
 | [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | by design | private-only: no requester-pays billing exists | Always `Payer=BucketOwner`; request-payer writes fail closed. |
 | [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | by design | private-only: no transfer acceleration exists | Always `Suspended`; accelerate writes fail closed. |
 
@@ -225,9 +228,6 @@ Implement actual encryption/key lifecycle and enforce per-version retention and 
 | --- | --- | --- |
 | [PutBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html) | ❌ Unsupported | P2-B |
 | [DeleteBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketEncryption.html) | ❌ Unsupported | P2-B |
-| [PutObjectLockConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLockConfiguration.html) | ❌ Unsupported | P2-B |
-| [PutObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectRetention.html) | ❌ Unsupported | P2-B |
-| [PutObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLegalHold.html) | ❌ Unsupported | P2-B |
 
 ### P2-D — Lifecycle, expiration, transitions, replication and restore
 

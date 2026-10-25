@@ -283,35 +283,32 @@
     },
     {
       "name": "GetObjectLockConfiguration",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectLockConfiguration",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-B"
     },
     {
       "name": "GetObjectRetention",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectRetention",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-B"
     },
     {
       "name": "GetObjectLegalHold",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectLegalHold",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-B"
     },
     {

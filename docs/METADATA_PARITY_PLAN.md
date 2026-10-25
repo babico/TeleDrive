@@ -82,11 +82,11 @@ lifecycle evaluator, gc collect re-verification (grace check).
 **Enforcement:** publish/delete CAS branches; version listing
 continues to show pre-suspension history.
 
-## Phase C — Object Lock: retention & legal hold 
+## Phase C — Object Lock: retention & legal hold — DONE
 
-**Converts:** GetObjectLockConfiguration, GetObjectRetention,
-GetObjectLegalHold + unblocks the P2-B write ops — 3 partials (plus 5
-unsupported promoted later).
+**Converted:** GetObjectLockConfiguration, GetObjectRetention,
+GetObjectLegalHold + the P2-B write ops (PutObjectLockConfiguration,
+PutObjectRetention, PutObjectLegalHold) — 6 operations promoted.
 
 This is the highest-security-value phase: real WORM semantics backed
 by SQL truth.

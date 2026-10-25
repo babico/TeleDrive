@@ -371,6 +371,16 @@ class RetainedMediaGC:
                 object_aliases.c.source_object_id == object_id)
                 ).first() is not None:
             return "skipped"
+        # Object lock (Phase C): retained or legal-held media is never
+        # physically collected, even when queued.
+        lock_state = db.execute(
+            select(objects.c.retention_until_ns, objects.c.legal_hold)
+            .where(objects.c.id == object_id)).first()
+        if lock_state is not None and (
+                lock_state[1]
+                or (lock_state[0] is not None
+                    and int(lock_state[0]) > time.time_ns())):
+            return "skipped"
         try:
             intents = _send_intents_table()
             if db.execute(select(intents.c.object_id).where(

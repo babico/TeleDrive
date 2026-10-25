@@ -11,8 +11,9 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
-    BigInteger, CheckConstraint, Column, ForeignKey, Index, Integer, MetaData,
-    String, Table, Text, UniqueConstraint, and_, func, select, update, insert, delete,
+    BigInteger, Boolean, CheckConstraint, Column, ForeignKey, Index,
+    Integer, MetaData, String, Table, Text, UniqueConstraint, and_,
+    func, select, update, insert, delete,
 )
 
 from teledrive.db import Database
@@ -29,6 +30,11 @@ objects = Table(
     Column("created_at", BigInteger, nullable=False),
     Column("updated_at", BigInteger, nullable=False),
     Column("error", Text),
+    # Phase C: object lock (WORM). retention_until_ns is nanoseconds;
+    # a locked object refuses version deletes and physical GC.
+    Column("retention_until_ns", BigInteger),
+    Column("legal_hold", Boolean, nullable=False, server_default="0"),
+    Column("retention_mode", String(16)),
     CheckConstraint("size >= 0", name="ck_storage_objects_size"),
 )
 chunks = Table(

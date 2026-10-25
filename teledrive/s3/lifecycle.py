@@ -4,10 +4,11 @@ Never deletes Telegram messages, object manifests, or any completed version.
 """
 from __future__ import annotations
 import json
+import time
 from xml.etree import ElementTree as ET
 from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
-from sqlalchemy import Column, ForeignKey, String, Table, Text, select, insert, update, delete
+from sqlalchemy import Column, ForeignKey, String, Table, Text, or_, select, insert, update, delete
 from sqlalchemy.exc import IntegrityError
 from teledrive.storage.catalog import BucketCatalog, catalog_metadata, heads as heads_table
 
@@ -260,6 +261,10 @@ class BucketLifecycleStore:
                 objects.c.bucket == bucket,
                 objects.c.status == "ready",
                 objects.c.updated_at <= now - rule["days"] * 86400,
+                # Object lock: retained or legal-held objects never expire.
+                or_(objects.c.retention_until_ns.is_(None),
+                    objects.c.retention_until_ns <= time.time_ns()),
+                objects.c.legal_hold.is_(False),
                 # Only CURRENT heads: the head join picks live keys.
                 objects.c.id.in_(
                     select(heads_table.c.object_id).where(

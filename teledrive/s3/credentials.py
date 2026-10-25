@@ -46,6 +46,9 @@ PERMISSIONS = frozenset({
     "s3:GetBucketRequestPayment", "s3:GetAccelerateConfiguration",
     "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration",
     "s3:GetObjectRetention", "s3:GetObjectLegalHold",
+    # Object Lock configuration (Phase C of the metadata parity plan).
+    "s3:PutBucketObjectLockConfiguration", "s3:PutObjectRetention",
+    "s3:PutObjectLegalHold",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
 

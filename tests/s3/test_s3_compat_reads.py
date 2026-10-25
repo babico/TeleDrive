@@ -117,10 +117,9 @@ def test_object_lock_reads_return_not_configured(service, bucket):
     ("PUT", "/compat-bucket?accelerate"),
     ("PUT", "/compat-bucket?encryption"),
     ("DELETE", "/compat-bucket?encryption"),
-    ("PUT", "/compat-bucket?object-lock"),
+    # PUT ?object-lock / ?retention / ?legal-hold are REAL Phase C
+    # controls now — covered by tests/s3/test_s3_object_lock.py.
     ("PUT", "/compat-bucket/item?acl"),
-    ("PUT", "/compat-bucket/item?retention"),
-    ("PUT", "/compat-bucket/item?legal-hold"),
     ("POST", "/compat-bucket/item?restore"),
     ("POST", "/compat-bucket/item?restore&versionId=x"),
 ])

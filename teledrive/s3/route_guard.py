@@ -91,9 +91,12 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "website": {"GET"}, "logging": {"GET"},
                 "notification": {"GET"}, "notificationConfiguration": {"GET"},
                 "requestPayment": {"GET"}, "accelerate": {"GET"},
-                "encryption": {"GET"}, "object-lock": {"GET"},
+                "encryption": {"GET"}, "object-lock": {"GET", "PUT"},
             }
             allowed = frozenset({selector}) if method in methods[selector] else frozenset()
+        elif "object-lock" in real:
+            allowed = (frozenset({"object-lock"})
+                       if method in {"GET", "PUT"} else frozenset())
         elif method == "GET":
             if "versions" in real:
                 allowed = _BUCKET_GET_VERSIONS
@@ -124,9 +127,13 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
             # Canned private ACL probe: current object only, GET only.
             allowed = frozenset({"acl"}) if method == "GET" else frozenset()
         elif "retention" in real:
-            allowed = frozenset({"retention"}) if method == "GET" else frozenset()
+            # Phase C: real retention control, GET and PUT (optional
+            # published VersionId selector on reads).
+            allowed = (frozenset({"retention", "versionId"})
+                       if method in {"GET", "PUT"} else frozenset())
         elif "legal-hold" in real:
-            allowed = frozenset({"legal-hold"}) if method == "GET" else frozenset()
+            allowed = (frozenset({"legal-hold", "versionId"})
+                       if method in {"GET", "PUT"} else frozenset())
         elif "attributes" in real:
             # GetObjectAttributes may address a published historical VersionId.
             # Other object controls still fail closed, even if correctly signed.

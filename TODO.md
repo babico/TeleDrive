@@ -430,10 +430,20 @@ dependency order, each independently shippable; A and B first.
       when re-enabled. versioning-model is a RESOLVED design reason —
       2 operations promoted to Supported. Inventory: **29 supported /
       27 partial (0 by code) / 60 unsupported**.
-- [ ] **Phase C — object lock**: retention_until_ns/legal_hold columns,
-      bucket default retention, enforcement hooks in every delete path
-      AND the GC collector; compliance mode extend-only. Converts 3 +
-      promotes the P2-B write ops.
+- [x] **Phase C — object lock** (commit pending): retention_until_ns/
+      legal_hold columns on storage_objects (defensive ALTER),
+      object_lock_enabled + default mode/days on storage_buckets;
+      bucket-level one-way enable (lock can never be disabled, default
+      only extendable), default retention applied to every new version
+      at publish time; retention (COMPLIANCE extend-only) and legal
+      hold with GET/PUT on current or selected published VersionId;
+      enforcement on EVERY delete path — delete_version, batch
+      per-entry deletes (AccessDenied inside the 200 DeleteResult),
+      the GC queue consumer and lifecycle expiration all refuse
+      locked/held versions; GOVERNANCE bypass header rejected 501
+      (no governance-elevation model). 6 operations promoted
+      (3 partial conversions + 3 P2-B writes). Inventory: **35
+      supported / 24 partial (0 by code) / 57 unsupported**.
 - [ ] **Phase D — ACL grants**: storage_bucket/object_acl_grants,
       fail-closed INTERSECTION with credential scopes, AWS-shaped XML.
       Converts 2 + promotes 4 unsupported writes. (Matches the

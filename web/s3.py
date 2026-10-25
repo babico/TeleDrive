@@ -856,6 +856,15 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
                 ET.SubElement(problem, "Code").text = "InvalidArgument"
                 ET.SubElement(problem, "Message").text = "Invalid version ID"
                 continue
+            except PermissionError as exc:
+                # Object-lock fence (retention/legal hold): per-entry
+                # AccessDenied inside the 200 DeleteResult, like AWS.
+                problem = ET.SubElement(result, "Error")
+                ET.SubElement(problem, "Key").text = key_to_delete
+                ET.SubElement(problem, "VersionId").text = version_id
+                ET.SubElement(problem, "Code").text = "AccessDenied"
+                ET.SubElement(problem, "Message").text = str(exc)
+                continue
             if not batch.quiet:
                 deleted = ET.SubElement(result, "Deleted")
                 ET.SubElement(deleted, "Key").text = key_to_delete
@@ -1823,6 +1832,214 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
         stage.unlink(missing_ok=True)
 
 
+class ObjectLockError(ValueError):
+    def __init__(self, code, message, status=400):
+        super().__init__(message)
+        self.code, self.status = code, status
+
+
+def _iso8601_ns(ns: int) -> str:
+    import datetime
+    moment = datetime.datetime.fromtimestamp(
+        ns / 1_000_000_000, tz=datetime.timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ns % 1_000_000_000:09d}"[:3] + "Z"
+
+
+def _parse_iso8601_ns(raw: str) -> int:
+    import datetime
+    moment = datetime.datetime.fromisoformat(
+        raw.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        raise ValueError("Retention date requires a timezone")
+    return int(moment.timestamp() * 1_000_000_000)
+
+
+async def _handle_bucket_object_lock(ctx: _S3RequestContext) -> Response:
+    """GET/PUT ?object-lock: bucket-level Object Lock configuration."""
+    request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "Bucket does not exist", 404)
+    if request.method == "GET":
+        config = catalog.object_lock_config(bucket)
+        if config is None:
+            return _error("ObjectLockConfigurationNotFoundError",
+                          "Object Lock configuration does not exist for "
+                          "this bucket", 404)
+        root = ET.Element("ObjectLockConfiguration", xmlns=NAMESPACE)
+        ET.SubElement(root, "ObjectLockEnabled").text = "Enabled"
+        if config.get("default_mode"):
+            rule = ET.SubElement(root, "Rule")
+            default = ET.SubElement(rule, "DefaultRetention")
+            ET.SubElement(default, "Mode").text = config["default_mode"]
+            if config.get("default_days"):
+                ET.SubElement(default, "Days").text = str(
+                    config["default_days"])
+        return _xml_ok(root)
+    if request.method != "PUT":
+        return _error("NotImplemented", "Unsupported object-lock method", 501)
+    request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
+    payload = bytearray()
+    async for block in request.stream():
+        payload.extend(block)
+        if len(payload) > 16384:
+            raise ObjectLockError("MalformedXML", "Object lock XML exceeds 16 KiB")
+    _verify_bucket_control_payload(request, bytes(payload))
+    try:
+        root = SafeET.fromstring(bytes(payload))
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise ObjectLockError("MalformedXML", "Invalid object lock XML") from exc
+    if root.tag not in {"ObjectLockConfiguration",
+                        f"{{{NAMESPACE}}}ObjectLockConfiguration"} or root.attrib:
+        raise ObjectLockError("MalformedXML", "Unexpected object lock document")
+    enabled = None
+    mode, days = None, None
+    for element in root:
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "ObjectLockEnabled" and enabled is None:
+            enabled = (element.text or "").strip()
+        elif tag == "Rule" and mode is None and not element.attrib:
+            for sub in element:
+                subtag = sub.tag.rsplit("}", 1)[-1]
+                if subtag != "DefaultRetention":
+                    raise ObjectLockError("MalformedXML",
+                                          "Unexpected lock rule element")
+                for leaf in sub:
+                    leaf_tag = leaf.tag.rsplit("}", 1)[-1]
+                    if leaf_tag == "Mode" and mode is None:
+                        mode = (leaf.text or "").strip()
+                    elif leaf_tag == "Days" and days is None:
+                        raw = (leaf.text or "").strip()
+                        if not raw.isdigit() or not 1 <= int(raw) <= 3650:
+                            raise ObjectLockError("InvalidArgument",
+                                                  "Default retention days "
+                                                  "outside 1..3650")
+                        days = int(raw)
+                    else:
+                        raise ObjectLockError("MalformedXML",
+                                              "Unexpected default retention")
+        else:
+            raise ObjectLockError("MalformedXML", "Unexpected object lock field")
+    if enabled != "Enabled":
+        raise ObjectLockError("InvalidArgument",
+                              "ObjectLockEnabled must be Enabled")
+    if mode is not None and mode not in ("COMPLIANCE", "GOVERNANCE"):
+        raise ObjectLockError("InvalidArgument", "Invalid lock mode")
+    try:
+        catalog.set_object_lock_config(bucket, mode=mode or "COMPLIANCE",
+                                       days=days)
+    except FileNotFoundError:
+        return _error("NoSuchBucket", "Bucket does not exist", 404)
+    except ValueError as exc:
+        return _error("InvalidArgument", str(exc), 400)
+    return Response(status_code=200)
+
+
+async def _handle_object_lock_controls(ctx: _S3RequestContext) -> Response:
+    """GET/PUT ?retention and ?legal-hold on an object (optionally a
+    selected published VersionId)."""
+    request, bucket, key, catalog = (
+        ctx.request, ctx.bucket, ctx.key, ctx.catalog)
+    selector = ("retention" if "retention" in request.query_params
+                else "legal-hold")
+    version_id = request.query_params.get("versionId", "")
+    if version_id and len(version_id) > 80:
+        return _error("InvalidArgument", "Invalid version ID", 400)
+    try:
+        if version_id:
+            if not catalog.is_visible_version(bucket, key, version_id):
+                return _error("NoSuchVersion",
+                              "Object version is not published", 404)
+            item = catalog.manifests.get(version_id)
+        else:
+            item = catalog.get(bucket, key).item
+    except FileNotFoundError:
+        return _error("NoSuchKey", "The requested resource does not exist",
+                      404)
+
+    if request.method == "GET":
+        state = catalog.object_lock_state(item.id)
+        if selector == "retention":
+            if state["mode"] is None:
+                return _error("NoSuchObjectLockConfiguration",
+                              "The specified object does not have a "
+                              "ObjectLock configuration", 404)
+            root = ET.Element("Retention", xmlns=NAMESPACE)
+            ET.SubElement(root, "Mode").text = state["mode"]
+            ET.SubElement(root, "RetainUntilDate").text = _iso8601_ns(
+                int(state["retain_until_ns"]))
+            return _xml_ok(root)
+        root = ET.Element("LegalHold", xmlns=NAMESPACE)
+        ET.SubElement(root, "Status").text = (
+            "ON" if state["legal_hold"] else "OFF")
+        return _xml_ok(root)
+
+    if request.method == "PUT":
+        payload = bytearray()
+        async for block in request.stream():
+            payload.extend(block)
+            if len(payload) > 16384:
+                raise ObjectLockError("MalformedXML",
+                                      "Lock control XML exceeds 16 KiB")
+        body = bytes(payload)
+        # The request body is signed with an x-amz-content-sha256 digest.
+        signed_digest = request.headers.get("x-amz-content-sha256", "")
+        if signed_digest and signed_digest not in STREAMING_MODES:
+            import hashlib as _hashlib
+            if not hmac.compare_digest(
+                    signed_digest, _hashlib.sha256(body).hexdigest()):
+                raise ObjectLockError("XAmzContentSHA256Mismatch",
+                                      "Lock control body checksum mismatch")
+        try:
+            root = SafeET.fromstring(body)
+        except (ET.ParseError, DefusedXmlException) as exc:
+            raise ObjectLockError("MalformedXML",
+                                  "Invalid lock control XML") from exc
+        try:
+            if selector == "retention":
+                if root.tag not in {"Retention", f"{{{NAMESPACE}}}Retention"}:
+                    raise ObjectLockError("MalformedXML",
+                                          "Expected a Retention document")
+                mode = until = None
+                for element in root:
+                    tag = element.tag.rsplit("}", 1)[-1]
+                    if tag == "Mode" and mode is None:
+                        mode = (element.text or "").strip()
+                    elif tag == "RetainUntilDate" and until is None:
+                        until = _parse_iso8601_ns((element.text or "").strip())
+                    else:
+                        raise ObjectLockError("MalformedXML",
+                                              "Unexpected retention field")
+                if mode is None:
+                    catalog.clear_retention(item.id)
+                else:
+                    if until is None or until <= time.time_ns():
+                        raise ObjectLockError("InvalidArgument",
+                                              "Retention must end in the future")
+                    catalog.set_retention(item.id, mode=mode, until_ns=until)
+            else:
+                if root.tag not in {"LegalHold", f"{{{NAMESPACE}}}LegalHold"}:
+                    raise ObjectLockError("MalformedXML",
+                                          "Expected a LegalHold document")
+                status = None
+                for element in root:
+                    if element.tag.rsplit("}", 1)[-1] == "Status" \
+                            and status is None:
+                        status = (element.text or "").strip()
+                    else:
+                        raise ObjectLockError("MalformedXML",
+                                              "Unexpected legal-hold field")
+                if status not in ("ON", "OFF"):
+                    raise ObjectLockError("InvalidArgument",
+                                          "LegalHold status must be ON or OFF")
+                catalog.set_legal_hold(item.id, status == "ON")
+        except PermissionError as exc:
+            return _error("AccessDenied", str(exc), 403)
+        except ValueError as exc:
+            return _error("InvalidArgument", str(exc), 400)
+        return Response(status_code=200)
+    return _error("NotImplemented", "Unsupported lock control method", 501)
+
+
 async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
     """Object ?tagging: GET/PUT/DELETE object tags, optionally versioned."""
     request = ctx.request
@@ -2597,6 +2814,16 @@ async def _handle(request: Request):
             action = _COMPAT_BUCKET_READS[compat_bucket_read]
         elif compat_object_read is not None:
             action = _COMPAT_OBJECT_READS[compat_object_read]
+        elif separator and "retention" in request.query_params:
+            action = {"GET": "s3:GetObjectRetention",
+                      "PUT": "s3:PutObjectRetention"}.get(request.method)
+        elif separator and "legal-hold" in request.query_params:
+            action = {"GET": "s3:GetObjectLegalHold",
+                      "PUT": "s3:PutObjectLegalHold"}.get(request.method)
+        elif not separator and "object-lock" in request.query_params:
+            action = {"GET": "s3:GetBucketObjectLockConfiguration",
+                      "PUT": "s3:PutBucketObjectLockConfiguration"
+                      }.get(request.method)
         elif is_object_attributes:
             if request.method != "GET" or any(
                 p in request.query_params for p in ("uploadId", "uploads", "tagging")
@@ -2678,6 +2905,12 @@ async def _handle(request: Request):
             "encryption", "object-lock", "versionId",
         }
         active_compat = compat_bucket_read or compat_object_read
+        if separator and "retention" in request.query_params:
+            active_compat = "retention"
+        elif separator and "legal-hold" in request.query_params:
+            active_compat = "legal-hold"
+        elif not separator and "object-lock" in request.query_params:
+            active_compat = "object-lock"
         if any(parameter in request.query_params and (
             (parameter != "versionId" or not (is_version_read or is_version_tagging or is_version_delete))
             and (parameter != "versions" or not is_version_listing)
@@ -2752,11 +2985,17 @@ async def _handle(request: Request):
             )
 
         if not separator:
+            if "object-lock" in request.query_params:
+                return await _handle_bucket_object_lock(ctx)
             return await _handle_bucket_route(ctx)
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "The specified bucket does not exist", 404)
         if not key:
             return _error("InvalidObjectName", "Object key is empty", 400)
+
+        if ("retention" in request.query_params
+                or "legal-hold" in request.query_params):
+            return await _handle_object_lock_controls(ctx)
 
         if compat_object_read is not None:
             # The probe must address an existing current object.
@@ -2815,6 +3054,11 @@ async def _handle(request: Request):
         return _error(exc.code, str(exc), exc.status)
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)
+    except ObjectLockError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except PermissionError as exc:
+        # Object-lock fences (retention/legal hold) surface as 403.
+        return _error("AccessDenied", str(exc), 403)
     except ObjectMetadataError as exc:
         return _error(exc.code, str(exc), exc.status)
     except MultipartError as exc:

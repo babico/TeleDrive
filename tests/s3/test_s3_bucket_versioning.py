@@ -43,7 +43,6 @@ def test_versioning_get_put_idempotent_and_real_object_history(service):
 
 
 @pytest.mark.parametrize("bad,code", [
-    (b"<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>", 501),
     (b"<VersioningConfiguration><Status>Disabled</Status></VersioningConfiguration>", 400),
     (b"<VersioningConfiguration></VersioningConfiguration>", 400),
     (b"<VersioningConfiguration><MFADelete>Disabled</MFADelete><Status>Enabled</Status></VersioningConfiguration>", 501),
@@ -158,11 +157,70 @@ def test_real_boto3_get_put_bucket_versioning(service):
             VersioningConfiguration={"Status": "Enabled"},
         )
         assert reply["ResponseMetadata"]["HTTPStatusCode"] == 200
-        with pytest.raises(ClientError):
-            client.put_bucket_versioning(
-                Bucket="versioning-ci",
-                VersioningConfiguration={"Status": "Suspended"},
-            )
+        # Phase B: Suspended is a real, persisted transition.
+        reply = client.put_bucket_versioning(
+            Bucket="versioning-ci",
+            VersioningConfiguration={"Status": "Suspended"},
+        )
+        assert reply["ResponseMetadata"]["HTTPStatusCode"] == 200
+        assert client.get_bucket_versioning(
+            Bucket="versioning-ci")["Status"] == "Suspended"
+        # Back to Enabled is equally valid.
+        client.put_bucket_versioning(
+            Bucket="versioning-ci",
+            VersioningConfiguration={"Status": "Enabled"},
+        )
+        assert client.get_bucket_versioning(
+            Bucket="versioning-ci")["Status"] == "Enabled"
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+def test_suspended_bucket_write_semantics(service):
+    """Phase B: Suspended buckets replace the current version on write
+    and delete without markers — AWS unversioned-style behavior with
+    pre-suspension history retained."""
+    import xml.etree.ElementTree as ET
+    ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+    assert signed(service, "PUT", "/versioning-ci").status_code == 200
+    # Two versions while versioned (default).
+    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v1").status_code == 200
+    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v2").status_code == 200
+    before = signed(service, "GET", "/versioning-ci?versions&prefix=susp.bin")
+    versions_before = len(ET.fromstring(before.content).findall(ns + "Version"))
+    assert versions_before == 2
+
+    # Suspend.
+    reply = signed(service, "PUT", "/versioning-ci?versioning", b"""<?xml version="1.0"?>
+<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>""")
+    assert reply.status_code == 200, reply.text
+
+    # GET reports the true state.
+    state = signed(service, "GET", "/versioning-ci?versioning")
+    assert b"Suspended" in state.content
+
+    # A new PUT replaces the current version: the superseded version
+    # retires from the journal in the same transaction.
+    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v3").status_code == 200
+    assert signed(service, "GET", "/versioning-ci/susp.bin").content == b"v3"
+    after = signed(service, "GET", "/versioning-ci?versions&prefix=susp.bin")
+    versions_after = ET.fromstring(after.content).findall(ns + "Version")
+    assert len(versions_after) == 2  # v1 (history) + v3 (current); v2 retired
+    listed = sorted(v.findtext(ns + "ETag") for v in versions_after)
+
+    # DELETE removes the head WITHOUT a marker and without version
+    # headers (unversioned-style delete).
+    deleted = signed(service, "DELETE", "/versioning-ci/susp.bin")
+    assert deleted.status_code == 204
+    assert "x-amz-version-id" not in deleted.headers
+    assert "x-amz-delete-marker" not in deleted.headers
+    assert signed(service, "GET", "/versioning-ci/susp.bin").status_code == 404
+
+    # Re-enable: versioning resumes appending.
+    assert signed(service, "PUT", "/versioning-ci?versioning", b"""<?xml version="1.0"?>
+<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>""").status_code == 200
+    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v4").status_code == 200
+    marker_delete = signed(service, "DELETE", "/versioning-ci/susp.bin")
+    assert marker_delete.status_code == 204
+    assert marker_delete.headers.get("x-amz-delete-marker") == "true"

@@ -417,9 +417,19 @@ dependency order, each independently shippable; A and B first.
       grace and the queued scope. gc-owner-gate is now a RESOLVED
       design reason — 8 operations promoted to Supported. Inventory:
       **27 supported / 29 partial (0 by code) / 60 unsupported**.
-- [ ] **Phase B — bucket versioning states**: versioning_state column
-      (ENABLED/SUSPENDED), publish/delete branches for suspended
-      buckets, PutBucketVersioning accepts Suspended. Converts 2.
+- [x] **Phase B — bucket versioning states** DONE: storage_buckets
+      gained versioning_state (Enabled default | Suspended, defensively
+      ALTERed into existing deployments); PutBucketVersioning accepts
+      real transitions (MFADelete still rejected — no MFA backing);
+      GET reports the true state. In Suspended buckets a new write
+      REPLACES the current version — the superseded version retires
+      from the journal (removed_versions) in the same transaction —
+      and DELETE removes the head without a marker (AWS
+      unversioned-style semantics, no version-id headers); pre-
+      suspension history is retained and versioning resumes appending
+      when re-enabled. versioning-model is a RESOLVED design reason —
+      2 operations promoted to Supported. Inventory: **29 supported /
+      27 partial (0 by code) / 60 unsupported**.
 - [ ] **Phase C — object lock**: retention_until_ns/legal_hold columns,
       bucket default retention, enforcement hooks in every delete path
       AND the GC collector; compliance mode extend-only. Converts 3 +

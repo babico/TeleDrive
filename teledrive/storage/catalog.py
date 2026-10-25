@@ -25,6 +25,11 @@ buckets = Table(
     "storage_buckets", catalog_metadata,
     Column("name", String(63), primary_key=True),
     Column("created_at", BigInteger, nullable=False),
+    # Phase B of the metadata parity plan: AWS-shaped bucket versioning
+    # states. Pre-existing deployments get the column via a defensive
+    # ALTER (see ensure_versioning_column).
+    Column("versioning_state", String(16), nullable=False,
+           server_default="Enabled"),
 )
 heads = Table(
     "storage_object_heads", catalog_metadata,
@@ -55,6 +60,31 @@ Index("ix_storage_published_versions_key",
 _BUCKET_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?\Z")
 
 
+_versioning_column_ensured = False
+
+
+def ensure_versioning_column(db) -> None:
+    """storage_buckets.versioning_state may be missing in deployments
+    created before Phase B; add it defensively. Cached per process."""
+    global _versioning_column_ensured
+    if _versioning_column_ensured:
+        return
+    from sqlalchemy import text as _text
+    if db.engine.dialect.name == "sqlite":
+        columns = {row[1] for row in db.connection.execute(_text(
+            "PRAGMA table_info(storage_buckets)"))}
+    else:
+        columns = {row[0] for row in db.connection.execute(_text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'storage_buckets'"))}
+    if columns and "versioning_state" not in columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN versioning_state "
+            "VARCHAR(16) NOT NULL DEFAULT 'Enabled'"))
+        db.commit()
+    _versioning_column_ensured = True
+
+
 @dataclass(frozen=True)
 class ObjectHead:
     item: StoredObject
@@ -70,6 +100,7 @@ class BucketCatalog:
 
     def __init__(self, manifests: ManifestStore):
         self.manifests = manifests
+        ensure_versioning_column(manifests.db)
         self.db = manifests.db
         catalog_metadata.create_all(self.db.engine)
 
@@ -94,6 +125,26 @@ class BucketCatalog:
                 self.db.connection.execute(insert(buckets).values(name=name, created_at=now))
         except IntegrityError as exc:
             raise ValueError("Bucket already exists") from exc
+        self.db.commit()
+
+    # -- versioning state (Phase B) --------------------------------------
+    def versioning_state(self, bucket: str) -> str:
+        """'Enabled' (default, versioned-by-default store) or 'Suspended'."""
+        state = self.db.connection.execute(
+            select(buckets.c.versioning_state).where(
+                buckets.c.name == bucket)).scalar_one_or_none()
+        return state or "Enabled"
+
+    def set_versioning(self, bucket: str, state: str) -> None:
+        if state not in ("Enabled", "Suspended"):
+            raise ValueError("Invalid versioning state")
+        if bucket not in self.list_buckets():
+            raise FileNotFoundError("Bucket does not exist")
+        changed = self.db.connection.execute(
+            update(buckets).where(buckets.c.name == bucket)
+            .values(versioning_state=state))
+        if changed.rowcount != 1:
+            raise FileNotFoundError("Bucket does not exist")
         self.db.commit()
 
     def list_buckets(self) -> list[str]:
@@ -176,6 +227,26 @@ class BucketCatalog:
             (int(row[1]) if row else 0) != expected_generation
         ):
             raise ValueError("Delete precondition generation changed")
+        if self.versioning_state(bucket) == "Suspended":
+            # AWS suspended semantics: DELETE removes the head and
+            # retires the current version WITHOUT creating a marker
+            # (unversioned-style delete). Returns None so callers omit
+            # the marker headers.
+            if row is None:
+                return None
+            changed = self.db.connection.execute(delete(heads).where(
+                heads.c.bucket == bucket, heads.c.key_hash == digest,
+                heads.c.object_id == row[0],
+                heads.c.generation == row[1],
+            ))
+            if changed.rowcount != 1:
+                self.db.connection.rollback()
+                raise ValueError("Concurrent object deletion/write")
+            self.db.connection.execute(insert(removed_versions).values(
+                object_id=row[0], removed_ns=time.time_ns(),
+            ))
+            self.db.commit()
+            return None
         marker = str(uuid4())
         now = int(time.time())
         try:
@@ -565,6 +636,13 @@ class BucketCatalog:
         if changed.rowcount != 1:
             self.db.connection.rollback()
             raise ValueError("Concurrent object modification")
+        if self.versioning_state(item.bucket) == "Suspended":
+            # AWS suspended semantics: a new write replaces the current
+            # version; the superseded version retires from the journal
+            # in the SAME transaction (no unversioned-history growth).
+            self.db.connection.execute(insert(removed_versions).values(
+                object_id=existing[0], removed_ns=time.time_ns(),
+            ))
         self._record_published_uncommitted(item)
         self.db.commit()
         return ObjectHead(item, generation + 1)

@@ -938,7 +938,9 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
         if request.method == "GET":
-            return Response(versioning_xml(), media_type="application/xml")
+            return Response(
+                versioning_xml(catalog.versioning_state(bucket)),
+                media_type="application/xml")
         if request.method == "PUT":
             payload = bytearray()
             async for block in request.stream():
@@ -947,7 +949,8 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
                     raise VersioningError("MalformedXML",
                                           "Versioning XML exceeds 16 KiB")
             _verify_bucket_control_payload(request, bytes(payload))
-            parse_versioning_xml(bytes(payload))
+            state = parse_versioning_xml(bytes(payload))
+            catalog.set_versioning(bucket, state)
             return Response(status_code=200)
         return _error("NotImplemented", "Unsupported bucket versioning method", 501)
     if ctx.is_bucket_cors:
@@ -2153,6 +2156,9 @@ async def _handle_object_delete(ctx: _S3RequestContext,
                 "PreconditionFailed", "Object changed during conditional DELETE", 412
             ) from exc
         raise
+    if marker is None:
+        # Suspended bucket: unversioned-style delete, no marker headers.
+        return Response(status_code=204)
     return Response(status_code=204, headers={
         "x-amz-delete-marker": "true", "x-amz-version-id": marker,
     })

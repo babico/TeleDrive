@@ -47,15 +47,13 @@ def parse_versioning_xml(payload: bytes) -> None:
         values[field] = element.text or ""
     if values.get("MFADelete") is not None:
         raise VersioningError("NotImplemented", "MFADelete is not implemented", 501)
-    if values.get("Status") == "Suspended":
+    if values.get("Status") not in ("Enabled", "Suspended"):
         raise VersioningError(
-            "NotImplemented", "Versioning suspension is unsupported", 501,
-        )
-    if values != {"Status": "Enabled"}:
-        raise VersioningError("InvalidArgument", "Only Enabled bucket versioning is supported")
+            "InvalidArgument", "Status must be Enabled or Suspended")
+    return values["Status"]
 
 
-def versioning_xml() -> bytes:
+def versioning_xml(state: str = "Enabled") -> bytes:
     root = ET.Element("VersioningConfiguration", xmlns=NAMESPACE)
-    ET.SubElement(root, "Status").text = "Enabled"
+    ET.SubElement(root, "Status").text = state
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)

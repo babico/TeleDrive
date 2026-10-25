@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 35 supported, 24 partial (0 by code, 24 by design), 57 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 39 supported, 22 partial (0 by code, 22 by design), 55 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -104,6 +104,10 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [PutObjectRetention](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectRetention.html) | ✅ Supported | Sets GOVERNANCE/COMPLIANCE retention with a future RetainUntilDate (extend-only for active COMPLIANCE); an empty Mode clears retention unless COMPLIANCE is active. Retained versions refuse explicit and batch version deletes (AccessDenied). |
 | [GetObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectLegalHold.html) | ✅ Supported | Reads the legal-hold status (ON/OFF) of the current object or a selected published VersionId. |
 | [PutObjectLegalHold](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectLegalHold.html) | ✅ Supported | Toggles the legal hold. A held version refuses explicit and batch version deletes until the hold is released; the GC collector and lifecycle expiration never touch retained or held media. |
+| [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | ✅ Supported | Reads the bucket's stored ACL grant rows (AWS-shaped AccessControlPolicy, CanonicalUser = TeleDrive access keys); the caller's private canned ACL while no ACL has ever been written. |
+| [PutBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAcl.html) | ✅ Supported | Replaces the bucket ACL from AccessControlPolicy XML (READ/WRITE/FULL_CONTROL grants to CanonicalUser access keys, validated as active credentials; email/group grantees rejected 501 — the private-only line). The owner retains an implicit FULL_CONTROL row; writing an ACL opts the bucket into the fail-closed intersection gate. |
+| [GetObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAcl.html) | ✅ Supported | Reads the stored ACL of the current object (exact key); the caller's private canned ACL while no object ACL exists. |
+| [PutObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectAcl.html) | ✅ Supported | Replaces the exact object key's ACL (READ/FULL_CONTROL only — WRITE is bucket-level). Object grants only ever affect their own key, never siblings or bucket-level actions. |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -152,8 +156,6 @@ Accelerate stay by-design (no honest backing exists).
 | [GetPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetPublicAccessBlock.html) | 🟡 Partial | by design | private-only: no public mode exists | Fixed all-four-fields true. |
 | [PutPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html) | 🟡 Partial | by design | private-only: privacy cannot be weakened | Accepts only all-four-fields true. |
 | [GetBucketPolicyStatus](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicyStatus.html) | 🟡 Partial | by design | private-only: no bucket policy engine or public ACLs | Read-only IsPublic=false for the enforced private-only gateway. |
-| [GetBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAcl.html) | 🟡 Partial | by design | private-only: canned private ACL is the only truth | Read-only private canned ACL (caller FULL_CONTROL); every ACL configuration attempt fails closed. |
-| [GetObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAcl.html) | 🟡 Partial | by design | private-only: no VersionId selector, no ACL writes | Read-only private canned ACL for an existing current object. |
 | [GetBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketOwnershipControls.html) | 🟡 Partial | by design | private-only: BucketOwnerEnforced is the real, enforced state | Always `BucketOwnerEnforced`; ownership configuration fails closed. |
 | [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | 🟡 Partial | by design | private-only: no policy engine exists to read | Always 404 `NoSuchBucketPolicy`; policy writes fail closed. |
 | [GetBucketReplication](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketReplication.html) | 🟡 Partial | by design | private-only: S3 replication has no backing (TeleDrive replication is a storage-engine feature, not this API) | Always 404 not-configured; replication writes fail closed. |
@@ -211,8 +213,6 @@ the owner approves, implement best-effort per this design.
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
 | [DeletePublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeletePublicAccessBlock.html) | ❌ Unsupported | P2-C |
-| [PutBucketAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAcl.html) | ❌ Unsupported | P2-C |
-| [PutObjectAcl](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectAcl.html) | ❌ Unsupported | P2-C |
 | [PutBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
 | [DeleteBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
 | [PutBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketPolicy.html) | ❌ Unsupported | P2-C |

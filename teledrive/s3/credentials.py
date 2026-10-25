@@ -49,6 +49,8 @@ PERMISSIONS = frozenset({
     # Object Lock configuration (Phase C of the metadata parity plan).
     "s3:PutBucketObjectLockConfiguration", "s3:PutObjectRetention",
     "s3:PutObjectLegalHold",
+    # ACL grants (Phase D): write paths for the intersection model.
+    "s3:PutBucketAcl", "s3:PutObjectAcl",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
 
@@ -132,6 +134,21 @@ class S3CredentialStore:
             return self.cipher.decrypt(row[0].encode()).decode()
         except (InvalidToken, ValueError, UnicodeError):
             return None
+
+    def is_active(self, access_key: str, *, now: int | None = None) -> bool:
+        """Does this access key belong to an active, unexpired credential?
+
+        ACL grantees are validated against this so an unknown or revoked
+        CanonicalUser ID is rejected at write time instead of silently
+        never matching.
+        """
+        now = int(time.time()) if now is None else now
+        if not isinstance(access_key, str) or len(access_key) > 64:
+            return False
+        row = self.db.connection.execute(select(
+            credentials.c.revoked, credentials.c.expires_at,
+        ).where(credentials.c.access_key == access_key)).first()
+        return bool(row) and not row[0] and (row[1] is None or row[1] > now)
 
     def reveal(self, identifier: str) -> dict:
         """Decrypt and return an ACTIVE credential's secret (admin only).

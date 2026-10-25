@@ -101,7 +101,6 @@ def test_object_lock_reads_return_not_configured(service, bucket):
 
 
 @pytest.mark.parametrize("method,path", [
-    ("PUT", "/compat-bucket?acl"),
     ("DELETE", "/compat-bucket?acl"),
     ("PUT", "/compat-bucket?ownershipControls"),
     ("PUT", "/compat-bucket?policy"),
@@ -119,7 +118,8 @@ def test_object_lock_reads_return_not_configured(service, bucket):
     ("DELETE", "/compat-bucket?encryption"),
     # PUT ?object-lock / ?retention / ?legal-hold are REAL Phase C
     # controls now — covered by tests/s3/test_s3_object_lock.py.
-    ("PUT", "/compat-bucket/item?acl"),
+    # PUT ?acl (bucket and object) is a REAL Phase D control — covered
+    # by tests/s3/test_s3_acl.py.
     ("POST", "/compat-bucket/item?restore"),
     ("POST", "/compat-bucket/item?restore&versionId=x"),
 ])

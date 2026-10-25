@@ -107,10 +107,10 @@ by SQL truth.
 (AWS semantics) — enforced by rejecting `object_lock_enabled`
 transitions to false.
 
-## Phase D — ACL grants on S3 credentials 
+## Phase D — ACL grants on S3 credentials — DONE
 
-**Converts:** GetBucketAcl, GetObjectAcl + promotes
-Put/DeleteBucketAcl, Put/DeleteObjectAcl from unsupported — 5 partials.
+**Converted:** GetBucketAcl, GetObjectAcl + promoted PutBucketAcl,
+PutObjectAcl — 4 operations promoted.
 
 Per the researched P2-C design (owner already reviewing):
 

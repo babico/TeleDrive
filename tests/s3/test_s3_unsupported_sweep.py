@@ -25,8 +25,6 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUESTS = {
     # P2-C — access control writes
     "DeletePublicAccessBlock": ("DELETE", "/sweep-bucket?publicAccessBlock"),
-    "PutBucketAcl": ("PUT", "/sweep-bucket?acl"),
-    "PutObjectAcl": ("PUT", "/sweep-bucket/asset.bin?acl"),
     "PutBucketOwnershipControls": ("PUT", "/sweep-bucket?ownershipControls"),
     "DeleteBucketOwnershipControls": ("DELETE", "/sweep-bucket?ownershipControls"),
     "PutBucketPolicy": ("PUT", "/sweep-bucket?policy"),

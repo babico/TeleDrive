@@ -444,10 +444,24 @@ dependency order, each independently shippable; A and B first.
       (no governance-elevation model). 6 operations promoted
       (3 partial conversions + 3 P2-B writes). Inventory: **35
       supported / 24 partial (0 by code) / 57 unsupported**.
-- [ ] **Phase D — ACL grants**: storage_bucket/object_acl_grants,
-      fail-closed INTERSECTION with credential scopes, AWS-shaped XML.
-      Converts 2 + promotes 4 unsupported writes. (Matches the
-      researched P2-C design.)
+- [x] **Phase D — ACL grants** (commit pending):
+      storage_bucket_acl_grants + storage_object_acl_grants (grantee =
+      CanonicalUser access key, READ/WRITE/FULL_CONTROL; owner implicit
+      FULL_CONTROL row). PutBucketAcl/PutObjectAcl replace the stored
+      ACL from AWS-shaped AccessControlPolicy XML (grantees validated
+      as active credentials; email/group grantees rejected 501 — the
+      private-only line; WRITE invalid on object ACLs). Enforcement is
+      the fail-closed intersection: own SigV4 scopes first, then the
+      resource ACL may only NARROW — a credential is denied when the
+      bucket or exact key has a stored ACL and its grants for this
+      access key do not cover the action class (READ = Get*/List*,
+      WRITE = everything else). Object grants only affect their exact
+      key, never siblings or bucket-level actions. Gate covers header
+      auth, presigned queries and browser form uploads; ACL-less
+      resources keep the unrestricted baseline; unknown ACL-scope
+      credentials denied at auth. 4 operations promoted (2 partial
+      conversions + 2 P2-C writes). Inventory: **39 supported / 22
+      partial (0 by code) / 55 unsupported**.
 - [ ] **Phase E — PAB/policy status/ownership controls** on the grant
       store. Converts 3.
 - [ ] **Phase F — notifications + logging**: config tables +

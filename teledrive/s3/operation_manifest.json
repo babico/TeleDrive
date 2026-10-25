@@ -207,24 +207,22 @@
     },
     {
       "name": "GetBucketAcl",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketAcl",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-C"
     },
     {
       "name": "GetObjectAcl",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutObjectAcl",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-C"
     },
     {

@@ -43,6 +43,8 @@ from teledrive.s3.conditions import http_last_modified, read_precondition
 from teledrive.s3.write_conditions import (check_write_precondition,
     WritePreconditionError, ExpectedHead)
 from teledrive.s3.tagging import ObjectTagStore, BucketTagStore, TaggingError, validate_tags
+from teledrive.s3.acl import (AclError, parse_acl_xml, render_acl_xml,
+                              permits as acl_permits)
 from teledrive.s3.cors import (BucketCORSStore, CORSError, MAX_CORS_XML_BYTES,
     parse_cors_xml, cors_xml, matching_rule, response_cors_headers)
 from teledrive.s3.versioning import (VersioningError, MAX_VERSIONING_XML_BYTES,
@@ -738,6 +740,13 @@ async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
             raise SigV4Error("AccessDenied", "PutObjectTagging permission required")
         form_tags = _parse_initial_tags(post_fields["x-amz-tagging"])
     post_catalog = BucketCatalog(ManifestStore(db))
+    # Phase D ACL intersection gate for form uploads: the POST policy
+    # already proved the credential's own PutObject scope; the bucket
+    # ACL may still narrow access to this exact key.
+    form_credential = post_fields["x-amz-credential"].split("/", 1)[0]
+    if not _acl_allows(post_catalog, form_credential, "s3:PutObject",
+                       bucket, post_key):
+        raise SigV4Error("AccessDenied", "Access denied by resource ACL")
     if bucket not in post_catalog.list_buckets():
         return _error("NoSuchBucket", "Upload bucket does not exist", 404)
     directory = Path(_webapp.STORAGE_SCRATCH_DIR)
@@ -1854,6 +1863,112 @@ def _parse_iso8601_ns(raw: str) -> int:
     return int(moment.timestamp() * 1_000_000_000)
 
 
+def _acl_allows(catalog, access_key: str, action: str, bucket: str,
+                key: str | None) -> bool:
+    """Fetch the resource's grant rows and apply the intersection."""
+    bucket_rows, object_rows = catalog.acl_grants_for(bucket, key)
+    return acl_permits(action=action, access_key=access_key,
+                       bucket_rows=bucket_rows, object_rows=object_rows,
+                       key=key)
+
+
+async def _read_acl_body(request: Request, *, bucket_level: bool) -> bytes:
+    """Bounded ACL XML body with the signed checksum policy applied."""
+    body = bytearray()
+    async for block in request.stream():
+        body.extend(block)
+        if len(body) > 16384:
+            raise AclError("MalformedXML", "ACL XML exceeds 16 KiB")
+    if bucket_level:
+        _verify_bucket_control_payload(request, bytes(body))
+    else:
+        _verify_upload_sha256(
+            request, hashlib.sha256(body).digest(),
+            crc64nvme_value=crc64nvme(body),
+        )
+    return bytes(body)
+
+
+def _validated_acl(payload: bytes, *, object_level: bool, caller: str,
+                   store: S3CredentialStore) -> tuple[str, list[tuple[str, str]]]:
+    """Parse an AccessControlPolicy and validate its principals.
+
+    Every CanonicalUser ID (owner and grantees) must be an active
+    TeleDrive credential — an unknown ID is rejected at write time
+    instead of silently never matching. The owner defaults to the
+    caller when the document omits the Owner block.
+    """
+    doc_owner, grants = parse_acl_xml(payload, object_level=object_level)
+    acl_owner = doc_owner or caller
+    if not store.is_active(acl_owner):
+        raise AclError("InvalidArgument",
+                       "ACL owner is not an active credential")
+    for grantee, _permission in grants:
+        if not store.is_active(grantee):
+            raise AclError("InvalidArgument",
+                           f"Unknown ACL grantee {grantee[:8]}…")
+    return acl_owner, grants
+
+
+async def _handle_bucket_acl(ctx: _S3RequestContext) -> Response:
+    """GET/PUT ?acl on a bucket: the Phase D grant store."""
+    request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+    if request.method == "GET":
+        stored_owner, grants = catalog.bucket_acl(bucket)
+        if stored_owner is None:
+            # No ACL has ever been written: the unrestricted baseline
+            # answers with the caller's private canned ACL.
+            return Response(_canned_private_acl_xml(ctx.owner),
+                            media_type="application/xml")
+        return Response(render_acl_xml(stored_owner, grants),
+                        media_type="application/xml")
+    if request.method != "PUT":
+        return _error("NotImplemented", "Unsupported ACL method", 501)
+    payload = await _read_acl_body(request, bucket_level=True)
+    try:
+        acl_owner, grants = _validated_acl(
+            payload, object_level=False, caller=ctx.owner, store=ctx.store)
+        catalog.set_bucket_acl(bucket, acl_owner, grants)
+    except AclError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except FileNotFoundError:
+        return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+    return Response(status_code=200)
+
+
+async def _handle_object_acl(ctx: _S3RequestContext) -> Response:
+    """GET/PUT ?acl on the current object (exact key, never siblings)."""
+    request, bucket, key, catalog = (
+        ctx.request, ctx.bucket, ctx.key, ctx.catalog)
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+    try:
+        catalog.get(bucket, key)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "The requested resource does not exist", 404)
+    if request.method == "GET":
+        stored_owner, grants = catalog.object_acl(bucket, key)
+        if stored_owner is None:
+            return Response(_canned_private_acl_xml(ctx.owner),
+                            media_type="application/xml")
+        return Response(render_acl_xml(stored_owner, grants),
+                        media_type="application/xml")
+    if request.method != "PUT":
+        return _error("NotImplemented", "Unsupported ACL method", 501)
+    payload = await _read_acl_body(request, bucket_level=False)
+    try:
+        acl_owner, grants = _validated_acl(
+            payload, object_level=True, caller=ctx.owner, store=ctx.store)
+        catalog.set_object_acl(bucket, key, acl_owner, grants)
+    except AclError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except FileNotFoundError:
+        return _error("NoSuchBucket", "The specified bucket does not exist", 404)
+    return Response(status_code=200)
+
+
 async def _handle_bucket_object_lock(ctx: _S3RequestContext) -> Response:
     """GET/PUT ?object-lock: bucket-level Object Lock configuration."""
     request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
@@ -2814,6 +2929,12 @@ async def _handle(request: Request):
             action = _COMPAT_BUCKET_READS[compat_bucket_read]
         elif compat_object_read is not None:
             action = _COMPAT_OBJECT_READS[compat_object_read]
+        elif not separator and "acl" in request.query_params:
+            action = {"GET": "s3:GetBucketAcl",
+                      "PUT": "s3:PutBucketAcl"}.get(request.method)
+        elif separator and "acl" in request.query_params:
+            action = {"GET": "s3:GetObjectAcl",
+                      "PUT": "s3:PutObjectAcl"}.get(request.method)
         elif separator and "retention" in request.query_params:
             action = {"GET": "s3:GetObjectRetention",
                       "PUT": "s3:PutObjectRetention"}.get(request.method)
@@ -2905,7 +3026,11 @@ async def _handle(request: Request):
             "encryption", "object-lock", "versionId",
         }
         active_compat = compat_bucket_read or compat_object_read
-        if separator and "retention" in request.query_params:
+        if "acl" in request.query_params:
+            # Phase D: real ACL controls on both routes; GET is already
+            # a compat read, PUT is the new grant-store write.
+            active_compat = "acl"
+        elif separator and "retention" in request.query_params:
             active_compat = "retention"
         elif separator and "legal-hold" in request.query_params:
             active_compat = "legal-hold"
@@ -2978,6 +3103,18 @@ async def _handle(request: Request):
         ctx.checksum_mode = checksum_mode
         ctx.catalog = catalog
 
+        # Phase D ACL intersection gate: after the SigV4 scope check
+        # (own scopes), the resource ACL may only NARROW access. A
+        # credential is denied when the resource has a stored ACL and
+        # the intersection of its grants with this access key does not
+        # cover the action's permission class. Resources without a
+        # stored ACL keep the unrestricted baseline. Non-existent
+        # buckets have no grants, so the gate passes and the 404 wins.
+        if bucket and not _acl_allows(catalog, owner, action, bucket,
+                                      key if separator else None):
+            raise SigV4Error("AccessDenied",
+                             "Access denied by resource ACL")
+
         if not bucket:
             return Response(
                 list_buckets_xml(catalog, request.query_params, master, owner),
@@ -2987,6 +3124,8 @@ async def _handle(request: Request):
         if not separator:
             if "object-lock" in request.query_params:
                 return await _handle_bucket_object_lock(ctx)
+            if "acl" in request.query_params:
+                return await _handle_bucket_acl(ctx)
             return await _handle_bucket_route(ctx)
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "The specified bucket does not exist", 404)
@@ -2996,6 +3135,9 @@ async def _handle(request: Request):
         if ("retention" in request.query_params
                 or "legal-hold" in request.query_params):
             return await _handle_object_lock_controls(ctx)
+
+        if "acl" in request.query_params:
+            return await _handle_object_acl(ctx)
 
         if compat_object_read is not None:
             # The probe must address an existing current object.
@@ -3055,6 +3197,8 @@ async def _handle(request: Request):
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)
     except ObjectLockError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except AclError as exc:
         return _error(exc.code, str(exc), exc.status)
     except PermissionError as exc:
         # Object-lock fences (retention/legal hold) surface as 403.

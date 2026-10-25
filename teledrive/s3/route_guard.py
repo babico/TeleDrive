@@ -84,9 +84,11 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "publicAccessBlock": {"GET", "PUT"},
                 "lifecycle": {"GET", "PUT", "DELETE"},
                 "policyStatus": {"GET"},
+                # Phase D: real ACL grant store; PUT replaces the ACL.
+                "acl": {"GET", "PUT"},
                 # Compatibility probes are GET-only; every configuration
                 # attempt (PUT/DELETE) stays fail-closed 501 via `forbidden`.
-                "acl": {"GET"}, "ownershipControls": {"GET"},
+                "ownershipControls": {"GET"},
                 "policy": {"GET"}, "replication": {"GET"},
                 "website": {"GET"}, "logging": {"GET"},
                 "notification": {"GET"}, "notificationConfiguration": {"GET"},
@@ -124,8 +126,10 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
             allowed = (frozenset({"tagging", "versionId"})
                        if method in {"GET", "PUT", "DELETE"} else frozenset())
         elif "acl" in real:
-            # Canned private ACL probe: current object only, GET only.
-            allowed = frozenset({"acl"}) if method == "GET" else frozenset()
+            # Phase D: real ACL controls, GET and PUT (current object
+            # only — versioned ACL selectors stay unsupported).
+            allowed = (frozenset({"acl"})
+                       if method in {"GET", "PUT"} else frozenset())
         elif "retention" in real:
             # Phase C: real retention control, GET and PUT (optional
             # published VersionId selector on reads).

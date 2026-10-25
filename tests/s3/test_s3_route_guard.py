@@ -59,9 +59,9 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
         if reply.status_code == 200:
             root = ET.fromstring(reply.content)
             assert root.tag.rsplit("}", 1)[-1] != "ListBucketResult"
-    elif method == "PUT" and selector == "object-lock":
-        # Phase C: a real lock configuration control. An empty body is
-        # MalformedXML — never a fallback to bucket CRUD.
+    elif method == "PUT" and selector in ("object-lock", "acl"):
+        # Phase C/D: real lock and ACL configuration controls. An empty
+        # body is MalformedXML — never a fallback to bucket CRUD.
         assert reply.status_code == 400, (method, selector, reply.text)
         assert b"MalformedXML" in reply.content
     else:
@@ -86,9 +86,9 @@ def test_unknown_object_control_never_falls_back_to_data_or_delete(
         # Compatibility probe answers never leak or mutate object bytes.
         assert reply.status_code in (200, 404), (method, selector, reply.text)
         assert reply.content != b"old-data"
-    elif method == "PUT" and selector in ("retention", "legal-hold"):
-        # Phase C: real lock controls. A non-XML body is MalformedXML;
-        # the object bytes are never touched either way.
+    elif method == "PUT" and selector in ("retention", "legal-hold", "acl"):
+        # Phase C/D: real lock and ACL controls. A non-XML body is
+        # MalformedXML; the object bytes are never touched either way.
         assert reply.status_code == 400, (method, selector, reply.text)
         assert b"MalformedXML" in reply.content
     else:
@@ -167,7 +167,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":35, "partial":24, "unsupported":57,
+        "supported":39, "partial":22, "unsupported":55,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -181,7 +181,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      for item in data["operations"]
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
-    assert Counter(manifest_gaps.values()) == {"by design": 24}
+    assert Counter(manifest_gaps.values()) == {"by design": 22}
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",
     }

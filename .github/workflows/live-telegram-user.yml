@@ -49,6 +49,8 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - name: Check user E2E session configuration
         shell: bash
         id: configured
@@ -69,10 +71,10 @@ jobs:
           python -m pip install pytest
       - name: Real Telegram upload, retrieval, checksum and Range
         if: steps.configured.outputs.enabled == 'true'
-        run: python -m pytest -q tests/e2e/test_telegram_storage_e2e.py
+        run: python -m pytest -q --durations=25 tests/e2e/test_telegram_storage_e2e.py
       - name: Live Telegram marker inventory with owned-fixture cleanup
         if: steps.configured.outputs.enabled == 'true'
-        run: python -m pytest -q tests/e2e/test_telegram_history_live_e2e.py
+        run: python -m pytest -q --durations=25 tests/e2e/test_telegram_history_live_e2e.py
       - name: Publish CI run summary
         if: always()
         shell: bash

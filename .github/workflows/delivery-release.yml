@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Superseded branch runs are cancelled; tag runs are never interrupted.
+concurrency:
+  group: delivery-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 jobs:
   verify:
     name: Release gate · regression and security
@@ -47,7 +52,7 @@ jobs:
         run: python -m compileall -q teledrive web tests
       - name: Offline storage, API, recovery and security regression tests
         run: |
-          python -m pytest -q \
+          python -m pytest -q --durations=25 \
             tests/web/test_security.py tests/web/test_openapi.py \
             tests/storage/test_storage_engine.py \
             tests/storage/test_storage_recovery.py tests/storage/test_storage_rebuild.py tests/storage/test_storage_pending_admin.py tests/storage/test_storage_jobs.py tests/storage/test_storage_versions.py tests/storage/test_storage_ops_health.py tests/meta/test_host_soak.py tests/meta/test_acceptance_cli.py tests/storage/test_storage_gc_retention.py tests/s3/test_s3_version_reads.py tests/storage/test_storage_catalog.py \

@@ -61,6 +61,8 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - name: Configure dedicated live USER credentials
         run: |
           if [[ -z "$TELEDRIVE_E2E_SESSION" || -z "$TELEDRIVE_E2E_API_ID" || -z "$TELEDRIVE_E2E_API_HASH" ]]; then
@@ -77,7 +79,7 @@ jobs:
           python -m pip install pytest "psycopg[binary]>=3.2,<4"
           python -m pip check
       - name: Three independent SQL workers and real Telegram byte restoration
-        run: python -m pytest -vv tests/e2e/test_telegram_multiworker_e2e.py
+        run: python -m pytest -vv --durations=25 tests/e2e/test_telegram_multiworker_e2e.py
       - name: Publish CI run summary
         if: always()
         shell: bash

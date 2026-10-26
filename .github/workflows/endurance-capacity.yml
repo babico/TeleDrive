@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: endurance-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   isolated-endurance:
     name: 60m+ SQL / object-engine endurance
@@ -26,6 +30,8 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - name: Install application
         run: |
           python -m pip install -e .

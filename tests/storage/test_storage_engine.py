@@ -66,10 +66,18 @@ def execute(coroutine):
     return asyncio.run(coroutine)
 
 
+# Deterministic bytes, not os.urandom: a random payload inside
+# parametrize would print its full repr into the test id, giving every
+# pytest-xdist worker a different id and breaking collection. The data
+# still exercises the multi-chunk (>4096 byte) path.
+_MULTI_CHUNK_PAYLOAD = bytes(
+    (index * 97 + 13) % 256 for index in range(100_003))
+
+
 @pytest.mark.parametrize("payload,chunk_size", [
     (b"", 5), (b"a", 5), (b"abcd", 5),
     (b"abcde", 5), (b"abcdef", 5), (bytes(range(53)), 5),
-    (os.urandom(100_003), 4096),
+    (_MULTI_CHUNK_PAYLOAD, 4096),
 ])
 def test_full_telegram_round_trip_and_persisted_manifest(store, tmp_path, payload, chunk_size):
     backend = MemoryTelegram()

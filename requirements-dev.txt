@@ -1,0 +1,13 @@
+# Test-only dependencies. Kept separate from requirements.txt so the
+# runtime image never ships a test runner.
+#
+# pytest-xdist parallelizes the suite across processes: the full local run
+# drops from ~10 minutes to ~1 minute on a 4-core box. Tests were already
+# isolated per tmp_path/database, so --dist loadfile is safe: each FILE
+# stays on one worker, which keeps module-level fixtures coherent.
+pytest>=9,<10
+pytest-xdist>=3.6,<4
+httpx>=0.28,<1
+boto3>=1.35,<2
+bandit>=1.9,<2
+pip-audit>=2.7,<3

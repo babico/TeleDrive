@@ -90,12 +90,19 @@ def test_wrong_owner_channel_or_media_is_not_a_candidate():
     assert report["candidate_objects"][0]["chunks"][0]["message_id"] == 4
 
 
+# Fixed identifiers: a uuid4() inside parametrize would give every pytest
+# worker (xdist) a different test id, and collection would be rejected as
+# inconsistent. The values only need to be VALID uuids, not unique.
+_FIXED_UUID = "e750b9f3-4eaa-4591-886c-48a48f184a93"
+_FIXED_UUID_UPPER = "8F8438B8-80BC-4968-9E7F-80C61253996A"
+
+
 @pytest.mark.parametrize("caption", [
     None, "", "teledrive:no-uuid:0:" + "a" * 16,
-    "prefix:teledrive:" + str(uuid4()) + ":0:" + "a" * 16,
-    marker(str(uuid4()).upper(), 0),
-    marker(str(uuid4()), 0, "x" * 16),
-    marker(str(uuid4()), 0) + "\n",
+    "prefix:teledrive:" + _FIXED_UUID + ":0:" + "a" * 16,
+    marker(_FIXED_UUID_UPPER, 0),
+    marker(_FIXED_UUID, 0, "x" * 16),
+    marker(_FIXED_UUID, 0) + "\n",
 ])
 def test_ambiguous_markers_are_rejected(caption):
     assert parse_candidate_marker(caption) is None

@@ -73,7 +73,14 @@ def put(client, headers, payload, key="data.bin"):
                       }, content=payload)
 
 
-@pytest.mark.parametrize("data", [b"", b"x", os.urandom(4097), os.urandom(1049600)])
+# Deterministic payloads: os.urandom inside parametrize prints the whole
+# repr into the test id, so every pytest-xdist worker collects a different
+# id and collection fails. These still cross the chunk and multi-MiB paths.
+_CHUNK_CROSSING = bytes((i * 31 + 7) % 256 for i in range(4097))
+_MULTI_MIB = bytes((i * 17 + 3) % 256 for i in range(1_049_600))
+
+
+@pytest.mark.parametrize("data", [b"", b"x", _CHUNK_CROSSING, _MULTI_MIB])
 def test_binary_round_trip_persists_bytes_not_in_sql(service, data):
     client, headers, bot, root = service
     uploaded = put(client, headers, data)

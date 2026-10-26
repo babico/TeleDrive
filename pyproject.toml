@@ -17,4 +17,10 @@ dependencies = [
 include = ["teledrive*"]
 
 [tool.pytest.ini_options]
+# -n auto uses every core with xdist when it is installed; without xdist
+# pytest reports the unknown -n flag, so the default stays serial and the
+# documented fast command is `pytest -n auto` (see CONTRIBUTING note in
+# README). `--dist loadfile` keeps each test FILE on one worker, which is
+# what the module-level fixtures and tmp databases expect.
 addopts = "-p no:cacheprovider"
+testpaths = ["tests"]

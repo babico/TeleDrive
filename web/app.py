@@ -676,9 +676,81 @@ def ensure_config() -> None:
             raise RuntimeError("Unable to safely open TeleDrive config file") from exc
 
 
-def read_raw_config() -> dict[str, Any]:
+def _read_config_file() -> dict[str, Any]:
+    """The bootstrap file, parsed. Never consults the database."""
     ensure_config()
     return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+
+
+def _settings_store() -> "SettingsStore | None":
+    """A store bound to the database named by the BOOTSTRAP FILE.
+
+    The database URL itself lives in the settings, so resolving settings
+    through the normal db_connect() would recurse. The file is therefore
+    the bootstrap anchor: it names the database, and the database then
+    carries the authoritative settings document.
+    """
+    from teledrive.settings_store import SettingsStore
+    raw = _read_config_file()
+    state = raw.get("state") or {}
+    url = state.get("database_url") or state.get("db_path")
+    if not url:
+        return None
+    try:
+        connection = uploader.connect_db(str(url))
+    except Exception:
+        return None
+    try:
+        return SettingsStore(connection, load_master_key())
+    except Exception:
+        connection.close()
+        return None
+
+
+_SETTINGS_CACHE: dict[str, Any] = {"document": None, "generation": 0}
+
+
+def read_raw_config() -> dict[str, Any]:
+    """Authoritative settings: SQL document, else the bootstrap file.
+
+    The SQL document is written on every save (and seeded from the file
+    on first boot), so every process sharing the database agrees. If the
+    row is missing or undecryptable (master-key rotation), the file is
+    used and the next save re-seeds the database.
+    """
+    from teledrive.settings_store import SettingsStoreError
+    file_document = _read_config_file()
+    store = _settings_store()
+    if store is None:
+        return file_document
+    try:
+        stored = store.load()
+    except SettingsStoreError as exc:
+        _log(f"settings: {exc}; falling back to config.yaml", "config")
+        stored = None
+    finally:
+        store.db.close()
+    if stored is None:
+        # First boot (or an unusable row): seed SQL from the file so the
+        # database becomes authoritative from now on.
+        _seed_settings_document(file_document)
+        return file_document
+    _SETTINGS_CACHE["document"] = stored.document
+    _SETTINGS_CACHE["generation"] += 1
+    return copy.deepcopy(stored.document)
+
+
+def _seed_settings_document(document: dict[str, Any]) -> None:
+    store = _settings_store()
+    if store is None:
+        return
+    try:
+        store.save(document, by="bootstrap:config.yaml")
+        _log("settings: seeded the SQL document from config.yaml", "config")
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        _log(f"settings: seed failed: {type(exc).__name__}", "config")
+    finally:
+        store.db.close()
 
 
 def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
@@ -732,23 +804,59 @@ def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict
 
 
 def effective_config():
-    # Cache the parsed config by file mtime: every request used to re-read
-    # and re-parse the YAML (plus path validation) through db_connect().
+    """The parsed configuration the runtime uses.
+
+    The SQL settings document is authoritative; the YAML file is a
+    materialized mirror (and the bootstrap when SQL is empty). On a cache
+    miss the authoritative document is compared with the file and the
+    file is re-written only when they differ, so a mounted stale file is
+    self-healing without a write on every request. The cache key stays
+    the file mtime: every save rewrites the file, which invalidates the
+    cache in every process sharing the volume.
+    """
     try:
         mtime = CONFIG_PATH.stat().st_mtime_ns
     except OSError:
         mtime = None
-    if _CONFIG_CACHE["config"] is None or _CONFIG_CACHE["mtime"] != mtime:
-        ensure_config()
-        _CONFIG_CACHE["config"] = uploader.load_config(str(CONFIG_PATH))
-        _CONFIG_CACHE["mtime"] = mtime
+    if _CONFIG_CACHE["config"] is not None and _CONFIG_CACHE["mtime"] == mtime:
+        return _CONFIG_CACHE["config"]
+    ensure_config()
+    document = read_raw_config()
+    try:
+        on_disk = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except OSError:
+        on_disk = {}
+    if document != on_disk:
+        _secure_write(CONFIG_PATH,
+                      yaml.safe_dump(document, sort_keys=False))
+        try:
+            mtime = CONFIG_PATH.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+    _CONFIG_CACHE["config"] = uploader.load_config(str(CONFIG_PATH))
+    _CONFIG_CACHE["mtime"] = mtime
     return _CONFIG_CACHE["config"]
 
 
 _CONFIG_CACHE: dict = {"mtime": None, "config": None}
 
 
-def validate_and_write_config(raw: dict[str, Any]) -> None:
+def _persist_settings_document(document: dict[str, Any], *, by: str) -> None:
+    """Write the SQL settings document; never fail the save on this."""
+    store = _settings_store()
+    if store is None:
+        _log("settings: no database reachable; file-only save", "config")
+        return
+    try:
+        store.save(document, by=by)
+    except Exception as exc:  # noqa: BLE001 - the file write already succeeded
+        _log(f"settings: SQL persist failed: {type(exc).__name__}", "config")
+    finally:
+        store.db.close()
+
+
+def validate_and_write_config(raw: dict[str, Any], *,
+                             by: str = "system") -> None:
     current = read_raw_config()
     merged = _restore_secrets(raw, current)
     tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
@@ -765,6 +873,12 @@ def validate_and_write_config(raw: dict[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
         raise RuntimeError("Database connection/initialization failed") from exc
     os.replace(tmp, CONFIG_PATH)
+    # Persist the authoritative copy in SQL as well. The file stays the
+    # bootstrap/recovery source and its mtime invalidates every process's
+    # settings cache; the database is what a rebuild reads back.
+    _persist_settings_document(merged, by=by)
+    _CONFIG_CACHE["config"] = None
+    _CONFIG_CACHE["mtime"] = None
     _reload_service_settings()
     _create_default_admin()
     # Migrate users table: add enabled column if missing.
@@ -1562,7 +1676,9 @@ def put_config(request: Request, payload: dict[str, Any] = Body(...), _: None = 
     _same_origin(request)
     _log("settings save requested", "config")
     try:
-        validate_and_write_config(payload)
+        user = getattr(request.state, "user", {}) or {}
+        validate_and_write_config(
+            payload, by=str(user.get("username") or "system"))
         _log("settings saved successfully", "config")
     except ValueError as exc:
         raise HTTPException(400, _scrub_text(str(exc))) from exc

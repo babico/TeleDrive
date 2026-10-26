@@ -1,11 +1,18 @@
 # TeleDrive configuration example (copy to config/config.yaml and edit).
 #
-# The unified WebUI/REST/S3/local-job service reads this file as its ONLY
-# settings source. Only TZ, PUID/PGID and TELEDRIVE_CONFIG come from the
-# environment (plus a few internal paths the Docker image sets itself, such
-# as TELEDRIVE_AUTH_DIR). A TELEDRIVE_S3_MASTER_KEY environment variable
-# also exists for specialized deployments, but secrets belong in this file
-# and the session files; never commit real values.
+# Settings live in SQL after the first start: this file SEEDS the database
+# on first boot and stays as the bootstrap/disaster-recovery copy. From then
+# on the SQL document (`service_settings`, encrypted with the S3 master key)
+# is authoritative, so a UI save survives a rebuild from an older mounted
+# file. If the SQL row is missing or cannot be decrypted (master-key change)
+# the service falls back to this file and re-seeds on the next save.
+#
+# Deployment plumbing is NOT configured here and comes only from the
+# container environment: TELEDRIVE_WEB_PORT, TELEDRIVE_S3_PORT,
+# TELEDRIVE_BIND_ADDRESS, the per-listener TLS paths and
+# TELEDRIVE_TRUSTED_PROXY (plus TZ, PUID/PGID and TELEDRIVE_CONFIG).
+# Secrets in this file are encrypted at rest in SQL; never commit real
+# values.
 
 # ---------------------------------------------------------------------------
 # Web service: authentication, listeners and request limits.

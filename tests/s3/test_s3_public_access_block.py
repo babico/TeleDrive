@@ -33,17 +33,71 @@ def test_private_only_bucket_public_access_controls_and_no_payload_calls(service
 
 @pytest.mark.parametrize("bad,status", [
     (b"<PublicAccessBlockConfiguration></PublicAccessBlockConfiguration>", 400),
-    (b'<PublicAccessBlockConfiguration><BlockPublicAcls>false</BlockPublicAcls><IgnorePublicAcls>true</IgnorePublicAcls><BlockPublicPolicy>true</BlockPublicPolicy><RestrictPublicBuckets>true</RestrictPublicBuckets></PublicAccessBlockConfiguration>', 501),
     (b"<!DOCTYPE r [<!ENTITY x 'true'>]><PublicAccessBlockConfiguration><BlockPublicAcls>&x;</BlockPublicAcls></PublicAccessBlockConfiguration>", 400),
     (b"x" * 16385, 400),
     (ALL_TRUE.replace(b"<BlockPublicPolicy>true</BlockPublicPolicy>", b""), 400),
     (ALL_TRUE.replace(b"<RestrictPublicBuckets>true</RestrictPublicBuckets>", b"<RestrictPublicBuckets>TRUE</RestrictPublicBuckets>"), 400),
 ])
-def test_public_access_cannot_be_disabled_or_partially_configured(service, bad, status):
+def test_public_access_grammar_is_strict(service, bad, status):
     assert signed(service, "PUT", "/private-ci").status_code == 200
     answer = signed(service, "PUT", "/private-ci?publicAccessBlock", bad)
     assert answer.status_code == status, answer.text
     assert b"true" in signed(service, "GET", "/private-ci?publicAccessBlock").content
+
+
+def test_public_access_configuration_persists(service):
+    """Phase E: the four flags are real persisted state; any
+    combination is a deliberate owner decision and round-trips."""
+    assert signed(service, "PUT", "/private-ci").status_code == 200
+    path = "/private-ci?publicAccessBlock"
+    mixed = (b"<PublicAccessBlockConfiguration>"
+             b"<BlockPublicAcls>false</BlockPublicAcls>"
+             b"<IgnorePublicAcls>true</IgnorePublicAcls>"
+             b"<BlockPublicPolicy>false</BlockPublicPolicy>"
+             b"<RestrictPublicBuckets>true</RestrictPublicBuckets>"
+             b"</PublicAccessBlockConfiguration>")
+    answer = signed(service, "PUT", path, mixed)
+    assert answer.status_code == 200, answer.text
+    read = ET.fromstring(signed(service, "GET", path).content)
+    values = {child.tag.rsplit("}", 1)[-1]: child.text for child in read}
+    assert values["BlockPublicAcls"] == "false"
+    assert values["IgnorePublicAcls"] == "true"
+    assert values["BlockPublicPolicy"] == "false"
+    assert values["RestrictPublicBuckets"] == "true"
+    # Restoring all-true works the same way.
+    assert signed(service, "PUT", path, ALL_TRUE).status_code == 200
+    read = ET.fromstring(signed(service, "GET", path).content)
+    assert all(child.text == "true" for child in read)
+
+
+def test_policy_status_computed_from_real_grants(service):
+    """Phase E: IsPublic runs the real grant scan — with validated
+    access-key grantees the honest answer is always false."""
+    assert signed(service, "PUT", "/private-ci").status_code == 200
+    status = signed(service, "GET", "/private-ci?policyStatus")
+    assert status.status_code == 200, status.text
+    assert b"<IsPublic>false</IsPublic>" in status.content
+    # Even a bucket with stored ACL grants stays non-public: grantees
+    # are validated access keys, never groups or emails.
+    main = service[1]
+    from tests.s3.test_s3_acl import _policy_xml
+    body = _policy_xml(main.access_key, [(main.access_key, "READ", "")])
+    assert signed(service, "PUT", "/private-ci?acl", body).status_code == 200
+    status = signed(service, "GET", "/private-ci?policyStatus")
+    assert b"<IsPublic>false</IsPublic>" in status.content
+
+
+def test_ownership_controls_read_from_metadata(service):
+    """Phase E: the ownership state is persisted bucket metadata (the
+    one real model); ownership writes fail closed."""
+    assert signed(service, "PUT", "/private-ci").status_code == 200
+    read = signed(service, "GET", "/private-ci?ownershipControls")
+    assert read.status_code == 200, read.text
+    assert b"BucketOwnerEnforced" in read.content
+    root = ET.fromstring(read.content)
+    assert root.tag.rsplit("}", 1)[-1] == "OwnershipControls"
+    assert signed(service, "PUT", "/private-ci?ownershipControls"
+                  ).status_code == 501
 
 
 def test_private_control_permission_separation(service):
@@ -116,11 +170,18 @@ def test_actual_boto3_public_access_block_client(service):
         assert s3.get_public_access_block(Bucket="private-ci")["PublicAccessBlockConfiguration"] == expected
         ok = s3.put_public_access_block(Bucket="private-ci", PublicAccessBlockConfiguration=expected)
         assert ok["ResponseMetadata"]["HTTPStatusCode"] == 200
-        with pytest.raises(ClientError):
-            s3.put_public_access_block(Bucket="private-ci",
-                                       PublicAccessBlockConfiguration={
-                                           **expected, "BlockPublicAcls": False,
-                                       })
+        # Phase E: any combination is a persisted owner decision.
+        relaxed = {**expected, "BlockPublicAcls": False}
+        ok = s3.put_public_access_block(Bucket="private-ci",
+                                        PublicAccessBlockConfiguration=relaxed)
+        assert ok["ResponseMetadata"]["HTTPStatusCode"] == 200
+        stored = s3.get_public_access_block(
+            Bucket="private-ci")["PublicAccessBlockConfiguration"]
+        assert stored == relaxed
+        # Restore the default all-true configuration.
+        ok = s3.put_public_access_block(Bucket="private-ci",
+                                        PublicAccessBlockConfiguration=expected)
+        assert ok["ResponseMetadata"]["HTTPStatusCode"] == 200
     finally:
         server.should_exit = True
         thread.join(timeout=10)

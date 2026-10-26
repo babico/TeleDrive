@@ -1,8 +1,14 @@
-"""Private-only Public Access Block S3 controls.
+"""Public Access Block S3 controls backed by real bucket state.
 
-TeleDrive denies anonymous/public object access and public ACLs globally.
-The only truthful configuration is all four fields enabled. It is enforced
-even before a bucket exists and cannot be relaxed with an AWS-style API call.
+TeleDrive denies anonymous/public object access and public ACLs
+globally: grantee principals are always TeleDrive access keys, and the
+AllUsers/AuthenticatedUsers groups plus email grantees are unwritable
+(rejected 501 at ACL write time). Within that invariant, the four PAB
+flags are persisted per bucket (default all-true, like AWS) and PUT
+accepts any combination — the flags are a forward-looking guard: with
+``BlockPublicAcls`` on, only the bucket ACL's owner may author ACL
+grants; turning it off is a deliberate owner decision with no public
+exposure behind it (there is no public path in this gateway).
 """
 from __future__ import annotations
 
@@ -24,7 +30,12 @@ class PublicAccessError(ValueError):
         self.code, self.status = code, status
 
 
-def parse_public_access_xml(payload: bytes) -> None:
+def parse_public_access_xml(payload: bytes) -> dict:
+    """Parse a PublicAccessBlockConfiguration into {field: bool}.
+
+    Both true and false are accepted for every field — the persisted
+    flags carry the owner's deliberate configuration.
+    """
     if len(payload) > MAX_PUBLIC_ACCESS_XML_BYTES:
         raise PublicAccessError("MalformedXML", "Public access XML exceeds 16 KiB")
     try:
@@ -35,26 +46,31 @@ def parse_public_access_xml(payload: bytes) -> None:
                         f"{{{NAMESPACE}}}PublicAccessBlockConfiguration"}
             or root.attrib or len(root) != 4):
         raise PublicAccessError("MalformedXML", "Unexpected public access document")
-    seen = set()
+    seen: dict[str, bool] = {}
     for element in root:
         field = element.tag.rsplit("}", 1)[-1]
         if (field not in FIELDS or field in seen
                 or element.tag not in {field, f"{{{NAMESPACE}}}{field}"}
                 or element.attrib or len(element)):
             raise PublicAccessError("MalformedXML", "Unknown or duplicate public access field")
-        seen.add(field)
-        if element.text != "true":
-            if element.text == "false":
-                raise PublicAccessError(
-                    "NotImplemented", "Disabling public access protection is unsupported", 501,
-                )
-            raise PublicAccessError("InvalidArgument", "Public access fields must be true")
-    if seen != set(FIELDS):
+        if element.text == "true":
+            seen[field] = True
+        elif element.text == "false":
+            seen[field] = False
+        else:
+            raise PublicAccessError("InvalidArgument", "Public access fields must be true or false")
+    if set(seen) != set(FIELDS):
         raise PublicAccessError("MalformedXML", "Incomplete public access document")
+    return seen
 
 
-def public_access_xml() -> bytes:
+def public_access_xml(flags: dict | None = None) -> bytes:
+    """Render the persisted flags as a PublicAccessBlockConfiguration.
+
+    ``flags=None`` renders the all-true default (AWS default).
+    """
     root = ET.Element("PublicAccessBlockConfiguration", xmlns=NAMESPACE)
     for field in FIELDS:
-        ET.SubElement(root, field).text = "true"
+        ET.SubElement(root, field).text = (
+            "true" if (flags or {}).get(field, True) else "false")
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)

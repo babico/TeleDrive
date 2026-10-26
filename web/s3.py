@@ -44,6 +44,7 @@ from teledrive.s3.write_conditions import (check_write_precondition,
     WritePreconditionError, ExpectedHead)
 from teledrive.s3.tagging import ObjectTagStore, BucketTagStore, TaggingError, validate_tags
 from teledrive.s3.acl import (AclError, parse_acl_xml, render_acl_xml,
+                              is_public_grant_set,
                               permits as acl_permits)
 from teledrive.s3.cors import (BucketCORSStore, CORSError, MAX_CORS_XML_BYTES,
     parse_cors_xml, cors_xml, matching_rule, response_cors_headers)
@@ -907,10 +908,19 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
     if ctx.is_bucket_policy_status:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
-        # Public grants and bucket policies cannot be enabled through
-        # this private-only gateway. This is NOT a bucket policy engine.
-        return Response(_xml("PolicyStatus", [("IsPublic", "false")]),
-                        media_type="application/xml")
+        # IsPublic is computed from the actual stored grants and the
+        # bucket's PAB flags. Grantee principals are validated access
+        # keys, so public grantees are unwritable and the honest scan
+        # can only ever answer false — but the computation runs the
+        # real data, and IgnorePublicAcls implements the AWS semantics
+        # of ignoring public grants when set.
+        flags = catalog.public_access_block(bucket)
+        _, grants = catalog.bucket_acl(bucket)
+        is_public = (is_public_grant_set(grants)
+                     and not flags.get("IgnorePublicAcls", True))
+        return Response(
+            _xml("PolicyStatus", [("IsPublic", "true" if is_public else "false")]),
+            media_type="application/xml")
     if ctx.is_bucket_lifecycle:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket not found", 404)
@@ -940,7 +950,9 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
         if request.method == "GET":
-            return Response(public_access_xml(), media_type="application/xml")
+            return Response(
+                public_access_xml(catalog.public_access_block(bucket)),
+                media_type="application/xml")
         if request.method == "PUT":
             payload = bytearray()
             async for block in request.stream():
@@ -949,7 +961,8 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
                     raise PublicAccessError("MalformedXML",
                                             "Public access XML exceeds 16 KiB")
             _verify_bucket_control_payload(request, bytes(payload))
-            parse_public_access_xml(bytes(payload))
+            flags = parse_public_access_xml(bytes(payload))
+            catalog.set_public_access_block(bucket, flags)
             return Response(status_code=200)
         return _error("NotImplemented", "Unsupported public access method", 501)
     if ctx.is_bucket_versioning:
@@ -1306,6 +1319,16 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
     compat_selector = next(
         (name for name in _COMPAT_BUCKET_READS
          if name in request.query_params), None) if request.method == "GET" else None
+    if "ownershipControls" in request.query_params and request.method == "GET":
+        # Phase E: the persisted object ownership state — read from
+        # bucket metadata, not a handler constant. BucketOwnerEnforced
+        # is the one real model (owner-scoped grants); ownership
+        # writes fail closed 501.
+        root = ET.Element("OwnershipControls", xmlns=NAMESPACE)
+        rule = ET.SubElement(root, "Rule")
+        ET.SubElement(rule, "ObjectOwnership").text = (
+            catalog.object_ownership(bucket))
+        return _xml_ok(root)
     if compat_selector is not None:
         return _compat_bucket_read_response(compat_selector, ctx.owner)
     if "location" in request.query_params:
@@ -1930,6 +1953,16 @@ async def _handle_bucket_acl(ctx: _S3RequestContext) -> Response:
     try:
         acl_owner, grants = _validated_acl(
             payload, object_level=False, caller=ctx.owner, store=ctx.store)
+        # Phase E: with BlockPublicAcls on, only the bucket ACL's
+        # owner may author grants — the PAB flag guards the grant
+        # store instead of (nonexistent) public ACLs. The first write
+        # (no stored ACL) still establishes the owner.
+        if catalog.public_access_block(bucket).get("BlockPublicAcls"):
+            stored_owner, _rows = catalog.bucket_acl(bucket)
+            if stored_owner is not None and stored_owner != ctx.owner:
+                raise AclError("AccessDenied",
+                               "BlockPublicAcls restricts ACL writes to "
+                               "the ACL owner", 403)
         catalog.set_bucket_acl(bucket, acl_owner, grants)
     except AclError as exc:
         return _error(exc.code, str(exc), exc.status)
@@ -1961,6 +1994,14 @@ async def _handle_object_acl(ctx: _S3RequestContext) -> Response:
     try:
         acl_owner, grants = _validated_acl(
             payload, object_level=True, caller=ctx.owner, store=ctx.store)
+        # Phase E: BlockPublicAcls guards object ACL writes the same
+        # way — only the stored ACL's owner may replace them.
+        if catalog.public_access_block(bucket).get("BlockPublicAcls"):
+            stored_owner, _rows = catalog.object_acl(bucket, key)
+            if stored_owner is not None and stored_owner != ctx.owner:
+                raise AclError("AccessDenied",
+                               "BlockPublicAcls restricts ACL writes to "
+                               "the ACL owner", 403)
         catalog.set_object_acl(bucket, key, acl_owner, grants)
     except AclError as exc:
         return _error(exc.code, str(exc), exc.status)

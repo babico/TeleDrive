@@ -124,10 +124,11 @@ Per the researched P2-C design (owner already reviewing):
 - Put/Get/Delete Acl parse and return AWS-shaped
   AccessControlPolicy XML with CanonicalUser = access-key owner IDs.
 
-## Phase E — Public Access Block, policy status, ownership controls 
+## Phase E — Public Access Block, policy status, ownership controls — DONE
 
-**Converts:** Get/PutPublicAccessBlock, GetBucketPolicyStatus,
-GetBucketOwnershipControls — 3 partials.
+**Converted:** GetPublicAccessBlock, PutPublicAccessBlock,
+GetBucketPolicyStatus, GetBucketOwnershipControls — 4 operations
+promoted.
 
 On top of Phase D's grant store:
 

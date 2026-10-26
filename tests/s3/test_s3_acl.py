@@ -179,6 +179,54 @@ def test_object_acl_restricts_only_its_key(service, second, readonly):
     assert b"free.bin" in listing.content
 
 
+def test_block_public_acls_locks_acl_writes_to_the_owner(service):
+    """Phase E: with BlockPublicAcls on (default), only the stored
+    ACL's owner may replace it; turning the flag off is the owner's
+    deliberate decision to allow re-authoring."""
+    from teledrive.s3.credentials import S3CredentialStore
+    store = S3CredentialStore(service[3](), service[4])
+    writer = store.create("acl-writer", ["s3:PutBucketAcl", "s3:GetBucketAcl"])
+    main = service[1]
+    assert signed(service, "PUT", "/acl-bucket").status_code == 200
+    # The first write establishes the ACL owner and grants the writer
+    # FULL_CONTROL — the writer is ACL-authorized to act on the bucket.
+    body = _policy_xml(main.access_key,
+                       [(writer.access_key, "FULL_CONTROL", "")])
+    assert signed(service, "PUT", "/acl-bucket?acl", body).status_code == 200
+
+    # But with BlockPublicAcls on (the all-true default) even a
+    # FULL_CONTROL grantee cannot re-author the ACL: only the stored
+    # owner may. The flag keeps the grant store owner-pinned.
+    hijack = _policy_xml(writer.access_key, [(writer.access_key, "READ", "")])
+    denied = signed(service, "PUT", "/acl-bucket?acl", hijack,
+                    access=writer.access_key, secret=writer.secret_key)
+    assert denied.status_code == 403, denied.text
+    assert b"BlockPublicAcls" in denied.content
+
+    # The owner may still rewrite the ACL.
+    assert signed(service, "PUT", "/acl-bucket?acl", body).status_code == 200
+
+    # The owner deliberately turns BlockPublicAcls off; the grantee's
+    # stored FULL_CONTROL now covers re-authoring (still no public
+    # path — grantees are always validated access keys).
+    relaxed = (b"<PublicAccessBlockConfiguration>"
+               b"<BlockPublicAcls>false</BlockPublicAcls>"
+               b"<IgnorePublicAcls>true</IgnorePublicAcls>"
+               b"<BlockPublicPolicy>true</BlockPublicPolicy>"
+               b"<RestrictPublicBuckets>true</RestrictPublicBuckets>"
+               b"</PublicAccessBlockConfiguration>")
+    assert signed(service, "PUT", "/acl-bucket?publicAccessBlock",
+                  relaxed).status_code == 200
+    allowed = signed(service, "PUT", "/acl-bucket?acl", hijack,
+                     access=writer.access_key, secret=writer.secret_key)
+    assert allowed.status_code == 200, allowed.text
+    # The re-authored ACL answers to its new owner; the previous
+    # owner is now fenced out by the same intersection gate.
+    read = signed(service, "GET", "/acl-bucket?acl",
+                  access=writer.access_key, secret=writer.secret_key)
+    assert f"<ID>{writer.access_key}</ID>".encode() in read.content
+
+
 def test_grantee_validation_and_permission_grammar(service, second):
     assert signed(service, "PUT", "/acl-bucket").status_code == 200
     assert signed(service, "PUT", "/acl-bucket/x.bin", b"x").status_code == 200

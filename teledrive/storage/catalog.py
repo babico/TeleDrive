@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+import json
 import time
 from dataclasses import dataclass
 from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, ForeignKey, Integer, MetaData, String,
-    Table, Index, and_, or_, delete, false, insert, select, update,
+    Table, Text, Index, and_, or_, delete, false, insert, select, update,
     inspect, text,
 )
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +38,15 @@ buckets = Table(
            server_default=false()),
     Column("object_lock_default_mode", String(16)),
     Column("object_lock_default_days", Integer),
+    # Phase E: public access block (four booleans stored as JSON,
+    # default all-true like AWS) and the persisted object ownership
+    # model (BucketOwnerEnforced — the one real model here).
+    Column("public_access_block", Text, nullable=False,
+           server_default='{"BlockPublicAcls": true, '
+           '"IgnorePublicAcls": true, "BlockPublicPolicy": true, '
+           '"RestrictPublicBuckets": true}'),
+    Column("object_ownership", String(32), nullable=False,
+           server_default="BucketOwnerEnforced"),
 )
 object_acl_grants = Table(
     "storage_object_acl_grants", catalog_metadata,
@@ -125,6 +135,19 @@ def ensure_versioning_column(db) -> None:
         db.connection.execute(_text(
             "ALTER TABLE storage_buckets ADD COLUMN "
             "object_lock_default_days INTEGER"))
+        db.commit()
+    if bucket_columns and "public_access_block" not in bucket_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN public_access_block "
+            "TEXT NOT NULL DEFAULT "
+            "'{\"BlockPublicAcls\": true, \"IgnorePublicAcls\": true, "
+            "\"BlockPublicPolicy\": true, \"RestrictPublicBuckets\": true}'"
+        ))
+        db.commit()
+    if bucket_columns and "object_ownership" not in bucket_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN object_ownership "
+            "VARCHAR(32) NOT NULL DEFAULT 'BucketOwnerEnforced'"))
         db.commit()
     object_columns = columns_of("storage_objects")
     if object_columns and "retention_until_ns" not in object_columns:
@@ -376,6 +399,49 @@ class BucketCatalog:
                 for grantee, perm in sorted(combined)
             ])
         self.db.commit()
+
+    # -- public access block & ownership (Phase E) ----------------------
+    PAB_FIELDS = ("BlockPublicAcls", "IgnorePublicAcls",
+                  "BlockPublicPolicy", "RestrictPublicBuckets")
+
+    def public_access_block(self, bucket: str) -> dict:
+        """The bucket's persisted four-flag PAB (default all-true)."""
+        raw = self.db.connection.execute(
+            select(buckets.c.public_access_block)
+            .where(buckets.c.name == bucket)).scalar_one_or_none()
+        if raw is None:
+            raise FileNotFoundError("Bucket does not exist")
+        try:
+            flags = json.loads(raw)
+        except (TypeError, ValueError):
+            flags = {}
+        return {field: bool(flags.get(field, True))
+                for field in self.PAB_FIELDS}
+
+    def set_public_access_block(self, bucket: str, flags: dict) -> None:
+        if bucket not in self.list_buckets():
+            raise FileNotFoundError("Bucket does not exist")
+        clean = {}
+        for field in self.PAB_FIELDS:
+            value = flags.get(field)
+            if not isinstance(value, bool):
+                raise ValueError(f"PAB field {field} must be a boolean")
+            clean[field] = value
+        self.db.connection.execute(
+            update(buckets).where(buckets.c.name == bucket).values(
+                public_access_block=json.dumps(clean)))
+        self.db.commit()
+
+    def object_ownership(self, bucket: str) -> str:
+        """The persisted object ownership model. BucketOwnerEnforced is
+        the one real model here (ACLs are owner-scoped grants); the
+        value lives in bucket metadata, not a handler constant."""
+        value = self.db.connection.execute(
+            select(buckets.c.object_ownership)
+            .where(buckets.c.name == bucket)).scalar_one_or_none()
+        if value is None:
+            raise FileNotFoundError("Bucket does not exist")
+        return value
 
     def acl_grants_for(self, bucket: str, key: str | None) -> tuple[list, list]:
         """(bucket_rows, object_rows) for the ACL intersection gate:

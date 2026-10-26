@@ -48,6 +48,22 @@ def action_class(action: str) -> str | None:
     return "WRITE"
 
 
+def is_public_grant_set(grants: list[tuple[str, str]]) -> bool:
+    """Would this grant set hand access to the public?
+
+    Grantee principals are validated TeleDrive access keys at write
+    time, so the public patterns (AllUsers/AuthenticatedUsers groups,
+    email grantees) can never appear in stored rows — but the scan is
+    the honest computation, run against the actual stored grants.
+    """
+    for grantee, _permission in grants:
+        lowered = grantee.lower()
+        if ("allusers" in lowered or "authenticatedusers" in lowered
+                or "@" in lowered or "groups/global" in lowered):
+            return True
+    return False
+
+
 def permits(*, action: str, access_key: str, bucket_rows: list,
             object_rows: list, key: str | None) -> bool:
     """The intersection gate over already-fetched grant rows.

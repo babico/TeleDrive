@@ -462,8 +462,20 @@ dependency order, each independently shippable; A and B first.
       credentials denied at auth. 4 operations promoted (2 partial
       conversions + 2 P2-C writes). Inventory: **39 supported / 22
       partial (0 by code) / 55 unsupported**.
-- [ ] **Phase E — PAB/policy status/ownership controls** on the grant
-      store. Converts 3.
+- [x] **Phase E — PAB/policy status/ownership controls** (commit
+      pending): storage_buckets.public_access_block (4 boolean JSON,
+      default all-true; defensive ALTER) + object_ownership
+      (BucketOwnerEnforced). PutPublicAccessBlock persists any flag
+      combination (deliberate owner decision); BlockPublicAcls=on
+      pins bucket AND object ACL authoring to the stored ACL owner
+      (a real guard over the Phase D grant store — grantee takeovers
+      are fenced). GetBucketPolicyStatus computes IsPublic from the
+      actual stored grants + PAB flags (IgnorePublicAcls implements
+      the AWS ignore semantics; validated access-key grantees keep
+      the honest answer false). GetBucketOwnershipControls reads the
+      persisted ownership state from bucket metadata; ownership
+      writes fail closed 501. 4 operations promoted. Inventory: **43
+      supported / 18 partial (0 by code) / 55 unsupported**.
 - [ ] **Phase F — notifications + logging**: config tables +
       transactional event outbox + retry worker; audit-log delivery
       into a target bucket. Converts 2 + promotes writes.

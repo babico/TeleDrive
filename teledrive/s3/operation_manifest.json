@@ -175,15 +175,13 @@
     },
     {
       "name": "GetPublicAccessBlock",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutPublicAccessBlock",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketLifecycleConfiguration",
@@ -227,9 +225,8 @@
     },
     {
       "name": "GetBucketOwnershipControls",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketOwnershipControls",
@@ -259,9 +256,8 @@
     },
     {
       "name": "GetBucketPolicyStatus",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketEncryption",

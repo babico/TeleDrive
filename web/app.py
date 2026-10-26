@@ -178,6 +178,25 @@ class RotatingCompressedFileHandler(RotatingFileHandler):
         os.remove(source)
 
 
+def _verify_basic_credentials(username: str, password: str) -> bool:
+    """Cheap, constant-time check used ONLY for audit labelling.
+
+    Deliberately no password-hash work here: the audit middleware runs on
+    every request, so a PBKDF2 verification would be a CPU-exhaustion
+    vector. The configured credential is compared in constant time; any
+    other claimed name is recorded as unverified rather than trusted.
+
+    This never authorises anything — require_auth makes the real decision,
+    including the throttled, hash-verified path for local users.
+    """
+    if not isinstance(username, str) or not isinstance(password, str):
+        return False
+    if not WEB_PASSWORD:
+        return False
+    return (hmac.compare_digest(username, WEB_USER)
+            and hmac.compare_digest(password, WEB_PASSWORD))
+
+
 def _extract_user(request: Request) -> str:
     """Extract the authenticated user identity from the request (best-effort)."""
     auth = request.headers.get("authorization", "")
@@ -202,22 +221,29 @@ def _extract_user(request: Request) -> str:
                 conn.close()
         except Exception:
             pass
-    # Basic auth
+    # Basic auth. The header is only a CLAIM until the password verifies:
+    # logging an unverified username lets anyone write "admin" into the
+    # audit trail, which destroys forensic value.
     if auth.lower().startswith("basic "):
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8", "replace")
-            username = decoded.split(":", 1)[0]
-            if username:
-                return username
+            username, _, password = decoded.partition(":")
         except Exception:
-            pass
+            return "anonymous"
+        if _verify_basic_credentials(username, password):
+            return username
+        # A claimed identity we cannot cheaply verify is recorded as such,
+        # never as the name in the header.
+        return "unverified-basic"
     # Bearer token (API key) — resolve to the key name if possible.
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
         try:
             conn = db_connect()
             try:
-                name = ApiKeyStore(conn).name_for_token(token)
+                store = ApiKeyStore(conn)
+                scopes = store.scopes_for_token(token)
+                name = store.name_for_token(token) if scopes is not None else None
                 if name:
                     return name
             finally:

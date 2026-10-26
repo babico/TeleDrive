@@ -1457,3 +1457,31 @@ def test_replication_endpoints(authenv):
     status = client.get("/api/v1/admin/storage/replication",
                         headers=admin).json()
     assert status["account"] is None
+
+
+def test_audit_identity_is_not_spoofable_via_a_forged_basic_header(authenv):
+    """P7: the audit log must not record a claimed-but-unverified name.
+
+    Before this fix any request carrying `Authorization: Basic
+    YWRtaW46eA==` wrote "admin" into the log even though the password was
+    wrong, which destroys the forensic value of the trail.
+    """
+    import base64
+    import web.app as webapp
+
+    from starlette.requests import Request
+    forged = base64.b64encode(b"admin:definitely-not-the-password").decode()
+
+    def build(header: str) -> Request:
+        return Request({"type": "http", "method": "GET", "path": "/api/v1/x",
+                        "headers": [(b"authorization", header.encode()),
+                                    (b"host", b"localhost")],
+                        "query_string": b"", "server": ("127.0.0.1", 80),
+                        "scheme": "http", "client": ("127.0.0.1", 1)})
+
+    assert webapp._extract_user(build(f"Basic {forged}")) == "unverified-basic"
+    # With the real configured password the name is trusted.
+    import base64 as b64
+    real = b64.b64encode(
+        f"{webapp.WEB_USER}:{webapp.WEB_PASSWORD}".encode()).decode()
+    assert webapp._extract_user(build(f"Basic {real}")) == webapp.WEB_USER

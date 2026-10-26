@@ -1165,6 +1165,11 @@ async def lifespan(_: FastAPI):
         # there deadlocks SQLite against the caller's write lock).
         from teledrive.s3.notifications import ensure_notification_tables
         ensure_notification_tables(conn.engine)
+        # Object annotations (Phase O2) are created at startup for the same
+        # reason: their store constructor must never issue DDL while a
+        # mutation transaction holds SQLite's write lock.
+        from teledrive.s3.annotations import ensure_annotation_tables
+        ensure_annotation_tables(conn.engine)
         conn.close()
     except Exception as exc:
         _log(_scrub_text(f"startup database warning: {exc}"), "startup")

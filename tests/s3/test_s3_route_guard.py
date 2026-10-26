@@ -25,7 +25,7 @@ CONTROL_SELECTORS = (
     "object-lock", "retention", "legal-hold", "publicAccessBlock-malformed",
     "ownershipControls", "accelerate", "requestPayment", "select",
     "select-type", "restore", "torrent", "analytics", "inventory",
-    "metrics", "intelligent-tiering", "x-unknown-provider-option",
+    "metrics", "intelligent-tiering", "x-unknown-provider-option", "abac",
 )
 EXACT_SUPPORTED = {"location", "cors", "tagging", "versioning",
                    "publicAccessBlock", "lifecycle"}
@@ -35,7 +35,7 @@ EXACT_SUPPORTED = {"location", "cors", "tagging", "versioning",
 COMPAT_READ_SELECTORS = frozenset({
     "acl", "policy", "website", "notification", "notificationConfiguration",
     "logging", "replication", "encryption", "object-lock", "retention",
-    "legal-hold", "ownershipControls", "accelerate", "requestPayment",
+    "legal-hold", "ownershipControls", "accelerate", "requestPayment", "abac",
 })
 # Only these have object-route compatibility answers; the bucket-only
 # selectors above still fail closed with 501 on an object path.
@@ -52,20 +52,24 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
     assert signed(service, "PUT", "/guard-bucket").status_code == 200
     before = service[2].uploads
     reply = signed(service, method, f"/guard-bucket?{selector}")
-    if method == "GET" and selector in COMPAT_BUCKET_READ_SELECTORS:
+    if method == "GET" and selector in ("analytics", "inventory", "metrics"):
+        # Phase N: real configuration listing (empty list body), never CRUD.
+        assert reply.status_code == 200, (method, selector, reply.text)
+        assert b"ListBucketResult" not in reply.content
+    elif method == "GET" and selector in COMPAT_BUCKET_READ_SELECTORS:
         # Read-only compatibility probe: a valid AWS-shaped answer that is
         # never bucket CRUD (no ListBucketResult payload, no mutation).
         assert reply.status_code in (200, 404), (method, selector, reply.text)
-        if reply.status_code == 200:
+        if reply.status_code == 200 and selector != "abac":
             root = ET.fromstring(reply.content)
             assert root.tag.rsplit("}", 1)[-1] != "ListBucketResult"
     elif method == "PUT" and selector in (
             "replication", "notification", "notificationConfiguration",
-            "logging", "website",
+            "logging", "website", "requestPayment", "accelerate",
     ):
-        # Phase F/G/I: real replication, notification, logging and website
-        # configuration; an empty body is MalformedXML — never a fallback
-        # to bucket CRUD.
+        # Phase F/G/I/O6: real replication, notification, logging, website
+        # and single-state payment/acceleration configuration; an empty
+        # body is MalformedXML — never a fallback to bucket CRUD.
         assert reply.status_code == 400, (method, selector, reply.text)
         assert b"MalformedXML" in reply.content
     elif method == "DELETE" and selector == "replication":
@@ -75,11 +79,27 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
         # Phase I: deleting an absent website config is idempotent and
         # also clears public_read.
         assert reply.status_code == 204, (method, selector, reply.text)
-    elif method == "PUT" and selector in ("object-lock", "acl"):
-        # Phase C/D: real lock and ACL configuration controls. An empty
-        # body is MalformedXML — never a fallback to bucket CRUD.
+    elif method == "PUT" and selector in ("object-lock", "acl",
+                                          "policy", "ownershipControls",
+                                          "abac"):
+        # Phase C/D/L: real lock, ACL, policy, ownership and ABAC
+        # controls. An empty body is MalformedXML/MalformedPolicy —
+        # never a fallback to bucket CRUD.
         assert reply.status_code == 400, (method, selector, reply.text)
-        assert b"MalformedXML" in reply.content
+        assert (b"MalformedXML" in reply.content
+                or b"MalformedPolicy" in reply.content)
+    elif method in {"PUT", "DELETE"} and selector in (
+            "analytics", "inventory", "metrics",
+    ):
+        # Phase N: real report-configuration CRUD. PUT without an id is a
+        # required-id failure (400); DELETE with no id likewise. Neither
+        # may fall back to bucket CRUD.
+        assert reply.status_code in (400, 204), (method, selector, reply.text)
+        assert b"ListBucketResult" not in reply.content
+    elif method == "DELETE" and selector in ("policy", "ownershipControls"):
+        # Phase L: deleting an absent policy/ownership configuration is
+        # idempotent (ownership resets to BucketOwnerEnforced).
+        assert reply.status_code == 204, (method, selector, reply.text)
     else:
         assert reply.status_code == 501, (method, selector, reply.text)
         if method != "HEAD":
@@ -183,7 +203,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":60, "partial":8, "unsupported":48,
+        "supported":89, "partial":7, "unsupported":20,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -197,7 +217,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      for item in data["operations"]
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
-    assert Counter(manifest_gaps.values()) == {"by design": 8}
+    assert Counter(manifest_gaps.values()) == {"by design": 7}
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",
     }
@@ -211,8 +231,11 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
 
 def test_unknown_parameter_is_rejected_before_object_transport():
     # No FastAPI/SQL is needed to prove the guard is independent of secrets.
+    # `inventory` is a REAL Phase N selector now, so use a genuinely
+    # unknown control to prove the guard still fails closed.
     with pytest.raises(S3QueryError) as denied:
-        validate_s3_query("DELETE", "source", False, QueryParams("policy"))
+        validate_s3_query("DELETE", "source", False,
+                          QueryParams("x-unknown-provider-option"))
     assert denied.value.code == "NotImplemented"
 
 

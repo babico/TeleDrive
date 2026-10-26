@@ -174,10 +174,11 @@ def test_unsigned_payload_and_unsupported_operations_fail_closed(service):
     unsupported = signed(service, "GET", "/backup-bucket?policy")
     assert unsupported.status_code == 404
     assert b"NoSuchBucketPolicy" in unsupported.content
-    # Configuration attempts on optional features still fail closed.
+    # Configuration attempts are real Phase L controls: an empty body is
+    # MalformedPolicy, never a silent success.
     blocked = signed(service, "PUT", "/backup-bucket?policy")
-    assert blocked.status_code == 501
-    assert b"NotImplemented" in blocked.content
+    assert blocked.status_code == 400
+    assert b"MalformedPolicy" in blocked.content
 
 
 def test_catalog_pagination_with_signed_s3_queries(service):

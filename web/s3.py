@@ -3,6 +3,19 @@
 Run as a separate ASGI process at port 9000. Shares SQL metadata and Telegram
 Bot API credentials with REST; never stores object bodies in another S3 service.
 Unimplemented S3 operations explicitly return NotImplemented (501).
+
+Phase O wire shapes implemented here:
+
+* RenameObject: ``POST /{bucket}/{destination}?rename`` with the source in the
+  signed ``x-amz-rename-source: bucket/source`` header (the AWS directory-bucket
+  shape). TeleDrive also accepts standard buckets — a documented SUPERSET of
+  AWS, which limits RenameObject to directory buckets — because the rename is a
+  single SQL head move with no Telegram byte copy. Overwrite is rejected.
+* SelectObjectContent: ``POST /{bucket}/{key}?select&select-type=2`` with the
+  AWS XML request and a real AWS event-stream response (see teledrive/s3/select.py).
+* RestoreObject: ``POST /{bucket}/{key}?restore`` with strict AWS XML; without
+  an archive tier every object is immediately readable, so the truthful answer
+  is ``403 InvalidObjectState`` (see teledrive/s3/restore.py).
 """
 from __future__ import annotations
 
@@ -42,7 +55,8 @@ from teledrive.s3.batch_delete import BatchDeleteError, MAX_XML_BYTES, parse_bat
 from teledrive.s3.conditions import http_last_modified, read_precondition
 from teledrive.s3.write_conditions import (check_write_precondition,
     WritePreconditionError, ExpectedHead)
-from teledrive.s3.tagging import ObjectTagStore, BucketTagStore, TaggingError, validate_tags
+from teledrive.s3.tagging import (ObjectTagStore, BucketTagStore, TaggingError,
+                                  validate_tags, object_tags)
 from teledrive.s3.acl import (AclError, parse_acl_xml, render_acl_xml,
                               is_public_grant_set,
                               permits as acl_permits)
@@ -52,6 +66,15 @@ from teledrive.s3.versioning import (VersioningError, MAX_VERSIONING_XML_BYTES,
     parse_versioning_xml, versioning_xml)
 from teledrive.s3.public_access import (PublicAccessError, MAX_PUBLIC_ACCESS_XML_BYTES,
     parse_public_access_xml, public_access_xml)
+from teledrive.s3.policy import (
+    BucketAbacStore, BucketPolicyStore, PolicyError, MAX_POLICY_BYTES,
+    evaluate as evaluate_policy, evaluate_abac,
+    parse_abac_document, parse_policy,
+)
+from teledrive.s3.ownership import (
+    OwnershipError, MAX_OWNERSHIP_XML_BYTES, parse_ownership_xml,
+    ownership_xml,
+)
 from teledrive.s3.lifecycle import (LifecycleError, MAX_XML as MAX_LIFECYCLE_XML,
     BucketLifecycleStore, parse_lifecycle_xml, lifecycle_xml)
 from teledrive.s3.replication import (ReplicationError,
@@ -66,9 +89,35 @@ from teledrive.s3.website import (
     MAX_WEBSITE_XML_BYTES, WebsiteConfigStore, WebsiteError,
     parse_website_xml, website_xml,
 )
+from teledrive.s3.annotations import (
+    AnnotationError, AnnotationStore, MAX_ANNOTATION_RESULTS,
+    MAX_ANNOTATION_VALUE_BYTES, annotation_etag, annotation_http_date,
+    annotations_xml, continuation_token,
+    parse_continuation_token, put_annotation_xml, validate_annotation_name,
+    validate_annotation_prefix, validate_annotation_value,
+)
+from teledrive.s3.bucket_flags import (
+    BucketFlagError, MAX_BUCKET_FLAG_XML_BYTES as MAX_BUCKET_FLAG_XML,
+    accelerate_xml, parse_accelerate_xml, parse_request_payment_xml,
+    request_payment_xml,
+)
+from teledrive.s3.report_configs import (
+    MAX_REPORT_XML_BYTES, KINDS as REPORT_KINDS, NO_SUCH_CONFIGURATION,
+    ReportConfigError, ReportConfigStore, config_xml as report_config_xml,
+    list_xml as report_list_xml, parse_document as parse_report_document,
+)
 from teledrive.s3.object_metadata import (
     ObjectMetadataStore, ObjectMetadataError, parse_object_metadata, signed_header_names,
     STANDARD_HEADERS,
+)
+from teledrive.s3.select import (
+    SelectError, MAX_REQUEST_XML_BYTES as MAX_SELECT_XML_BYTES,
+    MAX_SCAN_BYTES as MAX_SELECT_SCAN_BYTES,
+    build_event_stream, parse_select_request, run_select,
+)
+from teledrive.s3.restore import (
+    RestoreError, MAX_RESTORE_XML_BYTES, is_applicable as _restore_is_applicable,
+    parse_restore_request,
 )
 from teledrive.storage.catalog import BucketCatalog, published_versions
 from teledrive.storage.copy import copy_object, CopyConflict
@@ -178,10 +227,11 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         rejected -= {"x-amz-trailer", "x-amz-decoded-content-length"}
     # The S3 gateway is permanently private and has exactly one storage
     # tier, so these explicit default values do not change actual behavior.
-    # Reject every other canned ACL / storage-class rather than pretending
-    # to provide public-read, Glacier, Standard-IA or replicated durability.
+    # ``bucket-owner-full-control`` is accepted because Phase L5 gives it
+    # real meaning under BucketOwnerPreferred. Reject every other canned
+    # ACL / storage-class rather than pretending to provide public-read,
+    # Glacier, Standard-IA or replicated durability.
     defaults = {
-        "x-amz-acl": "private",
         "x-amz-storage-class": "STANDARD",
     }
     signed = signed_header_names(request)
@@ -192,6 +242,12 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         if name not in signed:
             raise SigV4Error("AccessDenied", "S3 access mode must be signed")
         if actual != expected:
+            raise SigV4Error("NotImplemented", "Unsupported S3 ACL or storage tier")
+    canned_acl = request.headers.get("x-amz-acl")
+    if canned_acl is not None:
+        if "x-amz-acl" not in signed:
+            raise SigV4Error("AccessDenied", "S3 access mode must be signed")
+        if canned_acl not in {"private", "bucket-owner-full-control"}:
             raise SigV4Error("NotImplemented", "Unsupported S3 ACL or storage tier")
     if (any(name in request.headers for name in rejected)
             or (request.headers.get("content-encoding", "").lower() == "aws-chunked"
@@ -649,13 +705,14 @@ def _compat_bucket_read_response(selector: str, owner: str) -> Response:
         ET.SubElement(rule, "ObjectOwnership").text = "BucketOwnerEnforced"
         return _xml_ok(root)
     if selector == "requestPayment":
-        root = ET.Element("RequestPaymentConfiguration", xmlns=NAMESPACE)
-        ET.SubElement(root, "Payer").text = "BucketOwner"
-        return _xml_ok(root)
+        # Writable-but-single-state (Phase O6): PUT accepts only
+        # Payer=BucketOwner and rejects Requester with 501. This GET
+        # therefore reports the one real state, not a fail-closed default.
+        return Response(request_payment_xml(), media_type="application/xml")
     if selector == "accelerate":
-        root = ET.Element("AccelerateConfiguration", xmlns=NAMESPACE)
-        ET.SubElement(root, "TransferAcceleratedStatus").text = "Suspended"
-        return _xml_ok(root)
+        # Writable-but-single-state (Phase O6): PUT accepts only
+        # Suspended and rejects Enabled with 501 (no edge network).
+        return Response(accelerate_xml(), media_type="application/xml")
     if selector in ("notification", "notificationConfiguration"):
         return _xml_ok(ET.Element("NotificationConfiguration", xmlns=NAMESPACE))
     if selector == "logging":
@@ -722,16 +779,21 @@ class _S3RequestContext:
     is_object_attributes: bool = False
     is_object_tagging: bool = False
     is_version_tagging: bool = False
+    is_object_annotation: bool = False
     is_bucket_tagging: bool = False
     is_bucket_cors: bool = False
     is_bucket_versioning: bool = False
     is_public_access_block: bool = False
     is_bucket_lifecycle: bool = False
     is_bucket_policy_status: bool = False
+    is_bucket_policy: bool = False
+    is_bucket_ownership: bool = False
+    is_bucket_abac: bool = False
     is_bucket_replication: bool = False
     is_bucket_website: bool = False
     is_bucket_notification: bool = False
     is_bucket_logging: bool = False
+    report_kind: str | None = None
 
 
 async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
@@ -781,9 +843,11 @@ async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
     # already proved the credential's own PutObject scope; the bucket
     # ACL may still narrow access to this exact key.
     form_credential = post_fields["x-amz-credential"].split("/", 1)[0]
-    if not _acl_allows(post_catalog, form_credential, "s3:PutObject",
-                       bucket, post_key):
-        raise SigV4Error("AccessDenied", "Access denied by resource ACL")
+    allowed, reason = _authorize_resource(
+        post_catalog, store, form_credential, "s3:PutObject",
+        bucket, post_key, request)
+    if not allowed:
+        raise SigV4Error("AccessDenied", reason)
     if bucket not in post_catalog.list_buckets():
         return _error("NoSuchBucket", "Upload bucket does not exist", 404)
     directory = Path(_webapp.STORAGE_SCRATCH_DIR)
@@ -813,6 +877,8 @@ async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
                 obj.id, form_tags,
             )
         post_catalog.publish(obj.id, now=int(time.time()))
+        _apply_bucket_owner_preferred(
+            post_catalog, bucket, post_key, form_credential, request)
         etag = '"' + obj.sha256 + '"'
         response_headers = {"ETag": etag, "x-amz-version-id": obj.id}
         # A redirect is an explicit signed browser instruction. The
@@ -874,19 +940,20 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
     batch = parse_batch(payload)
     result = ET.Element("DeleteResult", xmlns=NAMESPACE)
     for key_to_delete, version_id in batch.entries:
-        # Phase D/P8: the request-level gate only sees the BUCKET path
-        # (POST /bucket?delete has no object key), so a per-object ACL
-        # would never be consulted. Check every entry against its own
-        # key, exactly like a single-object DELETE.
-        if not _acl_allows(catalog, ctx.owner, "s3:DeleteObject", bucket,
-                           key_to_delete):
+        # Phase L: the request-level gate only sees the BUCKET path
+        # (POST /bucket?delete has no object key), so a per-object
+        # policy or ACL would never be consulted. Check every entry
+        # against its own key, exactly like a single-object DELETE.
+        allowed, reason = _authorize_resource(
+            catalog, ctx.store, ctx.owner, "s3:DeleteObject", bucket,
+            key_to_delete, request)
+        if not allowed:
             problem = ET.SubElement(result, "Error")
             ET.SubElement(problem, "Key").text = key_to_delete
             if version_id is not None:
                 ET.SubElement(problem, "VersionId").text = version_id
             ET.SubElement(problem, "Code").text = "AccessDenied"
-            ET.SubElement(problem, "Message").text = (
-                "Access denied by resource ACL")
+            ET.SubElement(problem, "Message").text = reason
             continue
         if version_id is not None:
             # Explicit per-entry version deletion, the same semantics as
@@ -967,6 +1034,87 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
     request = ctx.request
     bucket = ctx.bucket
     catalog = ctx.catalog
+    if ctx.is_bucket_policy:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = BucketPolicyStore(catalog)
+        if request.method == "GET":
+            document = store.get(bucket)
+            if document is None:
+                return _error("NoSuchBucketPolicy",
+                              "The bucket policy does not exist", 404)
+            return Response(document, media_type="application/json")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_POLICY_BYTES:
+                    raise PolicyError("MalformedPolicy",
+                                      "Bucket policy exceeds 20 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            compiled = parse_policy(bytes(payload), bucket=bucket,
+                                    credential_store=ctx.store)
+            store.replace(bucket, compiled, ctx.owner)
+            return Response(status_code=204)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise PolicyError(
+                        "InvalidRequest",
+                        "DeleteBucketPolicy cannot have a body")
+            store.delete(bucket)
+            return Response(status_code=204)
+        return _error("NotImplemented", "Unsupported bucket policy method", 501)
+    if ctx.is_bucket_ownership:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        if request.method == "GET":
+            return Response(
+                ownership_xml(catalog.object_ownership(bucket)),
+                media_type="application/xml")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_OWNERSHIP_XML_BYTES:
+                    raise OwnershipError("MalformedXML",
+                                         "Ownership controls XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            catalog.set_object_ownership(
+                bucket, parse_ownership_xml(bytes(payload)))
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise OwnershipError(
+                        "InvalidRequest",
+                        "DeleteBucketOwnershipControls cannot have a body")
+            catalog.clear_object_ownership(bucket)
+            return Response(status_code=204)
+        return _error("NotImplemented",
+                      "Unsupported ownership controls method", 501)
+    if ctx.is_bucket_abac:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = BucketAbacStore(catalog)
+        if request.method == "GET":
+            state = store.get(bucket)
+            document = (state or {}).get("document") or {"Status": "Disabled"}
+            return Response(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                media_type="application/json")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_POLICY_BYTES:
+                    raise PolicyError("MalformedPolicy",
+                                      "ABAC document exceeds 20 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            store.replace(bucket, parse_abac_document(bytes(payload)),
+                          ctx.owner)
+            return Response(status_code=200)
+        return _error("NotImplemented", "Unsupported ABAC method", 501)
     if ctx.is_bucket_policy_status:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -983,6 +1131,51 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
         return Response(
             _xml("PolicyStatus", [("IsPublic", "true" if is_public else "false")]),
             media_type="application/xml")
+    if ctx.report_kind is not None:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        kind = ctx.report_kind
+        store = ReportConfigStore(catalog)
+        config_id = request.query_params.get("id")
+        if request.method == "GET":
+            if config_id is not None:
+                if not config_id:
+                    return _error("InvalidArgument",
+                                  "Report configuration id is empty", 400)
+                value = store.get(bucket, kind, config_id)
+                if value is None:
+                    # AWS uses NoSuchConfiguration for analytics, inventory
+                    # AND metrics GETs (not NoSuchInventoryConfiguration).
+                    return _error(
+                        NO_SUCH_CONFIGURATION,
+                        "The specified configuration does not exist", 404)
+                return Response(report_config_xml(kind, value),
+                                media_type="application/xml")
+            return Response(report_list_xml(kind, store.list(bucket, kind)),
+                            media_type="application/xml")
+        if request.method == "PUT":
+            body = bytearray()
+            async for block in request.stream():
+                body.extend(block)
+                if len(body) > MAX_REPORT_XML_BYTES:
+                    raise ReportConfigError(
+                        "MalformedXML",
+                        "Report configuration XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(body))
+            config = parse_report_document(
+                kind, bytes(body), expected_id=config_id)
+            store.put(bucket, kind, config_id, config)
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise ReportConfigError(
+                        "InvalidRequest",
+                        "Delete report configuration cannot have a body")
+            store.delete(bucket, kind, config_id)
+            return Response(status_code=204)
+        return _error("NotImplemented",
+                      "Unsupported report configuration method", 501)
     if ctx.is_bucket_website:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -1148,6 +1341,14 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
             flags = parse_public_access_xml(bytes(payload))
             catalog.set_public_access_block(bucket, flags)
             return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise PublicAccessError(
+                        "InvalidRequest",
+                        "DeletePublicAccessBlock cannot have a body")
+            catalog.clear_public_access_block(bucket)
+            return Response(status_code=204)
         return _error("NotImplemented", "Unsupported public access method", 501)
     if ctx.is_bucket_versioning:
         if bucket not in catalog.list_buckets():
@@ -1479,6 +1680,32 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
     controls = await _handle_bucket_controls(ctx)
     if controls is not None:
         return controls
+    if request.method == "PUT" and "requestPayment" in request.query_params:
+        # Phase O6: only Payer=BucketOwner is accepted; Requester -> 501.
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        payload = bytearray()
+        async for block in request.stream():
+            payload.extend(block)
+            if len(payload) > MAX_BUCKET_FLAG_XML:
+                raise BucketFlagError("MalformedXML",
+                                      "Request payment XML exceeds 16 KiB")
+        _verify_bucket_control_payload(request, bytes(payload))
+        parse_request_payment_xml(bytes(payload))
+        return Response(status_code=200)
+    if request.method == "PUT" and "accelerate" in request.query_params:
+        # Phase O6: only Suspended is accepted; Enabled -> 501.
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        payload = bytearray()
+        async for block in request.stream():
+            payload.extend(block)
+            if len(payload) > MAX_BUCKET_FLAG_XML:
+                raise BucketFlagError("MalformedXML",
+                                      "Accelerate XML exceeds 16 KiB")
+        _verify_bucket_control_payload(request, bytes(payload))
+        parse_accelerate_xml(bytes(payload))
+        return Response(status_code=200)
     if request.method == "PUT":
         try:
             catalog.create_bucket(bucket, int(time.time()))
@@ -1503,16 +1730,6 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
     compat_selector = next(
         (name for name in _COMPAT_BUCKET_READS
          if name in request.query_params), None) if request.method == "GET" else None
-    if "ownershipControls" in request.query_params and request.method == "GET":
-        # Phase E: the persisted object ownership state — read from
-        # bucket metadata, not a handler constant. BucketOwnerEnforced
-        # is the one real model (owner-scoped grants); ownership
-        # writes fail closed 501.
-        root = ET.Element("OwnershipControls", xmlns=NAMESPACE)
-        rule = ET.SubElement(root, "Rule")
-        ET.SubElement(rule, "ObjectOwnership").text = (
-            catalog.object_ownership(bucket))
-        return _xml_ok(root)
     if compat_selector is not None:
         return _compat_bucket_read_response(compat_selector, ctx.owner)
     if "location" in request.query_params:
@@ -1963,8 +2180,8 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
             or ctx.store.resolve(owner, "s3:GetObject") is None):
         raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
     # P8: honour the SOURCE object's ACL for multipart part copies too.
-    _require_source_acl(ctx.catalog, owner,
-                        request.headers["x-amz-copy-source"])
+    _require_source_acl(ctx.catalog, ctx.store, owner,
+                        request.headers["x-amz-copy-source"], request)
     if (request.headers.get("x-amz-copy-source-if-match") is not None
             and "x-amz-copy-source-if-match" not in signed):
         raise SigV4Error("AccessDenied", "Copy precondition must be signed")
@@ -2073,31 +2290,146 @@ def _parse_iso8601_ns(raw: str) -> int:
     return int(moment.timestamp() * 1_000_000_000)
 
 
-def _require_source_acl(catalog, access_key: str, source_header: str) -> None:
-    """Fail closed when a copy source is narrowed by its own object ACL.
-
-    ``CopySource`` is a plain local bucket/key path (the callers reject
-    URLs and query strings). A malformed value is ignored here because
-    each caller parses and rejects it with its own protocol error.
-    """
+def _require_source_acl(catalog, store, access_key: str, source_header: str,
+                        request) -> None:
+    """Fail closed when a copy source is narrowed by policy or its ACL."""
     path = unquote(source_header[1:] if source_header.startswith("/")
                    else source_header)
     src_bucket, slash, src_key = path.partition("/")
     if not slash or not src_bucket or not src_key:
         return
-    if not _acl_allows(catalog, access_key, "s3:GetObject", src_bucket,
-                       src_key):
+    allowed, _reason = _authorize_resource(
+        catalog, store, access_key, "s3:GetObject", src_bucket, src_key,
+        request)
+    if not allowed:
         raise SigV4Error("AccessDenied",
-                         "Access denied by source object ACL")
+                         "Access denied by source object ACL or policy")
+
+
+def _ownership_model(catalog, bucket: str) -> str:
+    try:
+        return catalog.object_ownership(bucket)
+    except FileNotFoundError:
+        return "BucketOwnerEnforced"
+
+
+def _policy_context(catalog, store, access_key: str, bucket: str,
+                    key: str | None, request) -> dict:
+    """Context keys the condition engine can honestly evaluate."""
+    context: dict = {}
+    for name in ("prefix", "max-keys", "delimiter"):
+        value = request.query_params.get(name)
+        if value is not None:
+            context["s3:" + name] = value
+    client = getattr(request, "client", None)
+    if client is not None and client.host:
+        context["aws:SourceIp"] = client.host
+    canned_acl = request.headers.get("x-amz-acl")
+    if canned_acl:
+        context["s3:x-amz-acl"] = canned_acl
+    try:
+        for tag_key, tag_value in store.principal_tags(access_key).items():
+            context["aws:PrincipalTag/" + tag_key] = tag_value
+    except Exception:
+        pass
+    if key is not None:
+        try:
+            item = catalog.get(bucket, key).item
+            # Direct read: constructing ObjectTagStore would run DDL in
+            # the authorization path. object_tags already exists via the
+            # catalog's metadata bootstrap.
+            rows = catalog.db.connection.execute(select(
+                object_tags.c.tag_key, object_tags.c.tag_value).where(
+                object_tags.c.object_id == item.id)).all()
+            for tag_key, tag_value in rows:
+                context["s3:ExistingObjectTag/" + tag_key] = tag_value
+        except Exception:
+            # No current object (or no tag table yet): tag conditions
+            # simply have no value, which fails positive conditions.
+            pass
+    return context
 
 
 def _acl_allows(catalog, access_key: str, action: str, bucket: str,
-                key: str | None) -> bool:
-    """Fetch the resource's grant rows and apply the intersection."""
+                key: str | None, *, ownership: str | None = None) -> bool:
+    """Fetch the resource's grant rows and apply the intersection.
+
+    BucketOwnerEnforced ignores OBJECT ACL grants (the default); the
+    bucket ACL still constrains bucket-level access.  ObjectWriter and
+    BucketOwnerPreferred apply both levels (Phase D behaviour).
+    """
+    if ownership is None:
+        ownership = _ownership_model(catalog, bucket)
     bucket_rows, object_rows = catalog.acl_grants_for(bucket, key)
+    if ownership == "BucketOwnerEnforced":
+        object_rows = []
     return acl_permits(action=action, access_key=access_key,
                        bucket_rows=bucket_rows, object_rows=object_rows,
                        key=key)
+
+
+_ABAC_CONTROL_EXEMPT = frozenset({
+    # ABAC is a data-access gate; the owner must remain able to manage
+    # the ABAC/policy controls that could otherwise lock the bucket.
+    "s3:PutBucketAbac", "s3:GetBucketAbac",
+    "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:GetBucketPolicy",
+    "s3:PutBucketOwnershipControls", "s3:DeleteBucketOwnershipControls",
+    "s3:GetOwnershipControls",
+})
+
+
+def _apply_bucket_owner_preferred(catalog, bucket: str, key: str,
+                                  owner: str, request) -> None:
+    """BucketOwnerPreferred: a ``bucket-owner-full-control`` upload adds
+    an owner FULL_CONTROL object grant.  Other models ignore it."""
+    if request.headers.get("x-amz-acl") != "bucket-owner-full-control":
+        return
+    if _ownership_model(catalog, bucket) != "BucketOwnerPreferred":
+        return
+    bucket_owner, _bucket_grants = catalog.bucket_acl(bucket)
+    target_owner = bucket_owner or owner
+    stored_owner, grants = catalog.object_acl(bucket, key)
+    catalog.set_object_acl(
+        bucket, key, stored_owner or target_owner,
+        list(grants) + [(target_owner, "FULL_CONTROL")])
+
+
+def _authorize_resource(catalog, store, access_key: str, action: str,
+                        bucket: str, key: str | None, request):
+    """The single resource-authorization decision point.
+
+    Returns ``(allowed, reason)``.  SigV4 scope checks stay outside this
+    function (they authenticate the credential's own permission set).
+    Precedence:
+
+    1. bucket policy explicit Deny  → deny
+    2. bucket policy explicit Allow → allow (ACL layer skipped)
+    3. otherwise → the ACL intersection gate (ownership-aware)
+    """
+    resource_key = bucket if key is None else f"{bucket}/{key}"
+    context = _policy_context(catalog, store, access_key, bucket, key, request)
+    decision = None
+    try:
+        compiled = BucketPolicyStore(catalog).get_compiled(bucket)
+    except FileNotFoundError:
+        compiled = None
+    if compiled is not None:
+        decision = evaluate_policy(
+            compiled.statements, action, resource_key, access_key, context)
+        if decision == "deny":
+            return False, "Access denied by bucket policy"
+    try:
+        abac = BucketAbacStore(catalog).get(bucket)
+    except FileNotFoundError:
+        abac = None
+    if (action not in _ABAC_CONTROL_EXEMPT
+            and not evaluate_abac(abac, context)):
+        return False, "Access denied by bucket ABAC condition"
+    if decision == "allow":
+        return True, ""
+    if _acl_allows(catalog, access_key, action, bucket, key):
+        return True, ""
+    return False, "Access denied by resource ACL"
 
 
 async def _read_acl_body(request: Request, *, bucket_level: bool) -> bytes:
@@ -2145,6 +2477,23 @@ def _validated_acl(payload: bytes, *, object_level: bool, caller: str,
             raise AclError("InvalidArgument",
                            f"Unknown ACL grantee {grantee[:8]}…")
     return acl_owner, grants
+
+
+async def _read_verified_xml_body(request: Request, limit: int, error_cls):
+    """Bounded XML body with the signed payload/checksum policy applied."""
+    body = bytearray()
+    async for block in request.stream():
+        body.extend(block)
+        if len(body) > limit:
+            raise error_cls("MalformedXML", "XML request body exceeds its limit")
+    payload = bytes(body)
+    _verify_upload_sha256(
+        request, hashlib.sha256(payload).digest(),
+        md5_digest=hashlib.md5(payload, usedforsecurity=False).digest(),
+        sha1_digest=hashlib.sha1(payload, usedforsecurity=False).digest(),
+        crc64nvme_value=crc64nvme(payload),
+    )
+    return payload
 
 
 async def _handle_bucket_acl(ctx: _S3RequestContext) -> Response:
@@ -2415,6 +2764,116 @@ async def _handle_object_lock_controls(ctx: _S3RequestContext) -> Response:
     return _error("NotImplemented", "Unsupported lock control method", 501)
 
 
+async def _handle_object_annotations(ctx: _S3RequestContext) -> Response:
+    """Object ?annotation: singular CRUD and the list form.
+
+    Wire shape (real AWS, confirmed against the API reference):
+      * ``?annotation&annotationName=<name>`` — GET/PUT/DELETE one annotation
+      * ``?annotation[&annotation-prefix=..][&max-annotation-results=..]
+        [&continuation-token=..]`` — GET a page of annotation entries
+
+    Annotations are separate from tags and object metadata: this handler
+    never calls the tag store or metadata store. A versionId selector is
+    refused by the route guard, because annotations are attached to the
+    current object and are removed when that version is revoked.
+    """
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    try:
+        object_id = catalog.get(bucket, key).item.id
+    except FileNotFoundError:
+        return _error("NoSuchKey", "Object does not exist", 404)
+    store = AnnotationStore(catalog)
+    name = request.query_params.get("annotationName")
+    if name is None:
+        if request.method != "GET":
+            return _error("NotImplemented",
+                          "Listing annotations requires GET", 501)
+        prefix = validate_annotation_prefix(
+            request.query_params.get("annotation-prefix", ""))
+        try:
+            max_results = int(request.query_params.get(
+                "max-annotation-results", "1000"))
+        except ValueError:
+            return _error("InvalidArgument",
+                          "Invalid max-annotation-results", 400)
+        if not 1 <= max_results <= MAX_ANNOTATION_RESULTS:
+            return _error(
+                "InvalidArgument",
+                f"max-annotation-results must be between 1 and "
+                f"{MAX_ANNOTATION_RESULTS}", 400)
+        token = request.query_params.get("continuation-token")
+        after = (parse_continuation_token(ctx.master, bucket, key, token)
+                 if token is not None else None)
+        entries, next_after = store.list(
+            object_id, prefix=prefix, after=after, limit=max_results)
+        next_token = (continuation_token(ctx.master, bucket, key, next_after)
+                      if next_after is not None else None)
+        return Response(
+            annotations_xml(bucket, key, prefix, max_results, entries,
+                            next_token=next_token),
+            media_type="application/xml", status_code=200,
+            headers={"x-amz-object-version-id": object_id})
+    name = validate_annotation_name(name)
+    if request.method == "GET":
+        entry = store.get(object_id, name)
+        if entry is None:
+            return _error("NoSuchAnnotation",
+                          "The specified annotation does not exist", 404)
+        headers = {
+            "Content-Length": str(len(entry["value"].encode("utf-8"))),
+            "ETag": annotation_etag(entry["value"]),
+            "Last-Modified": annotation_http_date(entry["updated_ns"]),
+            "x-amz-object-version-id": object_id,
+        }
+        if ctx.checksum_mode == "ENABLED":
+            digest = hashlib.sha256(entry["value"].encode("utf-8")).digest()
+            headers["x-amz-checksum-sha256"] = base64.b64encode(digest).decode("ascii")
+            headers["x-amz-checksum-type"] = "FULL_OBJECT"
+        return Response(entry["value"].encode("utf-8"),
+                        media_type="text/plain", status_code=200,
+                        headers=headers)
+    if request.method == "PUT":
+        payload = bytearray()
+        async for block in request.stream():
+            payload.extend(block)
+            if len(payload) > MAX_ANNOTATION_VALUE_BYTES:
+                raise AnnotationError(
+                    "InvalidRequest",
+                    f"Annotation payload exceeds "
+                    f"{MAX_ANNOTATION_VALUE_BYTES} bytes")
+        body = bytes(payload)
+        _verify_upload_sha256(
+            request, hashlib.sha256(body).digest(),
+            md5_digest=hashlib.md5(body, usedforsecurity=False).digest(),
+            sha1_digest=hashlib.sha1(body, usedforsecurity=False).digest(),
+            crc64nvme_value=crc64nvme(body),
+        )
+        value = validate_annotation_value(body)
+        store.put(object_id, name, value)
+        return Response(
+            put_annotation_xml(key, name), media_type="application/xml",
+            status_code=200,
+            headers={
+                "ETag": annotation_etag(value),
+                "x-amz-object-version-id": object_id,
+            })
+    if request.method == "DELETE":
+        async for block in request.stream():
+            if block:
+                raise AnnotationError(
+                    "InvalidRequest",
+                    "DeleteObjectAnnotation must have no body")
+        # Idempotent by contract: absent annotation still answers 204.
+        store.delete(object_id, name)
+        return Response(status_code=204,
+                        headers={"x-amz-object-version-id": object_id})
+    return _error("NotImplemented",
+                  "Unsupported object annotation method", 501)
+
+
 async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
     """Object ?tagging: GET/PUT/DELETE object tags, optionally versioned."""
     request = ctx.request
@@ -2524,7 +2983,7 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
     # P8: the request-level ACL gate only sees the DESTINATION key. The
     # source object's own ACL must be honoured too, or a credential whose
     # access to that exact key was narrowed could still copy it out.
-    _require_source_acl(catalog, owner, source_header)
+    _require_source_acl(catalog, store, owner, source_header, request)
     qualifiers = (
         "x-amz-copy-source-if-match", "x-amz-copy-source-if-none-match",
         "x-amz-copy-source-if-modified-since",
@@ -2857,6 +3316,7 @@ async def _handle_object_put(ctx: _S3RequestContext,
                     "PreconditionFailed", "Object changed during conditional PUT", 412
                 ) from exc
             raise
+        _apply_bucket_owner_preferred(catalog, bucket, key, ctx.owner, request)
         return Response(status_code=200, headers={
             "ETag": '"' + item.sha256 + '"',
             "x-amz-version-id": item.id,
@@ -3041,6 +3501,193 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     return StreamingResponse(stream(), status_code=206 if partial else 200, headers=headers)
 
 
+async def _handle_object_rename(ctx: _S3RequestContext) -> Response:
+    """POST ?rename: atomically move the current head to this destination key.
+
+    Wire shape (the AWS directory-bucket shape): the destination key is the
+    request URI key and ``x-amz-rename-source`` carries the source as a local
+    ``bucket/key`` path. This implementation supports standard buckets too —
+    a documented SUPERSET of AWS, which limits RenameObject to directory
+    buckets — because the catalog is metadata-first: no Telegram bytes move.
+    Overwrite is rejected (409); conditional rename headers are unsupported.
+    """
+    request = ctx.request
+    bucket = ctx.bucket
+    destination_key = ctx.key
+    catalog = ctx.catalog
+    owner = ctx.owner
+    source_header = request.headers.get("x-amz-rename-source")
+    if source_header is None:
+        return _error("InvalidRequest", "x-amz-rename-source is required", 400)
+    if "x-amz-rename-source" not in signed_header_names(request):
+        raise SigV4Error("AccessDenied", "x-amz-rename-source must be signed")
+    if any(name.startswith("x-amz-rename-source-if-")
+           for name in request.headers):
+        return _error(
+            "NotImplemented",
+            "Conditional rename is unsupported; the destination must not exist",
+            501,
+        )
+    if source_header.startswith("//") or "://" in source_header or "?" in source_header:
+        return _error("InvalidArgument",
+                      "Rename source must be a local bucket/object path", 400)
+    path = unquote(source_header[1:] if source_header.startswith("/")
+                   else source_header)
+    source_bucket, slash, source_key = path.partition("/")
+    if not slash or not source_bucket or not source_key:
+        return _error("InvalidArgument", "Invalid rename source bucket/object key", 400)
+    if source_bucket != bucket:
+        return _error("InvalidRequest",
+                      "RenameObject source and destination must be in the same bucket",
+                      400)
+    if source_key == destination_key:
+        return _error("InvalidRequest",
+                      "Rename source and destination keys are identical", 400)
+    try:
+        source = catalog.get(bucket, source_key)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "Rename source object does not exist", 404)
+    if catalog.current_marker(bucket, source_key) is not None:
+        return _error("NoSuchKey", "Rename source object does not exist", 404)
+    # The request-level ACL gate only saw the DESTINATION key. Rename needs
+    # READ on the source and WRITE on the destination, both enforced here.
+    if not _acl_allows(catalog, owner, "s3:GetObject", bucket, source_key):
+        raise SigV4Error("AccessDenied", "Access denied by source object ACL")
+    if not _acl_allows(catalog, owner, "s3:PutObject", bucket, destination_key):
+        raise SigV4Error("AccessDenied", "Access denied by destination object ACL")
+    async for block in request.stream():
+        if block:
+            return _error("InvalidRequest", "RenameObject request must have no body", 400)
+    try:
+        catalog.rename_object(
+            bucket, source_key, destination_key,
+            now=int(time.time()),
+            expected_source_id=source.item.id,
+            expected_generation=source.generation,
+        )
+    except FileExistsError:
+        return _error("OperationAborted",
+                      "Rename destination object already exists", 409)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "Rename source object does not exist", 404)
+    except PermissionError as exc:
+        return _error("AccessDenied", str(exc), 403)
+    except ValueError:
+        return _error("OperationAborted",
+                      "Concurrent rename or invalid destination", 409)
+    return Response(status_code=200)
+
+
+async def _handle_select_object_content(ctx: _S3RequestContext) -> Response:
+    """POST ?select&select-type=2: run the bounded SQL subset on real bytes."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    owner = ctx.owner
+    if request.query_params.get("select-type") != "2":
+        return _error("InvalidArgument", "select-type=2 is required", 400)
+    if "versionId" in request.query_params:
+        return _error("NotImplemented",
+                      "Versioned SelectObjectContent is unsupported", 501)
+    payload = await _read_verified_xml_body(
+        request, MAX_SELECT_XML_BYTES, SelectError)
+    select_request = parse_select_request(payload)
+    try:
+        current = catalog.get(bucket, key)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "The specified key does not exist", 404)
+    if catalog.current_marker(bucket, key) is not None:
+        return _error("NoSuchKey", "The specified key does not exist", 404)
+    if not _acl_allows(catalog, owner, "s3:GetObject", bucket, key):
+        raise SigV4Error("AccessDenied", "Access denied by object ACL")
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    fd, name = tempfile.mkstemp(prefix="s3-select-", dir=scratch)
+    stage = Path(name)
+    os.close(fd)
+    try:
+        transport = storage_transport(ctx.db)
+        await transport.verify_target()
+        engine = TelegramObjectStorage(
+            catalog.manifests, transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+        )
+        total = 0
+        with open(stage, "wb") as out:
+            async for piece in engine.iter_bytes(current.item.id):
+                total += len(piece)
+                if total > MAX_SELECT_SCAN_BYTES:
+                    raise SelectError(
+                        "EntityTooLarge",
+                        f"Select scan exceeds the {MAX_SELECT_SCAN_BYTES}-byte limit",
+                        413,
+                    )
+                out.write(piece)
+        result = run_select(stage, select_request)
+        body = build_event_stream(result)
+        return Response(body, status_code=200,
+                        media_type="application/vnd.amazon.eventstream")
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+async def _perform_restore(ctx: _S3RequestContext, item,
+                           restore_request) -> Response:
+    """Future tiering seam — unreachable while no object is ARCHIVE."""
+    return _error(
+        "NotImplemented",
+        "Archive retrieval is not implemented; this method must only be "
+        "reached after the tiering phase provides an ARCHIVE storage class",
+        501,
+    )
+
+
+async def _handle_restore_object(ctx: _S3RequestContext) -> Response:
+    """POST ?restore: strict AWS RestoreRequest, then truthful object state.
+
+    TeleDrive has one immediately-readable class, so AWS-conformant behavior
+    is ``403 InvalidObjectState`` for every object. The single seam for a
+    future archive tier is ``restore.is_applicable`` plus ``_perform_restore``.
+    """
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    payload = await _read_verified_xml_body(
+        request, MAX_RESTORE_XML_BYTES, RestoreError)
+    restore_request = parse_restore_request(payload)
+    if "versionId" in request.query_params:
+        version_id = request.query_params["versionId"]
+        if not version_id or len(version_id) > 80:
+            return _error("InvalidArgument", "Invalid object VersionId", 400)
+        if not catalog.is_visible_version(bucket, key, version_id):
+            return _error("NoSuchVersion", "Object version is not published", 404)
+        try:
+            item = catalog.manifests.get(version_id)
+        except FileNotFoundError:
+            return _error("NoSuchVersion", "Object version is not readable", 404)
+        status = ctx.db.connection.execute(select(objects.c.status).where(
+            objects.c.id == version_id)).scalar_one_or_none()
+        if (item.bucket != bucket or item.key != key or status != "ready"):
+            return _error("NoSuchVersion", "Object version is not readable", 404)
+    else:
+        try:
+            item = catalog.get(bucket, key).item
+        except FileNotFoundError:
+            return _error("NoSuchKey", "The specified key does not exist", 404)
+        if catalog.current_marker(bucket, key) is not None:
+            return _error("NoSuchKey", "The specified key does not exist", 404)
+    if not _restore_is_applicable(item):
+        return _error(
+            "InvalidObjectState",
+            "The operation is not valid for the object's storage class; "
+            "this object is already in an immediately readable class",
+            403,
+        )
+    return await _perform_restore(ctx, item, restore_request)
+
+
 async def _handle(request: Request):
     db = None
     retain = False
@@ -3138,8 +3785,13 @@ async def _handle(request: Request):
         mpu_abort = bool(mpu_id and request.method == "DELETE")
         mpu_list = bool(mpu_id and request.method == "GET")
         is_object_attributes = bool(separator and "attributes" in request.query_params)
+        is_object_rename = bool(separator and "rename" in request.query_params)
+        is_object_select = bool(separator and "select" in request.query_params)
+        is_object_restore = bool(separator and "restore" in request.query_params)
         is_object_tagging = bool(separator and "tagging" in request.query_params)
         is_version_tagging = bool(is_object_tagging and "versionId" in request.query_params)
+        is_object_annotation = bool(
+            separator and "annotation" in request.query_params)
         if is_version_tagging and (
             len(request.query_params.getlist("versionId")) != 1
             or any(name not in {"tagging", "versionId"} and not name.startswith("X-Amz-")
@@ -3152,6 +3804,10 @@ async def _handle(request: Request):
         is_public_access_block = bool(bucket and not separator and "publicAccessBlock" in request.query_params)
         is_bucket_lifecycle = bool(bucket and not separator and "lifecycle" in request.query_params)
         is_bucket_policy_status = bool(bucket and not separator and "policyStatus" in request.query_params)
+        is_bucket_policy = bool(bucket and not separator and "policy" in request.query_params)
+        is_bucket_ownership = bool(
+            bucket and not separator and "ownershipControls" in request.query_params)
+        is_bucket_abac = bool(bucket and not separator and "abac" in request.query_params)
         is_bucket_replication = bool(bucket and not separator and "replication" in request.query_params)
         is_bucket_website = bool(bucket and not separator and "website" in request.query_params)
         is_bucket_notification = bool(
@@ -3160,6 +3816,11 @@ async def _handle(request: Request):
                  or "notificationConfiguration" in request.query_params))
         is_bucket_logging = bool(
             bucket and not separator and "logging" in request.query_params)
+        report_kind = next(
+            (name for name in REPORT_KINDS
+             if bucket and not separator and name in request.query_params),
+            None,
+        )
         compat_bucket_read = None
         if bucket and not separator and request.method == "GET":
             compat_bucket_read = next(
@@ -3204,12 +3865,55 @@ async def _handle(request: Request):
             return _error("NotImplemented", "Tagging with multipart selectors unsupported", 501)
         if is_bucket_tagging and "versionId" in request.query_params:
             return _error("NotImplemented", "Bucket tags cannot select object versions", 501)
+        if report_kind is not None:
+            if request.method not in {"GET", "PUT", "DELETE"}:
+                return _error("MethodNotAllowed",
+                              "Report configuration uses GET, PUT or DELETE", 405)
+            allowed_params = {report_kind, "id"}
+            if any(name not in allowed_params and not name.startswith("X-Amz-")
+                   for name in request.query_params):
+                return _error("InvalidArgument",
+                              "Invalid report configuration selector", 400)
+            if len(request.query_params.getlist(report_kind)) != 1 or (
+                    request.query_params.get(report_kind) != ""):
+                return _error("InvalidArgument",
+                              "Invalid report configuration selector", 400)
+            id_values = request.query_params.getlist("id")
+            if len(id_values) > 1:
+                return _error("InvalidArgument",
+                              "Ambiguous report configuration id", 400)
+            if request.method in {"PUT", "DELETE"} and not id_values:
+                return _error("InvalidArgument",
+                              "Report configuration id query is required", 400)
         if is_bucket_notification:
             action = {"GET": "s3:GetBucketNotification",
                       "PUT": "s3:PutBucketNotification"}.get(request.method)
+        elif is_bucket_policy:
+            action = {
+                "GET": "s3:GetBucketPolicy",
+                "PUT": "s3:PutBucketPolicy",
+                "DELETE": "s3:DeleteBucketPolicy",
+            }.get(request.method)
+        elif is_bucket_ownership:
+            action = {
+                "GET": "s3:GetOwnershipControls",
+                "PUT": "s3:PutBucketOwnershipControls",
+                "DELETE": "s3:DeleteBucketOwnershipControls",
+            }.get(request.method)
+        elif is_bucket_abac:
+            action = {
+                "GET": "s3:GetBucketAbac",
+                "PUT": "s3:PutBucketAbac",
+            }.get(request.method)
         elif is_bucket_logging:
             action = {"GET": "s3:GetBucketLogging",
                       "PUT": "s3:PutBucketLogging"}.get(request.method)
+        elif report_kind is not None:
+            action = {
+                "GET": f"s3:GetBucket{report_kind.capitalize()}Configuration",
+                "PUT": f"s3:PutBucket{report_kind.capitalize()}Configuration",
+                "DELETE": f"s3:DeleteBucket{report_kind.capitalize()}Configuration",
+            }.get(request.method)
         elif is_bucket_website:
             action = {
                 "GET": "s3:GetBucketWebsite",
@@ -3220,6 +3924,18 @@ async def _handle(request: Request):
             action = _COMPAT_BUCKET_READS[compat_bucket_read]
         elif compat_object_read is not None:
             action = _COMPAT_OBJECT_READS[compat_object_read]
+        elif not separator and "requestPayment" in request.query_params:
+            # Phase O6: writable-but-single-state (BucketOwner only).
+            action = {
+                "GET": "s3:GetBucketRequestPayment",
+                "PUT": "s3:PutBucketRequestPayment",
+            }.get(request.method)
+        elif not separator and "accelerate" in request.query_params:
+            # Phase O6: writable-but-single-state (Suspended only).
+            action = {
+                "GET": "s3:GetAccelerateConfiguration",
+                "PUT": "s3:PutBucketAccelerateConfiguration",
+            }.get(request.method)
         elif not separator and "acl" in request.query_params:
             action = {"GET": "s3:GetBucketAcl",
                       "PUT": "s3:PutBucketAcl"}.get(request.method)
@@ -3242,12 +3958,28 @@ async def _handle(request: Request):
             ):
                 return _error("NotImplemented", "Unsupported GetObjectAttributes variant", 501)
             action = "s3:GetObjectAttributes"
+        elif is_object_rename:
+            action = "s3:RenameObject" if request.method == "POST" else None
+        elif is_object_select:
+            action = "s3:SelectObjectContent" if request.method == "POST" else None
+        elif is_object_restore:
+            action = "s3:RestoreObject" if request.method == "POST" else None
         elif form_upload:
             action = "s3:PutObject"
         elif multi_delete:
             if any(p in request.query_params for p in ("tagging", "uploads", "uploadId", "versionId")):
                 return _error("NotImplemented", "Conflicting DeleteObjects controls", 501)
             action = "s3:DeleteObject"
+        elif is_object_annotation:
+            if request.query_params.get("annotationName") is not None:
+                action = {
+                    "GET": "s3:GetObjectAnnotation",
+                    "PUT": "s3:PutObjectAnnotation",
+                    "DELETE": "s3:DeleteObjectAnnotation",
+                }.get(request.method)
+            else:
+                action = ("s3:ListObjectAnnotations"
+                          if request.method == "GET" else None)
         elif is_object_tagging:
             action = {
                 "GET": "s3:GetObjectTagging",
@@ -3275,6 +4007,7 @@ async def _handle(request: Request):
             action = {
                 "GET": "s3:GetBucketPublicAccessBlock",
                 "PUT": "s3:PutBucketPublicAccessBlock",
+                "DELETE": "s3:PutBucketPublicAccessBlock",
             }.get(request.method)
         elif is_bucket_lifecycle:
             action = {
@@ -3323,7 +4056,13 @@ async def _handle(request: Request):
             "encryption", "object-lock", "versionId",
         }
         active_compat = compat_bucket_read or compat_object_read
-        if "acl" in request.query_params:
+        if is_bucket_policy:
+            active_compat = "policy"
+        elif is_bucket_ownership:
+            active_compat = "ownershipControls"
+        elif is_bucket_abac:
+            active_compat = "abac"
+        elif "acl" in request.query_params:
             # Phase D: real ACL controls on both routes; GET is already
             # a compat read, PUT is the new grant-store write.
             active_compat = "acl"
@@ -3342,7 +4081,7 @@ async def _handle(request: Request):
         elif is_bucket_logging:
             active_compat = "logging"
         if any(parameter in request.query_params and (
-            (parameter != "versionId" or not (is_version_read or is_version_tagging or is_version_delete))
+            (parameter != "versionId" or not (is_version_read or is_version_tagging or is_version_delete or is_object_restore))
             and (parameter != "versions" or not is_version_listing)
             and parameter != active_compat
         ) for parameter in unsupported):
@@ -3362,13 +4101,18 @@ async def _handle(request: Request):
             is_object_attributes=is_object_attributes,
             is_object_tagging=is_object_tagging,
             is_version_tagging=is_version_tagging,
+            is_object_annotation=is_object_annotation,
             is_bucket_tagging=is_bucket_tagging, is_bucket_cors=is_bucket_cors,
             is_bucket_versioning=is_bucket_versioning,
             is_public_access_block=is_public_access_block,
             is_bucket_lifecycle=is_bucket_lifecycle,
             is_bucket_notification=is_bucket_notification,
             is_bucket_logging=is_bucket_logging,
+            report_kind=report_kind,
             is_bucket_policy_status=is_bucket_policy_status,
+            is_bucket_policy=is_bucket_policy,
+            is_bucket_ownership=is_bucket_ownership,
+            is_bucket_abac=is_bucket_abac,
             is_bucket_replication=is_bucket_replication,
             is_bucket_website=is_bucket_website,
         )
@@ -3405,24 +4149,24 @@ async def _handle(request: Request):
         ):
             raise SigV4Error("NotImplemented", "Unsupported S3 delete headers")
         inline_tags = _initial_tags(request, owner, store) if (
-            separator and request.method == "PUT" and not is_object_tagging
+            separator and request.method == "PUT"
+            and not is_object_tagging and not is_object_annotation
         ) else None
         catalog = BucketCatalog(ManifestStore(db))
         ctx.inline_tags = inline_tags
         ctx.checksum_mode = checksum_mode
         ctx.catalog = catalog
 
-        # Phase D ACL intersection gate: after the SigV4 scope check
-        # (own scopes), the resource ACL may only NARROW access. A
-        # credential is denied when the resource has a stored ACL and
-        # the intersection of its grants with this access key does not
-        # cover the action's permission class. Resources without a
-        # stored ACL keep the unrestricted baseline. Non-existent
-        # buckets have no grants, so the gate passes and the 404 wins.
-        if bucket and not _acl_allows(catalog, owner, action, bucket,
-                                      key if separator else None):
-            raise SigV4Error("AccessDenied",
-                             "Access denied by resource ACL")
+        # Phase L single decision point: bucket policy Deny wins, an
+        # explicit Allow bypasses the ACL layer, otherwise the Phase D
+        # ownership-aware ACL intersection gate applies. The SigV4 scope
+        # check above already authenticated the credential's own scopes.
+        if bucket:
+            allowed, reason = _authorize_resource(
+                catalog, store, owner, action, bucket,
+                key if separator else None, request)
+            if not allowed:
+                raise SigV4Error("AccessDenied", reason)
 
         if not bucket:
             return Response(
@@ -3445,6 +4189,13 @@ async def _handle(request: Request):
                 or "legal-hold" in request.query_params):
             return await _handle_object_lock_controls(ctx)
 
+        if is_object_rename:
+            return await _handle_object_rename(ctx)
+        if is_object_select:
+            return await _handle_select_object_content(ctx)
+        if is_object_restore:
+            return await _handle_restore_object(ctx)
+
         if "acl" in request.query_params:
             return await _handle_object_acl(ctx)
 
@@ -3455,6 +4206,9 @@ async def _handle(request: Request):
             except FileNotFoundError:
                 return _error("NoSuchKey", "The requested resource does not exist", 404)
             return _compat_object_read_response(compat_object_read, owner)
+
+        if is_object_annotation:
+            return await _handle_object_annotations(ctx)
 
         if is_object_tagging:
             return await _handle_object_tagging(ctx)
@@ -3499,6 +4253,10 @@ async def _handle(request: Request):
         return _error(exc.code, str(exc), exc.status)
     except PublicAccessError as exc:
         return _error(exc.code, str(exc), exc.status)
+    except PolicyError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except OwnershipError as exc:
+        return _error(exc.code, str(exc), exc.status)
     except VersioningError as exc:
         return _error(exc.code, str(exc), exc.status)
     except CORSError as exc:
@@ -3507,7 +4265,13 @@ async def _handle(request: Request):
         return _error(exc.code, str(exc), exc.status)
     except NotificationError as exc:
         return _error(exc.code, str(exc), exc.status)
+    except ReportConfigError as exc:
+        return _error(exc.code, str(exc), exc.status)
     except WebsiteError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except AnnotationError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except BucketFlagError as exc:
         return _error(exc.code, str(exc), exc.status)
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)
@@ -3519,6 +4283,10 @@ async def _handle(request: Request):
         # Object-lock fences (retention/legal hold) surface as 403.
         return _error("AccessDenied", str(exc), 403)
     except ObjectMetadataError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except SelectError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except RestoreError as exc:
         return _error(exc.code, str(exc), exc.status)
     except MultipartError as exc:
         return _error(exc.code, str(exc), exc.status)

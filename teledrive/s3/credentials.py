@@ -27,11 +27,18 @@ credentials = Table(
     Column("created_at", BigInteger, nullable=False),
     Column("expires_at", BigInteger),
     Column("revoked", Boolean, nullable=False),
+    # Phase L4 ABAC: principal tags.  TEXT (nullable) is safe on MySQL
+    # where a DEFAULT on TEXT is rejected; None means an empty tag set.
+    Column("tags", Text),
 )
 PERMISSIONS = frozenset({
     "s3:ListAllMyBuckets", "s3:CreateBucket", "s3:DeleteBucket",
     "s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketLocation", "s3:GetObject", "s3:GetObjectAttributes", "s3:PutObject", "s3:DeleteObject",
     "s3:GetObjectTagging", "s3:PutObjectTagging", "s3:DeleteObjectTagging",
+    # Object annotations (Phase O2): a separate store from tags; the four
+    # permissions are independently grantable.
+    "s3:GetObjectAnnotation", "s3:PutObjectAnnotation",
+    "s3:DeleteObjectAnnotation", "s3:ListObjectAnnotations",
     "s3:GetBucketTagging", "s3:PutBucketTagging", "s3:DeleteBucketTagging",
     "s3:GetBucketCORS", "s3:PutBucketCORS",
     "s3:GetBucketVersioning", "s3:PutBucketVersioning",
@@ -49,6 +56,8 @@ PERMISSIONS = frozenset({
     # Notification webhooks and access-logging configuration (Phase F).
     "s3:PutBucketNotification", "s3:PutBucketLogging",
     "s3:GetBucketRequestPayment", "s3:GetAccelerateConfiguration",
+    # Phase O6: the single real state is writable (BucketOwner / Suspended).
+    "s3:PutBucketRequestPayment", "s3:PutBucketAccelerateConfiguration",
     "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration",
     "s3:GetObjectRetention", "s3:GetObjectLegalHold",
     # Object Lock configuration (Phase C of the metadata parity plan).
@@ -56,11 +65,72 @@ PERMISSIONS = frozenset({
     "s3:PutObjectLegalHold",
     # ACL grants (Phase D): write paths for the intersection model.
     "s3:PutBucketAcl", "s3:PutObjectAcl",
+    # Bucket policy engine (Phase L).
+    "s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+    "s3:PutBucketOwnershipControls", "s3:DeleteBucketOwnershipControls",
+    "s3:PutBucketAbac", "s3:GetBucketAbac",
     # Bucket replication (Phase G): the S3 surface over the existing
     # cross-account replica engine. No AWS IAM or cross-region semantics.
     "s3:PutBucketReplication", "s3:DeleteBucketReplication",
+    # Phase O: real atomic rename, real Select and honest RestoreObject.
+    "s3:RenameObject", "s3:SelectObjectContent", "s3:RestoreObject",
+    # Storage reports (Phase N): analytics, inventory and metrics
+    # configuration CRUD. GET and DELETE have their own scope names so an
+    # operator can grant read-only report visibility without write access.
+    "s3:GetBucketAnalyticsConfiguration", "s3:PutBucketAnalyticsConfiguration",
+    "s3:DeleteBucketAnalyticsConfiguration",
+    "s3:GetBucketInventoryConfiguration", "s3:PutBucketInventoryConfiguration",
+    "s3:DeleteBucketInventoryConfiguration",
+    "s3:GetBucketMetricsConfiguration", "s3:PutBucketMetricsConfiguration",
+    "s3:DeleteBucketMetricsConfiguration",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
+MAX_CREDENTIAL_TAGS = 50
+
+
+def _validated_tags(tags) -> dict[str, str]:
+    if tags is None:
+        return {}
+    if not isinstance(tags, dict) or len(tags) > MAX_CREDENTIAL_TAGS:
+        raise ValueError("Credential tags must be a dict of at most 50 entries")
+    clean: dict[str, str] = {}
+    for key, value in tags.items():
+        if (not isinstance(key, str) or not key or len(key) > 128
+                or not isinstance(value, str) or len(value) > 256):
+            raise ValueError("Invalid credential tag")
+        clean[key] = value
+    return clean
+
+
+_tags_column_ensured = False
+
+
+def ensure_credential_tags_column(db) -> None:
+    """Add storage_s3_credentials.tags on deployments predating Phase L."""
+    global _tags_column_ensured
+    if _tags_column_ensured:
+        return
+    from sqlalchemy import text as _text
+    if db.engine.dialect.name == "sqlite":
+        columns = {row[1] for row in db.connection.execute(_text(
+            "PRAGMA table_info(storage_s3_credentials)"))}
+    else:
+        if db.engine.dialect.name == "mysql":
+            schema = "DATABASE()"
+        else:
+            schema = "current_schema()"
+        columns = {row[0] for row in db.connection.execute(_text(
+            "SELECT column_name FROM information_schema.columns "
+            # nosec B608 — table and schema expressions are fixed
+            # internal identifiers, never user input.
+            "WHERE table_name = 'storage_s3_credentials' "
+            f"AND table_schema = {schema}"))}
+    if columns and "tags" not in columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_s3_credentials ADD COLUMN tags TEXT"))
+        db.commit()
+    _tags_column_ensured = True
+
 
 
 def load_master_key() -> bytes:
@@ -92,9 +162,11 @@ class S3CredentialStore:
         self.db = database
         self.cipher = Fernet(master_key)
         _meta.create_all(database.engine)
+        ensure_credential_tags_column(database)
 
     def create(self, name: str, permissions: list[str], *,
-               expires_at: int | None = None, now: int | None = None) -> IssuedS3Credential:
+               expires_at: int | None = None, now: int | None = None,
+               tags: dict[str, str] | None = None) -> IssuedS3Credential:
         now = int(time.time()) if now is None else now
         if not isinstance(name, str) or not (1 <= len(name.strip()) <= 120):
             raise ValueError("S3 credential requires a name (1–120 characters)")
@@ -103,6 +175,7 @@ class S3CredentialStore:
             raise ValueError("Unknown or empty S3 permission")
         if expires_at is not None and (expires_at <= now or expires_at > now + 10 * 365 * 86400):
             raise ValueError("Expiration must be in the future (up to 10 years)")
+        clean_tags = _validated_tags(tags)
         from uuid import uuid4
         identifier = str(uuid4())
         access = "TD" + secrets.token_hex(12).upper()
@@ -112,7 +185,7 @@ class S3CredentialStore:
             id=identifier, name=name.strip(), access_key=access,
             encrypted_secret=self.cipher.encrypt(secret.encode()).decode(),
             permissions=json.dumps(perms), created_at=now, expires_at=expires_at,
-            revoked=False,
+            revoked=False, tags=json.dumps(clean_tags, sort_keys=True),
         ))
         self.db.commit()
         return IssuedS3Credential(identifier, access, secret, perms)
@@ -122,8 +195,22 @@ class S3CredentialStore:
             credentials.c.id, credentials.c.name, credentials.c.access_key,
             credentials.c.permissions, credentials.c.created_at,
             credentials.c.expires_at, credentials.c.revoked,
+            credentials.c.tags,
         ).order_by(credentials.c.created_at.desc(), credentials.c.id)).mappings().all()
-        return [{**dict(row), "permissions": json.loads(row["permissions"])} for row in rows]
+        return [{**dict(row), "permissions": json.loads(row["permissions"]),
+                 "tags": json.loads(row["tags"] or "{}")} for row in rows]
+
+    def principal_tags(self, access_key: str) -> dict[str, str]:
+        """Tags used by ABAC ``aws:PrincipalTag/*`` conditions."""
+        if not isinstance(access_key, str) or len(access_key) > 64:
+            return {}
+        raw = self.db.connection.execute(select(credentials.c.tags).where(
+            credentials.c.access_key == access_key)).scalar_one_or_none()
+        try:
+            parsed = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def resolve(self, access_key: str, permission: str, *,
                 now: int | None = None) -> str | None:
@@ -190,7 +277,8 @@ class S3CredentialStore:
     def update(self, identifier: str, *, name: str | None = None,
                permissions: list[str] | None = None,
                expires_at: int | None = None,
-               clear_expiry: bool = False) -> dict:
+               clear_expiry: bool = False,
+               tags: dict[str, str] | None = None) -> dict:
         """Edit an ACTIVE credential's name, permissions and expiry.
 
         The access key and secret never change: rotating the secret means
@@ -220,6 +308,8 @@ class S3CredentialStore:
             values["expires_at"] = int(expires_at)
         elif clear_expiry:
             values["expires_at"] = None
+        if tags is not None:
+            values["tags"] = json.dumps(_validated_tags(tags), sort_keys=True)
         if not values:
             raise ValueError("Nothing to update")
         self.db.connection.execute(update(credentials).where(

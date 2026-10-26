@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 60 supported, 8 partial (0 by code, 8 by design), 48 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 89 supported, 7 partial (0 by code, 7 by design), 20 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -129,6 +129,35 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [PutPublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutPublicAccessBlock.html) | ✅ Supported | Persists any combination of the four flags — a deliberate owner decision. BlockPublicAcls=on pins ACL authoring to the stored ACL owner (a forward-looking guard over the Phase D grant store); there is no public path behind any flag value: grantees are always validated access keys, and email/group/public grantees are unwritable. |
 | [GetBucketPolicyStatus](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicyStatus.html) | ✅ Supported | IsPublic is computed from the actual stored grants plus the PAB flags (IgnorePublicAcls implements the AWS ignore semantics). With validated access-key grantees the honest scan answers false — but it runs the real data. |
 | [GetBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketOwnershipControls.html) | ✅ Supported | Reads the bucket's persisted object ownership state (BucketOwnerEnforced — the one real model: owner-scoped grants) from bucket metadata, not a handler constant. Ownership writes fail closed 501. |
+| [PutBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketPolicy.html) | ✅ Supported | Stores a real IAM-style JSON policy (bounded 20 KiB, 50 statements). Deny always wins; a matching Allow short-circuits the ACL layer. Principals must be CanonicalUser = active TeleDrive access keys; `*`/AWS/Service/Federated are rejected 501 (the private-only line). Conditions are a validated allowlist (`s3:prefix`, `s3:max-keys`, `s3:delimiter`, `aws:SourceIp`, `s3:ExistingObjectTag/*`, `aws:PrincipalTag/*`, `s3:x-amz-acl`); unknown operators or keys are 400 rather than silently ignored. Compiled per bucket and cached, so evaluation cost is constant per request. |
+| [DeleteBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketPolicy.html) | ✅ Supported | Removes the stored policy (204, idempotent). The ACL intersection gate resumes immediately. |
+| [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | ✅ Supported | Returns the exact stored policy document as JSON, or an honest 404 `NoSuchBucketPolicy`. |
+| [GetBucketAbac](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAbac.html) | ✅ Supported | Reads the bucket's attribute-based-access-control state (enabled + mandatory tag conditions) as truthful JSON. |
+| [PutBucketAbac](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAbac.html) | ✅ Supported | Stores ABAC settings: when enabled, `aws:PrincipalTag/*` and `s3:ExistingObjectTag/*` conditions become mandatory gates on data-plane actions. Principal tags live on the S3 credential; unknown keys are 400. |
+| [PutBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketOwnershipControls.html) | ✅ Supported | Changes the real ownership model: `BucketOwnerEnforced` (default, object ACLs ignored), `ObjectWriter` (object ACL grants apply), `BucketOwnerPreferred` (ObjectWriter plus an automatic owner FULL_CONTROL grant on `x-amz-acl: bucket-owner-full-control` uploads). |
+| [DeleteBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketOwnershipControls.html) | ✅ Supported | Resets ownership to `BucketOwnerEnforced` (204, idempotent). |
+| [DeletePublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeletePublicAccessBlock.html) | ✅ Supported | Removes the stored PAB flags, returning the bucket to the all-true default (the most restrictive state), so deletion can never weaken protection. |
+| [GetBucketAnalyticsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAnalyticsConfiguration.html) | ✅ Supported | Reads one stored analytics configuration by `id`, or an honest 404 `NoSuchConfiguration`. |
+| [PutBucketAnalyticsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAnalyticsConfiguration.html) | ✅ Supported | Stores a bounded analytics configuration (prefix/tag filter, destination bucket + prefix that must exist, Daily/Weekly schedule). The report runner really writes a JSON Lines report into that destination through the storage engine; AWS's Parquet format is documented as a deviation, not faked. |
+| [DeleteBucketAnalyticsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketAnalyticsConfiguration.html) | ✅ Supported | Removes one configuration by `id` (204, idempotent). |
+| [ListBucketAnalyticsConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketAnalyticsConfigurations.html) | ✅ Supported | Lists every stored analytics configuration id (complete and sorted; no continuation token needed). |
+| [GetBucketInventoryConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketInventoryConfiguration.html) | ✅ Supported | Reads one stored inventory configuration by `id`, or an honest 404 `NoSuchConfiguration`. |
+| [PutBucketInventoryConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketInventoryConfiguration.html) | ✅ Supported | Stores a bounded inventory configuration. `IncludedObjectVersions=All` really includes historical published versions; the runner writes a real gzip CSV with the AWS column shape (Bucket, Key, VersionId, IsLatest, Size, LastModifiedDate, ETag, StorageClass — ETag is the stored SHA-256, documented). ORC/Parquet are rejected 501. |
+| [DeleteBucketInventoryConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketInventoryConfiguration.html) | ✅ Supported | Removes one inventory configuration by `id` (204, idempotent). |
+| [ListBucketInventoryConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketInventoryConfigurations.html) | ✅ Supported | Lists every stored inventory configuration id (complete and sorted). |
+| [GetBucketMetricsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketMetricsConfiguration.html) | ✅ Supported | Reads one stored metrics configuration by `id`, or an honest 404 `NoSuchConfiguration`. |
+| [PutBucketMetricsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketMetricsConfiguration.html) | ✅ Supported | Stores a bounded metrics configuration. Metrics are computed from real catalog state (object count, bytes) and written as a JSON object into the destination; there is no CloudWatch backend, and that substitution is documented in the module. |
+| [DeleteBucketMetricsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketMetricsConfiguration.html) | ✅ Supported | Removes one metrics configuration by `id` (204, idempotent). |
+| [ListBucketMetricsConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketMetricsConfigurations.html) | ✅ Supported | Lists every stored metrics configuration id (complete and sorted). |
+| [RenameObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RenameObject.html) | ✅ Supported | `POST /{bucket}/{destination}?rename` with the source in the signed `x-amz-rename-source` header. Atomic: the head, manifest key and published-version key move in ONE SQL transaction, so no Telegram bytes are copied. A documented superset of AWS (which limits rename to directory buckets). Overwrite and conditional headers are rejected; object lock blocks it exactly like delete; ACL is enforced on source and destination. |
+| [SelectObjectContent](https://docs.aws.amazon.com/AmazonS3/latest/API/API_SelectObjectContent.html) | ✅ Supported | `POST /{bucket}/{key}?select&select-type=2`. Reads the object through the storage engine and runs a bounded SQL subset (`SELECT`/`FROM S3Object`/`WHERE`/`LIMIT` with comparisons, AND/OR/NOT) over CSV or JSON, returning a real AWS binary event-stream (`Records`, `Stats`, `End`) with byte-exact framing. Parquet, non-SQL expression types and unsupported SQL are rejected rather than approximated; scan and event sizes are bounded. |
+| [RestoreObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RestoreObject.html) | ✅ Supported | Strict AWS XML validation, then `403 InvalidObjectState` — the AWS-conformant answer for an object that is already in an immediately readable class. The archive path is a single documented seam so a future tiering phase only changes one function. |
+| [GetObjectAnnotation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAnnotation.html) | ✅ Supported | Reads one annotation by name from the separate annotation store (not tags, not user metadata), or an honest 404. |
+| [PutObjectAnnotation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectAnnotation.html) | ✅ Supported | Creates or replaces one annotation on the current object. Names are a safe charset ≤128 bytes, values ≤1 KiB, ≤50 annotations per object; the store is independent from tagging. |
+| [DeleteObjectAnnotation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectAnnotation.html) | ✅ Supported | Removes one annotation by name (204, idempotent). |
+| [ListObjectAnnotations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectAnnotations.html) | ✅ Supported | Lists annotations with prefix filtering and HMAC-signed continuation tokens; bounded page sizes. |
+| [PutBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketRequestPayment.html) | ✅ Supported | Accepts exactly the one state that exists here, `Payer=BucketOwner`; `Requester` is rejected 501 because no requester-pays billing exists. The value is therefore writable without being a lie. |
+| [PutBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAccelerateConfiguration.html) | ✅ Supported | Accepts exactly `Status=Suspended`; `Enabled` is rejected 501 because there is no edge network. Supports the single real state instead of pretending. |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -169,7 +198,6 @@ Accelerate stay by-design (no honest backing exists).
 | [GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html) | 🟡 Partial | by design | private-only: no archive/SSE storage classes exist | Full, byte-range and selected VersionId reads, ETag/date conditions. |
 | [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html) | 🟡 Partial | by design | private-only: absent AWS headers describe features that do not exist here | Basic object metadata and selected VersionId/read preconditions. |
 | [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | 🟡 Partial | by design | private-only: SSE/retention/storage-tier variants have no backing | Signed initiation and selected metadata. |
-| [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | 🟡 Partial | by design | private-only: no policy engine exists to read | Always 404 `NoSuchBucketPolicy`; policy writes fail closed. |
 | [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | by design | private-only: SSE has no backing over Telegram | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
 | [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | by design | private-only: no requester-pays billing exists | Always `Payer=BucketOwner`; request-payer writes fail closed. |
 | [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | by design | private-only: no transfer acceleration exists | Always `Suspended`; accelerate writes fail closed. |
@@ -219,11 +247,6 @@ the owner approves, implement best-effort per this design.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [DeletePublicAccessBlock](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeletePublicAccessBlock.html) | ❌ Unsupported | P2-C |
-| [PutBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
-| [DeleteBucketOwnershipControls](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketOwnershipControls.html) | ❌ Unsupported | P2-C |
-| [PutBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketPolicy.html) | ❌ Unsupported | P2-C |
-| [DeleteBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketPolicy.html) | ❌ Unsupported | P2-C |
 
 ### P2-B — Encryption and immutable retention
 
@@ -244,7 +267,6 @@ Model rules and durable workers without promising AWS transitions that Telegram 
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [RestoreObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RestoreObject.html) | ❌ Unsupported | P2-D |
 
 ### P2-E — Advanced data-plane protocol compatibility
 
@@ -277,18 +299,6 @@ reporting workflows are wanted; lowest priority otherwise.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [GetBucketAnalyticsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAnalyticsConfiguration.html) | ❌ Unsupported | P3-G |
-| [PutBucketAnalyticsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAnalyticsConfiguration.html) | ❌ Unsupported | P3-G |
-| [DeleteBucketAnalyticsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketAnalyticsConfiguration.html) | ❌ Unsupported | P3-G |
-| [ListBucketAnalyticsConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketAnalyticsConfigurations.html) | ❌ Unsupported | P3-G |
-| [GetBucketInventoryConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketInventoryConfiguration.html) | ❌ Unsupported | P3-G |
-| [PutBucketInventoryConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketInventoryConfiguration.html) | ❌ Unsupported | P3-G |
-| [DeleteBucketInventoryConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketInventoryConfiguration.html) | ❌ Unsupported | P3-G |
-| [ListBucketInventoryConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketInventoryConfigurations.html) | ❌ Unsupported | P3-G |
-| [GetBucketMetricsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketMetricsConfiguration.html) | ❌ Unsupported | P3-G |
-| [PutBucketMetricsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketMetricsConfiguration.html) | ❌ Unsupported | P3-G |
-| [DeleteBucketMetricsConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketMetricsConfiguration.html) | ❌ Unsupported | P3-G |
-| [ListBucketMetricsConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketMetricsConfigurations.html) | ❌ Unsupported | P3-G |
 | [GetBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketIntelligentTieringConfiguration.html) | ❌ Unsupported | P3-G |
 | [PutBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketIntelligentTieringConfiguration.html) | ❌ Unsupported | P3-G |
 | [DeleteBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketIntelligentTieringConfiguration.html) | ❌ Unsupported | P3-G |
@@ -319,19 +329,9 @@ metadata-level copy+delete and could be supported if a client needs it.
 | [UpdateBucketMetadataAnnotationTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataAnnotationTableConfiguration.html) | ❌ Unsupported | P3-H |
 | [UpdateBucketMetadataInventoryTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataInventoryTableConfiguration.html) | ❌ Unsupported | P3-H |
 | [UpdateBucketMetadataJournalTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataJournalTableConfiguration.html) | ❌ Unsupported | P3-H |
-| [GetObjectAnnotation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectAnnotation.html) | ❌ Unsupported | P3-H |
-| [PutObjectAnnotation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectAnnotation.html) | ❌ Unsupported | P3-H |
-| [DeleteObjectAnnotation](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectAnnotation.html) | ❌ Unsupported | P3-H |
-| [ListObjectAnnotations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectAnnotations.html) | ❌ Unsupported | P3-H |
-| [GetBucketAbac](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAbac.html) | ❌ Unsupported | P3-H |
-| [PutBucketAbac](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAbac.html) | ❌ Unsupported | P3-H |
-| [PutBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketRequestPayment.html) | ❌ Unsupported | P3-H |
-| [PutBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAccelerateConfiguration.html) | ❌ Unsupported | P3-H |
 | [GetObjectTorrent](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTorrent.html) | ❌ Unsupported | P3-H |
 | [CreateSession](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateSession.html) | ❌ Unsupported | P3-H |
 | [ListDirectoryBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListDirectoryBuckets.html) | ❌ Unsupported | P3-H |
-| [RenameObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RenameObject.html) | ❌ Unsupported | P3-H |
-| [SelectObjectContent](https://docs.aws.amazon.com/AmazonS3/latest/API/API_SelectObjectContent.html) | ❌ Unsupported | P3-H |
 | [UpdateObjectEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateObjectEncryption.html) | ❌ Unsupported | P3-H |
 | [WriteGetObjectResponse](https://docs.aws.amazon.com/AmazonS3/latest/API/API_WriteGetObjectResponse.html) | ❌ Unsupported | P3-H |
 

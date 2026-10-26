@@ -466,15 +466,46 @@ class BucketCatalog:
         self.db.commit()
 
     def object_ownership(self, bucket: str) -> str:
-        """The persisted object ownership model. BucketOwnerEnforced is
-        the one real model here (ACLs are owner-scoped grants); the
-        value lives in bucket metadata, not a handler constant."""
+        """The persisted object ownership model.  BucketOwnerEnforced
+        ignores object ACL grants; ObjectWriter and BucketOwnerPreferred
+        apply them (the latter also auto-grants the owner on
+        ``bucket-owner-full-control`` uploads)."""
         value = self.db.connection.execute(
             select(buckets.c.object_ownership)
             .where(buckets.c.name == bucket)).scalar_one_or_none()
         if value is None:
             raise FileNotFoundError("Bucket does not exist")
-        return value
+        return value or "BucketOwnerEnforced"
+
+    def set_object_ownership(self, bucket: str, model: str) -> None:
+        if model not in ("BucketOwnerEnforced", "ObjectWriter",
+                         "BucketOwnerPreferred"):
+            raise ValueError("Invalid object ownership model")
+        changed = self.db.connection.execute(
+            update(buckets).where(buckets.c.name == bucket)
+            .values(object_ownership=model))
+        if changed.rowcount != 1:
+            raise FileNotFoundError("Bucket does not exist")
+        self.db.commit()
+
+    def clear_object_ownership(self, bucket: str) -> None:
+        """DeleteBucketOwnershipControls returns to BucketOwnerEnforced."""
+        self.set_object_ownership(bucket, "BucketOwnerEnforced")
+
+    def clear_public_access_block(self, bucket: str) -> None:
+        """DeletePublicAccessBlock → the all-true default.
+
+        The Phase E schema stores the four flags as one JSON column on
+        the bucket rather than a separate row; clearing it to the
+        documented default is the same state a fresh bucket has.
+        """
+        if bucket not in self.list_buckets():
+            raise FileNotFoundError("Bucket does not exist")
+        default = json.dumps({field: True for field in self.PAB_FIELDS})
+        self.db.connection.execute(
+            update(buckets).where(buckets.c.name == bucket).values(
+                public_access_block=default))
+        self.db.commit()
 
     def public_read(self, bucket: str) -> bool:
         """The website public-read gate (default FALSE)."""
@@ -748,6 +779,7 @@ class BucketCatalog:
                 "s3:ObjectRemoved:Delete", bucket, key,
                 version_id=version_id)
             self._delete_pending_tags(version_id)
+            self._delete_annotations(version_id)
             self.db.commit()
             return True
         except IntegrityError:
@@ -1068,6 +1100,128 @@ class BucketCatalog:
         self.apply_default_lock(item.id)
         return ObjectHead(item, generation + 1)
 
+    def rename_object(self, bucket: str, source_key: str, destination_key: str,
+                      *, now: int, expected_source_id: str | None = None,
+                      expected_generation: int | None = None) -> ObjectHead:
+        """Move the CURRENT head from one key to another in ONE transaction.
+
+        Only the head row, the manifest's ``object_key`` and the key-scoped
+        published-version/ACL digests move. Chunk rows, replica rows, Telegram
+        payloads, tags, HTTP metadata and the pending-tag journal are keyed by
+        object ID and therefore follow the object untouched. Callers must
+        enforce source existence, lock and both ACL sides before calling.
+        """
+        if bucket not in self.list_buckets():
+            raise FileNotFoundError("Bucket does not exist")
+        source_digest = self._keyhash(source_key)
+        destination_digest = self._keyhash(destination_key)
+        if source_digest == destination_digest:
+            raise ValueError("Rename source and destination are identical")
+        try:
+            # Serialize the rename with delete/tag/lock mutations on the
+            # exact source version, exactly like publish/delete_version.
+            if expected_source_id is not None:
+                candidate = expected_source_id
+            else:
+                candidate = self.db.connection.execute(select(
+                    heads.c.object_id).where(
+                        heads.c.bucket == bucket,
+                        heads.c.key_hash == source_digest,
+                    )).scalar_one_or_none()
+                if candidate is None:
+                    self.db.connection.rollback()
+                    raise FileNotFoundError("Source object does not exist")
+            lock = self.db.connection.execute(
+                update(objects).where(
+                    objects.c.id == candidate,
+                    objects.c.bucket == bucket,
+                    objects.c.status == "ready",
+                ).values(updated_at=objects.c.updated_at)
+            )
+            if lock.rowcount != 1:
+                self.db.connection.rollback()
+                raise FileNotFoundError("Source object does not exist")
+            head = self.db.connection.execute(select(
+                heads.c.object_id, heads.c.generation,
+            ).where(
+                heads.c.bucket == bucket,
+                heads.c.key_hash == source_digest,
+            )).first()
+            if head is None:
+                self.db.connection.rollback()
+                raise FileNotFoundError("Source object does not exist")
+            source_id, generation = str(head[0]), int(head[1])
+            if expected_source_id is not None and source_id != expected_source_id:
+                self.db.connection.rollback()
+                raise ValueError("Source object changed")
+            if expected_generation is not None and generation != expected_generation:
+                self.db.connection.rollback()
+                raise ValueError("Source object changed")
+            item = self.manifests.get(source_id)
+            if item.bucket != bucket or item.key != source_key:
+                self.db.connection.rollback()
+                raise RuntimeError("Object hash collision detected")
+            # Object lock blocks a rename exactly as it blocks delete: the
+            # physical payload never moves, so moving the head must not let
+            # a WORM-retained version escape its key/retention contract.
+            if self.is_locked(source_id):
+                self.db.connection.rollback()
+                raise PermissionError("Object is under retention")
+            # Fail closed on ANY destination claim: a current head, a
+            # historical published version, an object row or a key-scoped
+            # ACL. Rename never overwrites and never merges version chains.
+            occupied = (
+                self.db.connection.execute(select(heads.c.object_id).where(
+                    heads.c.bucket == bucket,
+                    heads.c.key_hash == destination_digest)).first()
+                or self.db.connection.execute(select(
+                    published_versions.c.object_id).where(
+                        published_versions.c.bucket == bucket,
+                        published_versions.c.key_hash == destination_digest,
+                    )).first()
+                or self.db.connection.execute(select(objects.c.id).where(
+                    objects.c.bucket == bucket,
+                    objects.c.object_key == destination_key,
+                    objects.c.status.in_(("ready", "delete-marker")),
+                )).first()
+                or self.db.connection.execute(select(
+                    object_acl_grants.c.grantee).where(
+                        object_acl_grants.c.bucket == bucket,
+                        object_acl_grants.c.key_hash == destination_digest,
+                    )).first()
+            )
+            if occupied:
+                self.db.connection.rollback()
+                raise FileExistsError("Destination object already exists")
+            changed = self.db.connection.execute(update(heads).where(
+                heads.c.bucket == bucket,
+                heads.c.key_hash == source_digest,
+                heads.c.object_id == source_id,
+                heads.c.generation == generation,
+            ).values(
+                key_hash=destination_digest,
+                generation=generation + 1,
+                updated_at=now,
+            ))
+            if changed.rowcount != 1:
+                self.db.connection.rollback()
+                raise ValueError("Concurrent object modification")
+            self.db.connection.execute(update(objects).where(
+                objects.c.id == source_id,
+            ).values(object_key=destination_key))
+            self.db.connection.execute(update(published_versions).where(
+                published_versions.c.object_id == source_id,
+            ).values(key_hash=destination_digest))
+            self.db.connection.execute(update(object_acl_grants).where(
+                object_acl_grants.c.bucket == bucket,
+                object_acl_grants.c.key_hash == source_digest,
+            ).values(key_hash=destination_digest))
+            self.db.commit()
+            return ObjectHead(self.manifests.get(source_id), generation + 1)
+        except BaseException:
+            self.db.connection.rollback()
+            raise
+
     def _apply_pending_tags(self, identifier: str) -> None:
         """Apply a Phase J tag journal in the current publish transaction."""
         from teledrive.s3.tagging import apply_pending_tags_uncommitted
@@ -1085,6 +1239,20 @@ class BucketCatalog:
             return
         from teledrive.s3.tagging import delete_pending_tags_uncommitted
         delete_pending_tags_uncommitted(self.db.connection, identifier)
+
+    def _delete_annotations(self, identifier: str) -> None:
+        """Revoke an object version's annotations in the caller's transaction.
+
+        Annotations are not independently versioned: revoking the version
+        removes them too, exactly like its tags. The table is checked first
+        because a legacy database may predate Phase O2; DDL is never issued
+        here (the store/startup create it).
+        """
+        if not inspect(self.db.engine).has_table("storage_object_annotations"):
+            return
+        self.db.connection.execute(text(
+            "DELETE FROM storage_object_annotations WHERE object_id = :object_id"
+        ), {"object_id": identifier})
 
     def list_objects(self, bucket: str, *, prefix: str = "",
                      after: str | None = None, limit: int = 100) -> list[ObjectHead]:
@@ -1188,6 +1356,15 @@ class BucketCatalog:
                 text("DELETE FROM storage_website_configs WHERE bucket = :bucket"),
                 {"bucket": name},
             )
+        # Phase O2: object annotations are per-object rows with no bucket
+        # column; remove rows for this bucket's objects and any orphan left
+        # by an already-reclaimed manifest.
+        if inspect(self.db.engine).has_table("storage_object_annotations"):
+            self.db.connection.execute(text(
+                "DELETE FROM storage_object_annotations WHERE object_id IN "
+                "(SELECT id FROM storage_objects WHERE bucket = :bucket) "
+                "OR object_id NOT IN (SELECT id FROM storage_objects)"
+            ), {"bucket": name})
         self.db.connection.execute(
             update(buckets).where(buckets.c.name == name).values(public_read=False))
         self.db.connection.execute(delete(buckets).where(buckets.c.name == name))

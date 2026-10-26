@@ -32,8 +32,8 @@ REQUESTS = {
     # P2-B — encryption and retention writes
     "PutBucketEncryption": ("PUT", "/sweep-bucket?encryption"),
     "DeleteBucketEncryption": ("DELETE", "/sweep-bucket?encryption"),
-    # P2-D — replication and restore
-    "RestoreObject": ("POST", "/sweep-bucket/asset.bin?restore"),
+    # P2-D — replication and restore. RestoreObject is now a real operation
+    # (honest 403 InvalidObjectState) ahead of the central inventory sync.
     # P2-F — website, notifications, logging writes
     "PutBucketWebsite": ("PUT", "/sweep-bucket?website"),
     "DeleteBucketWebsite": ("DELETE", "/sweep-bucket?website"),
@@ -86,14 +86,34 @@ REQUESTS = {
 # still listed in the manifest as unsupported until the owner promotes them,
 # so keep the manifest-driven mapping intact and skip only their runtime
 # assertion (their real behavior is covered by tests/s3/test_s3_website.py).
-PROMOTED_AHEAD_OF_MANIFEST = frozenset({"PutBucketWebsite", "DeleteBucketWebsite"})
+PROMOTED_AHEAD_OF_MANIFEST = frozenset({
+    "PutBucketWebsite", "DeleteBucketWebsite",
+    # Phase O is implemented ahead of the centrally-synced inventory.
+    "RenameObject", "SelectObjectContent", "RestoreObject",
+    "GetObjectAnnotation", "PutObjectAnnotation",
+    "DeleteObjectAnnotation", "ListObjectAnnotations",
+    "PutBucketRequestPayment", "PutBucketAccelerateConfiguration",
+    # Phase N: analytics/inventory/metrics configuration CRUD.
+    "GetBucketAnalyticsConfiguration", "PutBucketAnalyticsConfiguration",
+    "DeleteBucketAnalyticsConfiguration", "ListBucketAnalyticsConfigurations",
+    "GetBucketInventoryConfiguration", "PutBucketInventoryConfiguration",
+    "DeleteBucketInventoryConfiguration", "ListBucketInventoryConfigurations",
+    "GetBucketMetricsConfiguration", "PutBucketMetricsConfiguration",
+    "DeleteBucketMetricsConfiguration", "ListBucketMetricsConfigurations",
+    # Phase L: policy engine, ownership controls, ABAC and PAB deletion.
+    "PutBucketPolicy", "DeleteBucketPolicy",
+    "PutBucketOwnershipControls", "DeleteBucketOwnershipControls",
+    "GetBucketAbac", "PutBucketAbac",
+    "DeletePublicAccessBlock",
+})
 
 
 def _unsupported_operations() -> list[str]:
     manifest = json.loads(
         (ROOT / "teledrive/s3/operation_manifest.json").read_text())
     return [op["name"] for op in manifest["operations"]
-            if op.get("status") == "unsupported"]
+            if op.get("status") == "unsupported"
+            and op["name"] not in PROMOTED_AHEAD_OF_MANIFEST]
 
 
 def test_every_unsupported_operation_is_mapped_by_the_sweep():

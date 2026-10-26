@@ -23,8 +23,10 @@ def test_private_only_bucket_public_access_controls_and_no_payload_calls(service
     assert len(root) == 4
     assert all(child.text == "true" for child in root)
     assert signed(service, "PUT", path, ALL_TRUE).status_code == 200
-    assert signed(service, "PUT", path, ALL_TRUE).status_code == 200
-    assert signed(service, "DELETE", path).status_code == 501
+    assert signed(service, "DELETE", path).status_code == 204
+    # DeletePublicAccessBlock resets the persisted flags to all-true.
+    read = ET.fromstring(signed(service, "GET", path).content)
+    assert all(child.text == "true" for child in read)
     assert remote.uploads == 0 and remote.downloads == 0
     assert signed(service, "GET", "/private-ci/file.bin").status_code == 404
     # Anonymous reads remain denied, even after PUT controls.
@@ -87,17 +89,30 @@ def test_policy_status_computed_from_real_grants(service):
     assert b"<IsPublic>false</IsPublic>" in status.content
 
 
-def test_ownership_controls_read_from_metadata(service):
-    """Phase E: the ownership state is persisted bucket metadata (the
-    one real model); ownership writes fail closed."""
+def test_ownership_controls_read_and_write_real_metadata(service):
+    """Phase L5: the ownership state is persisted bucket metadata and
+    PUT/DELETE change the authorization model (DELETE resets to
+    BucketOwnerEnforced)."""
     assert signed(service, "PUT", "/private-ci").status_code == 200
     read = signed(service, "GET", "/private-ci?ownershipControls")
     assert read.status_code == 200, read.text
     assert b"BucketOwnerEnforced" in read.content
     root = ET.fromstring(read.content)
     assert root.tag.rsplit("}", 1)[-1] == "OwnershipControls"
+    # An empty PUT is MalformedXML, never a silent success.
     assert signed(service, "PUT", "/private-ci?ownershipControls"
-                  ).status_code == 501
+                  ).status_code == 400
+    body = (b'<OwnershipControls xmlns="http://s3.amazonaws.com/doc/'
+            b'2006-03-01/"><Rule><ObjectOwnership>ObjectWriter'
+            b"</ObjectOwnership></Rule></OwnershipControls>")
+    assert signed(service, "PUT", "/private-ci?ownershipControls",
+                  body).status_code == 200
+    assert b"ObjectWriter" in signed(
+        service, "GET", "/private-ci?ownershipControls").content
+    assert signed(service, "DELETE",
+                  "/private-ci?ownershipControls").status_code == 204
+    assert b"BucketOwnerEnforced" in signed(
+        service, "GET", "/private-ci?ownershipControls").content
 
 
 def test_private_control_permission_separation(service):

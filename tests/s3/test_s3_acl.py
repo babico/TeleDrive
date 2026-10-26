@@ -44,6 +44,15 @@ def _as(credential):
             "secret": credential.secret_key}
 
 
+def _object_writer(service, bucket):
+    """Phase L5: object ACL grants participate only under ObjectWriter."""
+    body = (b'<OwnershipControls xmlns="http://s3.amazonaws.com/doc/'
+            b'2006-03-01/"><Rule><ObjectOwnership>ObjectWriter'
+            b"</ObjectOwnership></Rule></OwnershipControls>")
+    reply = signed(service, "PUT", f"/{bucket}?ownershipControls", body)
+    assert reply.status_code == 200, reply.text
+
+
 def test_bucket_acl_roundtrip_and_baseline(service, second):
     assert signed(service, "PUT", "/acl-bucket").status_code == 200
     assert signed(service, "PUT", "/acl-bucket/data.bin",
@@ -128,6 +137,7 @@ def test_object_grants_add_for_the_exact_key_only(service, second):
     assert signed(service, "PUT", "/acl-bucket/one.bin", b"1").status_code == 200
     assert signed(service, "PUT", "/acl-bucket/two.bin", b"2").status_code == 200
     main = service[1]
+    _object_writer(service, "acl-bucket")
     # A restrictive bucket ACL: owner only (empty grant list).
     assert signed(service, "PUT", "/acl-bucket?acl",
                   _policy_xml(main.access_key, [])).status_code == 200
@@ -157,6 +167,7 @@ def test_object_acl_restricts_only_its_key(service, second, readonly):
     """An object ACL opts its exact key into restriction; siblings and
     the bucket keep the unrestricted baseline."""
     assert signed(service, "PUT", "/open-bucket").status_code == 200
+    _object_writer(service, "open-bucket")
     assert signed(service, "PUT", "/open-bucket/gated.bin", b"g").status_code == 200
     assert signed(service, "PUT", "/open-bucket/free.bin", b"f").status_code == 200
     main = service[1]
@@ -304,6 +315,7 @@ def test_batch_delete_honours_per_object_acl(service):
     second = store.create("deleter", ["s3:GetObject", "s3:PutObject",
                                       "s3:DeleteObject"])
     assert signed(service, "PUT", "/acl-bucket").status_code == 200
+    _object_writer(service, "acl-bucket")
     assert signed(service, "PUT", "/acl-bucket/gated.bin", b"g").status_code == 200
     assert signed(service, "PUT", "/acl-bucket/free.bin", b"f").status_code == 200
     main = service[1]
@@ -339,6 +351,7 @@ def test_copy_object_honours_the_source_object_acl(service, second):
     too — otherwise a narrowed object can be copied out.
     """
     assert signed(service, "PUT", "/acl-bucket").status_code == 200
+    _object_writer(service, "acl-bucket")
     assert signed(service, "PUT", "/acl-bucket/source.bin",
                   b"secret-bytes").status_code == 200
     main = service[1]

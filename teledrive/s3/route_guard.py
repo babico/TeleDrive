@@ -31,18 +31,22 @@ _BUCKET_GET_MULTIPART = frozenset({
 _BUCKET_CONTROL = frozenset({
     "location", "cors", "tagging", "versioning", "publicAccessBlock", "lifecycle",
     "policyStatus",
+    # Storage reports (Phase N): configuration CRUD with an optional id.
+    "analytics", "inventory", "metrics",
     # Read-only AWS compatibility probes (see web/s3.py _COMPAT_BUCKET_READS).
     "acl", "ownershipControls", "policy", "replication", "website", "logging",
     "notification", "notificationConfiguration", "requestPayment", "accelerate",
-    "encryption", "object-lock",
+    "encryption", "object-lock", "abac",
 })
-_OBJECT_CONTROL = frozenset({"tagging", "attributes", "uploads", "uploadId", "versionId"})
+_OBJECT_CONTROL = frozenset({"tagging", "annotation", "attributes", "uploads", "uploadId", "versionId"})
 _EMPTY_FLAG = frozenset({
-    "location", "cors", "tagging", "versioning", "publicAccessBlock",
+    "location", "cors", "tagging", "annotation", "versioning", "publicAccessBlock",
     "lifecycle", "policyStatus", "uploads", "versions", "delete", "attributes",
     "acl", "ownershipControls", "policy", "replication", "website", "logging",
     "notification", "notificationConfiguration", "requestPayment", "accelerate",
-    "encryption", "object-lock", "retention", "legal-hold",
+    "encryption", "object-lock", "retention", "legal-hold", "abac",
+    "rename", "select", "restore",
+    "analytics", "inventory", "metrics",
 })
 # No upper/lower-case folding for S3 query fields: AWS subresources are
 # case-sensitive. A misspelled control may not be silently ignored.
@@ -81,15 +85,15 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "location": {"GET"}, "cors": {"GET", "PUT", "DELETE"},
                 "tagging": {"GET", "PUT", "DELETE"},
                 "versioning": {"GET", "PUT"},
-                "publicAccessBlock": {"GET", "PUT"},
+                "publicAccessBlock": {"GET", "PUT", "DELETE"},
                 "lifecycle": {"GET", "PUT", "DELETE"},
                 "policyStatus": {"GET"},
                 # Phase D: real ACL grant store; PUT replaces the ACL.
                 "acl": {"GET", "PUT"},
-                # Compatibility probes are GET-only; every configuration
-                # attempt (PUT/DELETE) stays fail-closed 501 via `forbidden`.
-                "ownershipControls": {"GET"},
-                "policy": {"GET"},
+                # Phase L: real policy engine, ownership controls and ABAC.
+                "ownershipControls": {"GET", "PUT", "DELETE"},
+                "policy": {"GET", "PUT", "DELETE"},
+                "abac": {"GET", "PUT"},
                 # Phase G: real replication configuration (SQL-backed,
                 # prefix-aware, over the existing replica engine).
                 "replication": {"GET", "PUT", "DELETE"},
@@ -100,10 +104,21 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "logging": {"GET", "PUT"},
                 "notification": {"GET", "PUT"},
                 "notificationConfiguration": {"GET", "PUT"},
-                "requestPayment": {"GET"}, "accelerate": {"GET"},
+                "requestPayment": {"GET", "PUT"}, "accelerate": {"GET", "PUT"},
                 "encryption": {"GET"}, "object-lock": {"GET", "PUT"},
+                # Phase N: report configuration CRUD. The optional `id`
+                # query field selects one configuration; list requests have
+                # none. Continuation tokens are not needed because the list
+                # response is the complete, sorted id set.
+                "analytics": {"GET", "PUT", "DELETE"},
+                "inventory": {"GET", "PUT", "DELETE"},
+                "metrics": {"GET", "PUT", "DELETE"},
             }
-            allowed = frozenset({selector}) if method in methods[selector] else frozenset()
+            if selector in {"analytics", "inventory", "metrics"}:
+                allowed = (frozenset({selector, "id"})
+                           if method in methods[selector] else frozenset())
+            else:
+                allowed = frozenset({selector}) if method in methods[selector] else frozenset()
         elif "object-lock" in real:
             allowed = (frozenset({"object-lock"})
                        if method in {"GET", "PUT"} else frozenset())
@@ -133,6 +148,23 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
         elif "tagging" in real:
             allowed = (frozenset({"tagging", "versionId"})
                        if method in {"GET", "PUT", "DELETE"} else frozenset())
+        elif "annotation" in real:
+            # Object annotations (AWS reuses ?annotation for both forms):
+            #   singular: ?annotation&annotationName=...   GET/PUT/DELETE
+            #   listing:  ?annotation[&annotation-prefix=...]
+            #             [&max-annotation-results=...]
+            #             [&continuation-token=...]         GET
+            # Annotations are attached to the CURRENT object only; a
+            # versionId selector stays unsupported (501), matching the
+            # storage model where revocation deletes annotations.
+            if "annotationName" in real:
+                allowed = (frozenset({"annotation", "annotationName"})
+                           if method in {"GET", "PUT", "DELETE"} else frozenset())
+            else:
+                allowed = (frozenset({
+                    "annotation", "annotation-prefix",
+                    "continuation-token", "max-annotation-results",
+                }) if method == "GET" else frozenset())
         elif "acl" in real:
             # Phase D: real ACL controls, GET and PUT (current object
             # only — versioned ACL selectors stay unsupported).
@@ -151,6 +183,19 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
             # Other object controls still fail closed, even if correctly signed.
             allowed = (frozenset({"attributes", "versionId"})
                        if method == "GET" else frozenset())
+        elif "rename" in real:
+            # Phase O: AWS directory-bucket shape — POST destination key with
+            # the source named by the signed x-amz-rename-source header.
+            allowed = frozenset({"rename"}) if method == "POST" else frozenset()
+        elif "select" in real:
+            # SelectObjectContent requires both selectors; select-type must
+            # be 2 (enforced by the handler).
+            allowed = (frozenset({"select", "select-type"})
+                       if method == "POST" else frozenset())
+        elif "restore" in real:
+            # RestoreObject may address a published historical VersionId.
+            allowed = (frozenset({"restore", "versionId"})
+                       if method == "POST" else frozenset())
         elif "versionId" in real:
             allowed = (frozenset({"versionId"})
                        if method in {"GET", "HEAD", "DELETE"} else frozenset())

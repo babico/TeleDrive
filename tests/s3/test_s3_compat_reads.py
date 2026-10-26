@@ -102,13 +102,12 @@ def test_object_lock_reads_return_not_configured(service, bucket):
 
 @pytest.mark.parametrize("method,path", [
     ("DELETE", "/compat-bucket?acl"),
-    ("PUT", "/compat-bucket?ownershipControls"),
-    ("PUT", "/compat-bucket?policy"),
-    ("DELETE", "/compat-bucket?policy"),
-    ("PUT", "/compat-bucket?requestPayment"),
-    ("PUT", "/compat-bucket?accelerate"),
+
     ("PUT", "/compat-bucket?encryption"),
     ("DELETE", "/compat-bucket?encryption"),
+    # PUT/DELETE ?policy, ?ownershipControls, ?abac and DELETE
+    # ?publicAccessBlock are REAL Phase L controls — covered by
+    # tests/s3/test_s3_policy_engine.py and test_s3_ownership_abac.py.
     # PUT ?object-lock / ?retention / ?legal-hold are REAL Phase C
     # controls now — covered by tests/s3/test_s3_object_lock.py.
     # PUT ?acl (bucket and object) is a REAL Phase D control — covered
@@ -117,9 +116,11 @@ def test_object_lock_reads_return_not_configured(service, bucket):
     # Website configuration is a REAL Phase I control — covered by
     # tests/s3/test_s3_website.py.
     # Notification and logging are REAL Phase F stores — covered by
-    # tests/s3/test_s3_notifications.py.
-    ("POST", "/compat-bucket/item?restore"),
-    ("POST", "/compat-bucket/item?restore&versionId=x"),
+    # tests/s3/test_s3_notifications.py. RequestPayment/Accelerate are
+    # writable-but-single-state since Phase O6 — covered by
+    # tests/s3/test_s3_request_payment_accelerate.py.
+    # RestoreObject is a REAL Phase O operation — covered by
+    # tests/s3/test_s3_restore.py.
 ])
 def test_configuration_attempts_fail_closed(service, bucket, method, path):
     response = signed(service, method, path)

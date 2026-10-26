@@ -998,8 +998,8 @@ def test_real_s3_lifecycle_has_single_process_schedule_and_ci():
 
 def test_s3_compatibility_matrix_cannot_relabel_safe_lifecycle_as_full_aws():
     specs = (ROOT / "docs/S3_SPECS.md").read_text()
-    assert ("**Inventory totals:** 60 supported, 8 partial "
-            "(0 by code, 8 by design), 48 unsupported;") in specs
+    assert ("**Inventory totals:** 89 supported, 7 partial "
+            "(0 by code, 7 by design), 20 unsupported;") in specs
     for action in (
         "GetBucketLifecycleConfiguration", "PutBucketLifecycleConfiguration",
         "DeleteBucketLifecycle",

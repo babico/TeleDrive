@@ -177,7 +177,16 @@ jobs:
             tests/s3/test_s3_replication.py \
             tests/s3/test_s3_notifications.py \
             tests/s3/test_s3_tagging_journal.py \
-            tests/s3/test_s3_website.py
+            tests/s3/test_s3_website.py \
+            tests/s3/test_s3_annotations.py \
+            tests/s3/test_s3_request_payment_accelerate.py \
+            tests/s3/test_s3_policy_engine.py \
+            tests/s3/test_s3_ownership_abac.py \
+            tests/s3/test_s3_report_configs.py \
+            tests/s3/test_s3_report_runner.py \
+            tests/s3/test_s3_rename.py \
+            tests/s3/test_s3_select.py \
+            tests/s3/test_s3_restore.py
       - name: Publish CI run summary
         if: always()
         shell: bash

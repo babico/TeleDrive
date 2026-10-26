@@ -57,6 +57,8 @@ jobs:
             tests/s3/test_s3_contract.py
       - name: Dependency consistency
         run: python -m pip check
+      - name: S3 inventory bookkeeping is in sync with the manifest
+        run: python scripts/ops/sync_s3_inventory.py --check
       - name: Bandit
         run: bandit -q -r teledrive web -ll
       - name: Dependency audit

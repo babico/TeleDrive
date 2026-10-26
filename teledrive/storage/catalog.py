@@ -199,6 +199,14 @@ class BucketCatalog:
         ensure_versioning_column(manifests.db)
         self.db = manifests.db
         catalog_metadata.create_all(self.db.engine)
+        # publish() applies the Phase J pending-tag journal, so its table
+        # must exist even on a fresh database where no tagging store was
+        # ever constructed. Lazy import: tagging.py imports this module.
+        try:
+            from teledrive.s3.tagging import ensure_pending_tag_table
+            ensure_pending_tag_table(self.db.engine)
+        except Exception:  # noqa: BLE001 - tagging is optional bookkeeping
+            pass
 
     @staticmethod
     def validate_bucket(name: str) -> None:

@@ -130,6 +130,16 @@ def delete_pending_tags_uncommitted(connection, object_id: str) -> None:
         pending_tags.c.object_id == object_id))
 
 
+def ensure_pending_tag_table(engine) -> None:
+    """Create the Phase J journal table (idempotent).
+
+    publish() applies the journal inside its head-move transaction, so the
+    table must exist before any publish — including on a database where no
+    ObjectTagStore has been constructed yet.
+    """
+    _meta.create_all(engine, tables=[pending_tags])
+
+
 class ObjectTagStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog = catalog

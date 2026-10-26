@@ -209,7 +209,7 @@ jobs:
           python -m pip install pytest "psycopg[binary]>=3.2,<4" "PyMySQL>=1.1,<2" "defusedxml==0.7.1" "cryptography>=50,<51"
           python -m pip check
       - name: Run live PostgreSQL/MySQL integration tests
-        run: python -m pytest -vv tests/e2e/test_database_live.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py
+        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py
       - name: Seed realistic metadata before native database backup
         run: |
           python scripts/ops/rehearse_native_database_restore.py seed --url-env DB_TEST_POSTGRES_URL --receipt "$RUNNER_TEMP/pg-dr.json" --source "$RUNNER_TEMP/pg-source.bin"

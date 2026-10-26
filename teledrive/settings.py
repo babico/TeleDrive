@@ -132,12 +132,17 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
             _cfg_or_env("allow_insecure", "TELEDRIVE_ALLOW_INSECURE", False)
             in (True, "1", "true", "yes", "True")
         ),
-        web_port=_int(_cfg_or_env("port", "TELEDRIVE_WEB_PORT", 8080), 8080,
-                      "web port", minimum=1),
-        s3_port=_int(_cfg_or_env("s3_port", "TELEDRIVE_S3_PORT", 9000), 9000,
-                     "s3 port", minimum=1),
-        bind_address=str(_cfg_or_env("bind_address", "TELEDRIVE_BIND_ADDRESS",
-                                     DEFAULT_BIND_ADDRESS)),
+        # Listeners are deployment plumbing and are ENV-ONLY, by owner
+        # policy: ports, bind address and TLS paths come exclusively from
+        # the container environment (docker-compose `environment:`), so
+        # the host mapping, the in-container listener and the healthcheck
+        # can never disagree. config.yaml has no say here at all.
+        web_port=_int(os.environ.get("TELEDRIVE_WEB_PORT", ""),
+                      8080, "web port", minimum=1),
+        s3_port=_int(os.environ.get("TELEDRIVE_S3_PORT", ""),
+                     9000, "s3 port", minimum=1),
+        bind_address=str(os.environ.get("TELEDRIVE_BIND_ADDRESS", "")
+                         or DEFAULT_BIND_ADDRESS),
         rest_max_upload_bytes=_int(
             _cfg_or_env("rest_max_upload_bytes", "TELEDRIVE_REST_MAX_UPLOAD_BYTES", 2 * 1024**3),
             2 * 1024**3, "rest_max_upload_bytes", minimum=1),
@@ -168,23 +173,21 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
             _cfg_or_env("auth_failure_window_seconds",
                         "TELEDRIVE_AUTH_FAILURE_WINDOW_SECONDS", 300),
             300, "auth_failure_window_seconds", minimum=1),
-        ssl_certfile=str(_cfg_or_env("ssl_certfile", "TELEDRIVE_SSL_CERTFILE", "")),
-        ssl_keyfile=str(_cfg_or_env("ssl_keyfile", "TELEDRIVE_SSL_KEYFILE", "")),
-        # S3-listener TLS lives in the STORAGE section (like
-        # s3_master_key_file), with env fallbacks.
-        s3_ssl_certfile=str(
-            storage.get("s3_ssl_certfile")
-            or os.environ.get("TELEDRIVE_S3_SSL_CERTFILE", "")),
-        s3_ssl_keyfile=str(
-            storage.get("s3_ssl_keyfile")
-            or os.environ.get("TELEDRIVE_S3_SSL_KEYFILE", "")),
-        # Reverse-proxy mode: TLS terminates in front (nginx/caddy/traefik).
-        # The app serves plain HTTP and trusts X-Forwarded-Proto for cookie
+        # TLS is ENV-ONLY too, one independent pair per listener.
+        # A combined .pem works with only the CERTFILE variable (uvicorn
+        # accepts a PEM holding both the chain and the private key); a
+        # split pair needs both variables. Empty = plain HTTP.
+        ssl_certfile=str(os.environ.get("TELEDRIVE_SSL_CERTFILE", "")),
+        ssl_keyfile=str(os.environ.get("TELEDRIVE_SSL_KEYFILE", "")),
+        s3_ssl_certfile=str(os.environ.get("TELEDRIVE_S3_SSL_CERTFILE", "")),
+        s3_ssl_keyfile=str(os.environ.get("TELEDRIVE_S3_SSL_KEYFILE", "")),
+        # Reverse-proxy mode is deployment plumbing: ENV-ONLY, like the
+        # TLS paths. TLS terminates in front (nginx/caddy/traefik), the
+        # app serves plain HTTP and trusts X-Forwarded-Proto for cookie
         # security flags and generated URLs. The proxy MUST forward the
         # original Host header unchanged (S3 SigV4 signs the Host).
         trusted_proxy=bool(str(
-            web.get("trusted_proxy")
-            or os.environ.get("TELEDRIVE_TRUSTED_PROXY", "")).lower()
+            os.environ.get("TELEDRIVE_TRUSTED_PROXY", "")).lower()
             in ("1", "true", "yes", "on")),
         db_extra_packages=packages,
         auth_dir=str(_cfg_or_env("auth_dir", "TELEDRIVE_AUTH_DIR", "/data/auth")),

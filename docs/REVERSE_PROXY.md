@@ -7,23 +7,50 @@ nginx, Caddy and Traefik.
 
 ## When you need this
 
-| Deployment | WebUI | S3 | Setting |
+Every combination is supported; the two listeners are independent.
+
+| Deployment | WebUI | S3 | Environment |
 |---|---|---|---|
 | Direct, LAN, no TLS | HTTP | HTTP | — (default) |
-| Direct TLS on S3 only | HTTP | **HTTPS** | `storage.s3_ssl_certfile` + `s3_ssl_keyfile` |
-| Everything behind a proxy | proxy TLS | proxy TLS | `web.trusted_proxy: true` |
-| Mixed | HTTP | direct `s3_ssl_*` | no proxy on the S3 port |
+| Direct TLS on S3 only | HTTP | **HTTPS** | `TELEDRIVE_S3_SSL_CERTFILE` (+ `_KEYFILE`) |
+| Direct TLS on both | **HTTPS** | **HTTPS** | `TELEDRIVE_SSL_*` and `TELEDRIVE_S3_SSL_*` |
+| Everything behind a proxy | proxy TLS | proxy TLS | `TELEDRIVE_TRUSTED_PROXY=1` |
+| Mixed | proxy TLS | direct TLS | `TELEDRIVE_TRUSTED_PROXY=1` + `TELEDRIVE_S3_SSL_*` |
+| Proxy TLS in front of app TLS | **HTTPS** | **HTTPS** | both sets of variables |
 
-The proxy mode is one config key:
+**Ports and TLS are ENV-ONLY.** They are deployment plumbing, not
+application settings: the same variable drives the host port mapping,
+the in-container listener and the container healthcheck. A certificate
+may be a combined `.pem` (chain + private key in one file — only the
+CERTFILE variable is needed) or a split `.crt` + `.key` pair. Mount
+them under `./config` and reference them as `/config/ssl/...`:
 
 ```yaml
-web:
-  trusted_proxy: true
+# docker-compose environment: (or .env)
+TELEDRIVE_WEB_PORT: 8088
+TELEDRIVE_S3_PORT: 9088
+TELEDRIVE_SSL_CERTFILE: /config/ssl/server.crt
+TELEDRIVE_SSL_KEYFILE: /config/ssl/server.key
+TELEDRIVE_S3_SSL_CERTFILE: /config/ssl/server.crt
+TELEDRIVE_S3_SSL_KEYFILE: /config/ssl/server.key
+TELEDRIVE_TRUSTED_PROXY: "1"     # only behind a proxy
 ```
 
-It makes the app honor `X-Forwarded-Proto` (Secure cookies are set when
-the client connection is https). Without it, everything still works —
-only the cookie `Secure` flag and generated URLs may be wrong.
+`./deploy/tls/generate.sh` creates the material under `./config/ssl` and
+prints these exact lines.
+
+**Client bootstrap:** the management interface serves its own public
+certificate at `/server.cer` (DER — what Windows imports) and
+`/server.crt` (PEM chain), unauthenticated, so clients can install it
+into their trust store. Only certificate blocks are emitted; a combined
+`.pem`'s private key is stripped. There is also a **TLS certificate**
+card on the Settings page with both download links.
+
+`TELEDRIVE_TRUSTED_PROXY=1` makes the app honor `X-Forwarded-Proto`
+(Secure cookies are set when the client connection is https) and
+`X-Forwarded-Host`/`X-Forwarded-Port` for generated presigned URLs.
+Without it, everything still works — only the cookie `Secure` flag and
+generated URLs may be wrong.
 
 ## The two S3 addressing styles
 
@@ -170,11 +197,27 @@ endpoint = https://s3.example.com
 force_path_style = true
 ```
 
+A self-signed certificate must be trusted by the client first — download
+`https://<host>:<port>/server.cer` from the management interface (or use
+the Settings page link) and import it, or point the client at the PEM:
+
+```bash
+# curl / AWS CLI / rclone
+--cacert /path/to/server.crt        # curl
+AWS_CA_BUNDLE=/path/to/server.crt   # AWS CLI / boto3 / rclone
+```
+
 AWS CLI:
 
 ```bash
 aws --endpoint-url https://s3.example.com s3 ls s3://my-bucket/
 ```
+
+Windows (S3 Browser, WinSCP): download `/server.cer`, double-click it,
+choose **Install Certificate → Local Machine → Trusted Root
+Certification Authorities**, restart the client. Bypassing validation
+per-application is unreliable (some clients ignore that setting for
+bucket listing), so importing the certificate is the dependable path.
 
 boto3:
 

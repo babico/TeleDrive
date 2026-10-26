@@ -11,25 +11,25 @@
 # Web service: authentication, listeners and request limits.
 # ---------------------------------------------------------------------------
 web:
-  # Reverse-proxy mode: TLS terminates in nginx/caddy/traefik in front.
-  # The app serves plain HTTP and trusts X-Forwarded-Proto for cookie
-  # security flags. The proxy MUST forward the original Host header
-  # unchanged (S3 SigV4 signs the Host).
-  # trusted_proxy: true
-
   user: "admin"
   password: "CHANGE_ME_AT_LEAST_16_CHARACTERS"
   allowed_hosts: "localhost,127.0.0.1,[::1]"
   allow_insecure: false          # true only for explicitly trusted local setups
-  bind_address: "0.0.0.0"        # in-container bind; host mapping stays loopback
-  port: 8080
-  s3_port: 9000
   rest_max_upload_bytes: 2147483648      # 2 GiB
   auth_failure_limit: 5
   auth_failure_window_seconds: 300
-  # Optional HTTPS: generate certs with scripts/ops/generate_ssl.py and set:
-  # ssl_certfile: "/config/tls/server.crt"
-  # ssl_keyfile: "/config/tls/server.key"
+  # NOTE — listeners and TLS are NOT configured here. Ports, bind address
+  # and certificates are ENV-ONLY deployment plumbing, set in the
+  # docker-compose `environment:` block (or .env), because the same value
+  # must drive the host port mapping, the in-container listener and the
+  # healthcheck:
+  #   TELEDRIVE_WEB_PORT / TELEDRIVE_S3_PORT   (e.g. 8088 / 9088)
+  #   TELEDRIVE_BIND_ADDRESS                   (host-side mapping)
+  #   TELEDRIVE_SSL_CERTFILE / TELEDRIVE_SSL_KEYFILE       (WebUI/REST)
+  #   TELEDRIVE_S3_SSL_CERTFILE / TELEDRIVE_S3_SSL_KEYFILE (S3 gateway)
+  #   TELEDRIVE_TRUSTED_PROXY=1                (TLS terminates in front)
+  # A combined .pem (chain + private key) needs only the CERTFILE entry;
+  # certificates live under ./config (e.g. /config/ssl/server.pem).
   # Read the admin password from a file instead of the plaintext field above:
   # password_file: "/config/web-password"
   # Maximum accepted HTTP request body size (32 MiB default):
@@ -57,12 +57,10 @@ storage:
   strategy: round_robin
 
   scratch_dir: "/data/tmp"
-  # S3-listener TLS (independent of the WebUI). Direct HTTPS on the S3
-  # port for rclone/boto3 over TLS. Generate a LAN certificate with:
-  #   openssl req -x509 -newkey rsa:2048 -keyout s3.key -out s3.crt   #     -days 365 -nodes -subj "/CN=your-host"
-  # s3_ssl_certfile: /config/s3.crt
-  # s3_ssl_keyfile: /config/s3.key
-
+  # S3-listener TLS is ENV-ONLY (see the web section note above):
+  #   TELEDRIVE_S3_SSL_CERTFILE / TELEDRIVE_S3_SSL_KEYFILE
+  # A combined .pem works with just the CERTFILE variable. Certificates
+  # belong under the ./config mount (e.g. /config/ssl/server.pem).
 
   # Persistent S3 credential-encryption master key file.
   s3_master_key_file: "/config/s3-master.key"

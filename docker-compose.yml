@@ -18,14 +18,35 @@ services:
     # Rootless Docker users: your login uid (usually 1000) is correct.
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
+      # One variable drives BOTH sides: the in-container listener and
+      # the host mapping are the same number, so a remapped port can
+      # never leave the app (or the healthcheck) on a stale value.
       # Service binds 0.0.0.0 inside; host side defaults to loopback.
       # TELEDRIVE_BIND_ADDRESS=0.0.0.0 exposes the LAN — trusted
       # networks only, or front it with a TLS reverse proxy.
-      - "${TELEDRIVE_BIND_ADDRESS:-127.0.0.1}:${TELEDRIVE_WEB_PORT:-8080}:8080"
-      - "${TELEDRIVE_BIND_ADDRESS:-127.0.0.1}:${TELEDRIVE_S3_PORT:-9000}:9000"
+      - "${TELEDRIVE_BIND_ADDRESS:-127.0.0.1}:${TELEDRIVE_WEB_PORT:-8080}:${TELEDRIVE_WEB_PORT:-8080}"
+      - "${TELEDRIVE_BIND_ADDRESS:-127.0.0.1}:${TELEDRIVE_S3_PORT:-9000}:${TELEDRIVE_S3_PORT:-9000}"
     environment:
       TELEDRIVE_CONFIG: /config/config.yaml
       TZ: ${TZ:-Europe/Istanbul}
+      # --- deployment plumbing: ports (single source of truth) --------
+      TELEDRIVE_WEB_PORT: ${TELEDRIVE_WEB_PORT:-8080}
+      TELEDRIVE_S3_PORT: ${TELEDRIVE_S3_PORT:-9000}
+      # --- optional per-listener TLS ----------------------------------
+      # Certificates live under the ./config mount (/config/ssl/...) so
+      # they need no extra volume. Each listener is independent:
+      #   WebUI/REST : TELEDRIVE_SSL_CERTFILE / TELEDRIVE_SSL_KEYFILE
+      #   S3 gateway : TELEDRIVE_S3_SSL_CERTFILE / TELEDRIVE_S3_SSL_KEYFILE
+      # A combined .pem (certificate chain + private key) needs only the
+      # CERTFILE variable; a split pair needs both. An empty value keeps
+      # that listener on plain HTTP.
+      TELEDRIVE_SSL_CERTFILE: ${TELEDRIVE_SSL_CERTFILE:-}
+      TELEDRIVE_SSL_KEYFILE: ${TELEDRIVE_SSL_KEYFILE:-}
+      TELEDRIVE_S3_SSL_CERTFILE: ${TELEDRIVE_S3_SSL_CERTFILE:-}
+      TELEDRIVE_S3_SSL_KEYFILE: ${TELEDRIVE_S3_SSL_KEYFILE:-}
+      # Reverse-proxy mode (TLS terminates in front; honor
+      # X-Forwarded-Proto for Secure cookies and generated URLs).
+      TELEDRIVE_TRUSTED_PROXY: ${TELEDRIVE_TRUSTED_PROXY:-}
     # Zombie reaper for the PID 1 python process.
     init: true
     # Clean shutdown budget: Telethon disconnects and the SQLite WAL
@@ -45,7 +66,8 @@ services:
       - ./data:/data              # SQLite DB, auth, logs, scratch (rw)
       - ./uploads:/uploads:ro     # upload source root (read-only)
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5); urllib.request.urlopen('http://127.0.0.1:9000/__health', timeout=5)"]
+      # Env-driven probe: reads the same port/TLS variables the app does.
+      test: ["CMD", "python", "-m", "web.container_healthcheck"]
       interval: 30s
       timeout: 8s
       start_period: 20s

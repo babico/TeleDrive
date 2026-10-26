@@ -127,7 +127,10 @@ _PUBLIC_PREFIXES = (
     "/api/health", "/__health", "/static/", "/login", "/logout",
     "/share/", "/docs", "/redoc", "/openapi.json",
 )
-_PUBLIC_EXACT = {"/", "/login", "/logout", "/favicon.ico"}
+# The public certificate must be fetchable before any client trusts the
+# deployment's TLS, so it cannot require a login (bootstrap deadlock).
+_PUBLIC_EXACT = {"/", "/login", "/logout", "/favicon.ico",
+                 "/server.cer", "/server.crt"}
 
 
 def canonical_permission(method: str, template: str) -> str:

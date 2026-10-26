@@ -47,7 +47,7 @@ The unified server dispatches by its actual socket-local listener port, **not** 
 
 ## 5. WebUI authentication model
 
-- **Cookie-only browser sessions:** the browser UI authenticates exclusively with the httpOnly, SameSite=Lax `teledrive_session` cookie set by `POST /api/v1/auth/login`; no session token is stored in `localStorage` or other browser storage. The cookie carries the `Secure` flag whenever TLS is configured (`web.ssl_certfile`), and sessions expire after seven days.
+- **Cookie-only browser sessions:** the browser UI authenticates exclusively with the httpOnly, SameSite=Lax `teledrive_session` cookie set by `POST /api/v1/auth/login`; no session token is stored in `localStorage` or other browser storage. The cookie carries the `Secure` flag whenever TLS is configured (`TELEDRIVE_SSL_CERTFILE`), and sessions expire after seven days.
 - **Hashed session tokens:** session tokens are persisted only as SHA-256 digests; a database leak does not directly expose usable tokens.
 - **Password hashing:** WebUI passwords are stored as salted PBKDF2-HMAC-SHA256 hashes (260,000 iterations). Legacy salt+SHA-256 hashes still verify and are transparently upgraded to PBKDF2 on the next successful login.
 - **Login throttling:** repeated failed logins (per username and client) are throttled using `web.auth_failure_limit` and `web.auth_failure_window_seconds` (default 5 failures per 300 seconds).

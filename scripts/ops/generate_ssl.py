@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Generate a self-signed TLS certificate for the TeleDrive service.
 
-The unified service serves HTTPS when config/config.yaml sets
-web.ssl_certfile and web.ssl_keyfile. This script creates those files with
-openssl (or Python cryptography as fallback) and can verify a running
-instance over HTTPS with the generated CA certificate.
+The unified service serves HTTPS when the deployment environment sets
+TELEDRIVE_SSL_CERTFILE / TELEDRIVE_SSL_KEYFILE (WebUI/REST) or
+TELEDRIVE_S3_SSL_CERTFILE / TELEDRIVE_S3_SSL_KEYFILE (S3 gateway).
+TLS is ENV-ONLY by owner policy: it is never configured in
+config/config.yaml. This script generates a self-signed pair and prints
+the exact environment lines to add, and can verify a running instance
+over HTTPS with the generated certificate.
+
+Certificates belong under the ./data mount (e.g. /data/tls) so they
+need no extra container volume.
 
 Examples:
-    python scripts/ops/generate_ssl.py --out /config/tls
-    python scripts/ops/generate_ssl.py --out /config/tls \
+    python scripts/ops/generate_ssl.py --out ./data/tls
+    python scripts/ops/generate_ssl.py --out ./data/tls \
         --test https://127.0.0.1:8443 --insecure --days 365
 """
 from __future__ import annotations
@@ -80,10 +86,14 @@ def generate(target: Path, *, days: int, hostname: str) -> dict:
     return {
         "certfile": str(cert),
         "keyfile": str(key),
-        "config_snippet": (
-            "web:\n"
-            f'  ssl_certfile: "{cert}"\n'
-            f'  ssl_keyfile: "{key}"\n'
+        # TLS is env-only: never write certificate paths into config.yaml.
+        "env_snippet": (
+            "# WebUI/REST listener\n"
+            f"TELEDRIVE_SSL_CERTFILE={cert}\n"
+            f"TELEDRIVE_SSL_KEYFILE={key}\n"
+            "# S3 gateway listener (independent pair; same files work)\n"
+            f"TELEDRIVE_S3_SSL_CERTFILE={cert}\n"
+            f"TELEDRIVE_S3_SSL_KEYFILE={key}\n"
         ),
     }
 
@@ -122,9 +132,10 @@ def main() -> int:
         print("TLS material generated:")
         print("  cert:", result["certfile"])
         print("  key: ", result["keyfile"])
-        print("Add to config/config.yaml:")
-        print(result["config_snippet"])
-        print("Then set web.port/web.s3_port as needed and restart the service.")
+        print()
+        print("TLS is ENV-ONLY. Add to the docker-compose environment")
+        print("(or .env), then restart the service:")
+        print(result["env_snippet"])
         return 0
     except Exception as exc:
         print("SSL tool failed: " + type(exc).__name__ + ": " + str(exc),

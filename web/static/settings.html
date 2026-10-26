@@ -139,6 +139,16 @@ tailwind.config = {
     <p class="muted text-xs">The upload routing strategy and Telegram accounts are managed on the Storage page.</p>
   </div>
 
+  <div class="card">
+    <h3>TLS certificate</h3>
+    <p class="muted">Clients must trust this deployment's certificate before TLS works. Download it and import it into the client's trust store (Windows: double-click the <code>.cer</code> → <em>Install Certificate</em> → <em>Local Machine</em> → <em>Trusted Root Certification Authorities</em>). Only the public certificate is served — never the private key.</p>
+    <div class="row mt-3">
+      <a class="btn" href="/server.cer" download>Download certificate (.cer / DER)</a>
+      <a class="btn btn-ghost" href="/server.crt" download>Download PEM chain (.crt)</a>
+    </div>
+    <p class="muted text-xs mt-2">TLS is configured with container environment variables (certificate and key paths), not in this form. 404 means no listener currently terminates TLS.</p>
+  </div>
+
   <div class="flex gap-3">
     <button class="btn btn-primary" x-show="isAdmin" @click="saveSettings()">Save settings</button>
   </div>

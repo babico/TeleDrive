@@ -836,12 +836,28 @@ def test_explicit_dependencies_and_isolated_docker_build_contexts():
     service = prod_compose["services"]["teledrive"]
     assert "profiles" not in service
     assert len(service["ports"]) == 2
-    assert any(":8080" in entry for entry in service["ports"])
-    assert any(":9000" in entry for entry in service["ports"])
-    assert service["environment"] == {
-        "TELEDRIVE_CONFIG": "/config/config.yaml",
-        "TZ": "${TZ:-Europe/Istanbul}",
-    }
+    # Ports and TLS are ENV-ONLY deployment plumbing: one variable drives
+    # both the host mapping and the in-container listener, and the same
+    # value is passed to the service via `environment:`.
+    for entry, var in ((service["ports"][0], "TELEDRIVE_WEB_PORT"),
+                       (service["ports"][1], "TELEDRIVE_S3_PORT")):
+        assert f"${{{var}:-" in entry, entry
+        assert entry.count(f"${{{var}:-") == 2, (
+            "host side and container side must use the same variable", entry)
+    env = service["environment"]
+    assert env["TELEDRIVE_CONFIG"] == "/config/config.yaml"
+    assert env["TZ"] == "${TZ:-Europe/Istanbul}"
+    for var, default in (("TELEDRIVE_WEB_PORT", "8080"),
+                         ("TELEDRIVE_S3_PORT", "9000")):
+        assert env[var] == f"${{{var}:-{default}}}", env.get(var)
+    for var in ("TELEDRIVE_SSL_CERTFILE", "TELEDRIVE_SSL_KEYFILE",
+                "TELEDRIVE_S3_SSL_CERTFILE", "TELEDRIVE_S3_SSL_KEYFILE"):
+        assert var in env, var
+    # No application setting for listeners: config.example must not
+    # advertise ports or TLS paths that compose now owns.
+    example = (ROOT / "config.example.yaml").read_text("utf-8")
+    assert "s3_port:" not in example
+    assert "ssl_certfile:" not in example
     assert service.get("healthcheck", {}).get("test")
     assert service.get("logging", {}).get("driver") == "json-file"
     assert "web.unified" in (ROOT / "Dockerfile").read_text("utf-8")

@@ -1490,6 +1490,48 @@ def login_page():
     return FileResponse(STATIC_DIR / "login.html")
 
 
+# --- public certificate distribution -----------------------------------
+# A self-signed deployment needs a way for clients (browsers, S3 Browser,
+# rclone, Windows trust store) to obtain the certificate they must trust.
+# /server.cer is DER (what Windows imports), /server.crt is the PEM chain.
+# Only certificate blocks are emitted — a combined .pem's private key is
+# stripped by web.certs. Both are unauthenticated: a certificate is public
+# data, and requiring a login over the very TLS connection being
+# bootstrapped would be a deadlock.
+#
+# Declared BEFORE the /{page_name} catch-all, which would otherwise shadow
+# these paths and redirect them to /login.
+
+
+@app.get("/server.cer", include_in_schema=False)
+@app.get("/api/v1/certificate.cer", tags=["System"],
+         summary="Public TLS certificate (DER/.cer, unauthenticated)")
+def public_certificate_der():
+    from web import certs
+    try:
+        payload = certs.public_cert_der()
+    except certs.CertError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(content=payload,
+                    media_type="application/pkix-cert",
+                    headers={"Content-Disposition":
+                             'attachment; filename="teledrive.cer"'})
+
+
+@app.get("/server.crt", include_in_schema=False)
+@app.get("/api/v1/certificate.pem", tags=["System"],
+         summary="Public TLS certificate (PEM chain, unauthenticated)")
+def public_certificate_pem():
+    from web import certs
+    try:
+        payload = certs.public_cert_pem()
+    except certs.CertError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(content=payload,
+                    media_type="application/x-pem-file",
+                    headers={"Content-Disposition":
+                             'attachment; filename="teledrive.crt"'})
+
 @app.get("/{page_name}", include_in_schema=False)
 def page_route(page_name: str, request: Request):
     if page_name in {"api", "static", "openapi.json", "docs", "redoc",
@@ -3289,6 +3331,65 @@ def admin_put_bucket_cors(bucket: str, request: Request,
     return {"ok": True, "rules": len(rules)}
 
 
+def _public_s3_origin(request: Request) -> str:
+    """Public base URL of the S3 listener, for presigned links.
+
+    Works in every supported deployment shape, independently:
+
+    * direct mode — the app terminates TLS on the S3 listener (scheme from
+      TELEDRIVE_S3_SSL_CERTFILE), or serves plain HTTP;
+    * reverse-proxy mode — TLS terminates in front (TRUSTED_PROXY honors
+      X-Forwarded-Proto/Host/Port), or the proxy is plain HTTP;
+    * both at once — an HTTPS proxy in front of an app that also speaks
+      HTTPS.
+
+    In proxy mode the client-facing host/port come from the forwarded
+    headers; in direct mode from the Host header plus the S3 listener
+    port, with the default port of the scheme elided.
+    """
+    forwarded = False
+    if TRUSTED_PROXY:
+        forwarded = request.headers.get(
+            "x-forwarded-proto", "").lower() == "https"
+    scheme = "https" if (S3_SSL_CERTFILE or forwarded) else "http"
+
+    host = ""
+    if TRUSTED_PROXY:
+        host = (request.headers.get("x-forwarded-host") or "").strip()
+    host = host or (request.headers.get("host") or "").strip()
+    host = host.split("/")[0].strip()
+    if not host:
+        host = "localhost"
+
+    # Split host / port, tolerating bracketed IPv6 literals. In DIRECT mode
+    # any port on the Host header is the WebUI's (the admin calls this from
+    # the UI), so it is discarded and the S3 listener port is used. In
+    # proxy mode the forwarded host's port IS the public S3 port.
+    port: int | None = None
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            bracket, tail = host[:end + 1], host[end + 1:]
+            if tail.startswith(":"):
+                host, port = bracket, int(tail[1:] or 0) or None
+    elif host.count(":") == 1:
+        name, _, raw_port = host.partition(":")
+        host, port = name, int(raw_port or 0) or None
+    if not TRUSTED_PROXY:
+        port = None
+
+    if port is None:
+        if TRUSTED_PROXY:
+            raw_port = request.headers.get("x-forwarded-port", "")
+            port = int(raw_port) if raw_port.isdigit() else None
+        if port is None:
+            port = settings_s3_port()
+
+    if (scheme, port) in (("https", 443), ("http", 80)):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
 @app.post("/api/v1/admin/storage/buckets/{bucket}/presign",
           tags=["Object catalog"],
           summary="Create a presigned GET URL for one object")
@@ -3327,10 +3428,8 @@ def admin_presign_object(bucket: str, request: Request,
             raise HTTPException(422, str(exc)) from exc
     finally:
         conn.close()
-    host = (request.headers.get("host") or "").split(":")[0]
-    scheme = "https" if S3_SSL_CERTFILE else "http"
     from teledrive.s3.sigv4 import presign_get_url
-    url = presign_get_url(f"{scheme}://{host}:{settings_s3_port()}",
+    url = presign_get_url(_public_s3_origin(request),
                           bucket, key, revealed["access_key"],
                           revealed["secret_key"], expires)
     _log(f"presigned URL issued: bucket={bucket} key={key} "
@@ -5029,3 +5128,4 @@ async def public_share_post(token: str, request: Request):
 @app.get("/api/health", tags=["System"], response_model=OKResponse, summary="Liveness health check (unauthenticated)")
 def health():
     return {"ok": True}
+

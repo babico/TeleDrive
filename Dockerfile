@@ -26,7 +26,13 @@ RUN mkdir -p /config /data/sessions /data/auth /data/tmp /uploads \
 USER 10001:10001
 
 EXPOSE 8080 9000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3); urllib.request.urlopen('http://127.0.0.1:9000/__health', timeout=3)" || exit 1
+# Both listeners are env-driven (TELEDRIVE_WEB_PORT / TELEDRIVE_S3_PORT
+# and their TLS variables), so the probe reads the same environment the
+# service does instead of hardcoding ports that compose may have remapped.
+HEALTHCHECK --interval=30s --timeout=8s --start-period=20s --retries=5 \
+  CMD ["python", "-m", "web.container_healthcheck"]
 
-CMD ["python","-m","web.unified","--host","0.0.0.0","--web-port","8080","--s3-port","9000"]
+# No --web-port/--s3-port/--host flags: web.unified derives every listener
+# setting from the environment (docker-compose `environment:`), which is
+# the single source of truth for deployment plumbing.
+CMD ["python","-m","web.unified"]

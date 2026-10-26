@@ -159,7 +159,8 @@ def test_malformed_xml_entity_attack_bad_digest_preserve_previous_config(service
         config_xml(origins=["https://a.example.com/path"]),
         config_xml(methods=["TRACE"]),
         config_xml(origins=["https://*.example.com.evil.test:bad"]),
-        config_xml(max_age=100000),
+        config_xml(origins=["https://*.*.example.com"]),
+        config_xml(max_age=-1),
     ]:
         rejected = signed(service, "PUT", path, malformed)
         assert rejected.status_code == 400, (malformed[:100], rejected.text)
@@ -282,3 +283,78 @@ def test_preflight_rejects_header_abuse_and_does_not_authenticate_uploads(servic
                         headers={"Origin": "https://client.example.net"})
     assert direct.status_code == 403
     assert before == transport.uploads
+
+
+def test_cors_grammar_widening_mid_label_wildcard_and_long_max_age(service):
+    """Phase H: AWS allows one '*' anywhere in the host, not only a
+    leading '*.'; MaxAgeSeconds has no documented 24-hour ceiling."""
+    assert signed(service, "PUT", "/cors-bucket").status_code == 200
+    body = (
+        b"<CORSConfiguration><CORSRule>"
+        b"<AllowedOrigin>https://api-*.example.com</AllowedOrigin>"
+        b"<AllowedMethod>GET</AllowedMethod><AllowedMethod>PUT</AllowedMethod>"
+        b"<AllowedMethod>POST</AllowedMethod><AllowedMethod>DELETE</AllowedMethod>"
+        b"<AllowedMethod>HEAD</AllowedMethod>"
+        b"<AllowedHeader>x-amz-*</AllowedHeader>"
+        b"<ExposeHeader>x-amz-request-id</ExposeHeader>"
+        b"<ExposeHeader>ETag</ExposeHeader>"
+        b"<MaxAgeSeconds>604800</MaxAgeSeconds>"
+        b"</CORSRule></CORSConfiguration>")
+    put = signed(service, "PUT", "/cors-bucket?cors", body)
+    assert put.status_code == 200, put.text
+
+    # The full method set round-trips.
+    read = signed(service, "GET", "/cors-bucket?cors")
+    root = ET.fromstring(read.content)
+    methods = [e.text for e in root.iter() if e.tag.endswith("AllowedMethod")]
+    assert set(methods) == {"GET", "PUT", "POST", "DELETE", "HEAD"}
+
+    # Preflight from a mid-label wildcard origin is allowed, and the
+    # long max-age is echoed rather than clamped.
+    preflight = signed(service, "OPTIONS", "/cors-bucket/object.bin",
+                       extra_headers={
+                           "Origin": "https://api-7.example.com",
+                           "Access-Control-Request-Method": "PUT",
+                           "Access-Control-Request-Headers": "x-amz-date",
+                       })
+    assert preflight.status_code == 200, preflight.text
+    assert preflight.headers["access-control-allow-origin"] == \
+        "https://api-7.example.com"
+    assert preflight.headers["access-control-max-age"] == "604800"
+    # Preflight advertises allow-* only; ExposeHeader appears on the
+    # actual cross-origin response.
+    assert "access-control-expose-headers" not in preflight.headers
+
+    # A lookalike that appends the pattern domain is never matched.
+    denied = signed(service, "OPTIONS", "/cors-bucket/object.bin",
+                    extra_headers={
+                        "Origin": "https://api-7.example.com.evil.test",
+                        "Access-Control-Request-Method": "PUT",
+                    })
+    assert "access-control-allow-origin" not in denied.headers
+
+
+def test_cors_wildcard_stays_single_label(service):
+    """A '*' matches exactly one DNS label — never a dot or a scheme."""
+    assert signed(service, "PUT", "/cors-bucket").status_code == 200
+    body = (b"<CORSConfiguration><CORSRule>"
+            b"<AllowedOrigin>https://*.example.com</AllowedOrigin>"
+            b"<AllowedMethod>GET</AllowedMethod></CORSRule>"
+            b"</CORSConfiguration>")
+    assert signed(service, "PUT", "/cors-bucket?cors", body).status_code == 200
+    for origin in ("https://a.b.example.com", "http://x.example.com",
+                   "https://example.com"):
+        reply = signed(service, "OPTIONS", "/cors-bucket/object.bin",
+                       extra_headers={"Origin": origin,
+                                      "Access-Control-Request-Method": "GET"})
+        assert "access-control-allow-origin" not in reply.headers, origin
+
+
+def test_cors_rejects_multiple_wildcards(service):
+    assert signed(service, "PUT", "/cors-bucket").status_code == 200
+    body = (b"<CORSConfiguration><CORSRule>"
+            b"<AllowedOrigin>https://*.*.example.com</AllowedOrigin>"
+            b"<AllowedMethod>GET</AllowedMethod></CORSRule>"
+            b"</CORSConfiguration>")
+    reply = signed(service, "PUT", "/cors-bucket?cors", body)
+    assert reply.status_code == 400, reply.text

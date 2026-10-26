@@ -175,9 +175,9 @@ repair). Map the S3 API onto it:
 - Destination is a TeleDrive account, not an AWS bucket ARN —
   documented in the response as a TeleDrive-specific Role string.
 
-## Phase H — CORS grammar widening 
+## Phase H — CORS grammar widening — DONE
 
-**Converts:** Get/PutBucketCors — 2 partials.
+**Converted:** GetBucketCors, PutBucketCors — 2 operations promoted.
 
 - Accept wildcard-subdomain origins (`https://*.example.com`),
   expose-headers, max-age, and the full method list; keep the

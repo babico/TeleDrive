@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from urllib.parse import urlsplit
 from xml.etree import ElementTree as ET
 
@@ -38,7 +39,18 @@ def _name(node) -> str:
     return node.tag.rsplit("}", 1)[-1]
 
 
+MAX_MAX_AGE_SECONDS = 2_147_483_647
+
+
 def _origin_pattern(value: str) -> str:
+    """Validate one AllowedOrigin entry.
+
+    AWS permits a single ``*`` anywhere in the host (``*.example.com`` or
+    ``api-*.example.com``), never in the scheme or port, plus the literal
+    ``*`` origin. The wildcard always matches exactly one DNS label, so a
+    pattern can never be widened into a different registrable domain when
+    echoed back as Access-Control-Allow-Origin.
+    """
     if value == "*":
         return value
     if not isinstance(value, str) or len(value) > 256:
@@ -49,7 +61,15 @@ def _origin_pattern(value: str) -> str:
             or parsed.fragment or parsed.netloc.endswith(":")):
         raise CORSError("InvalidRequest", "CORS origins must be HTTP(S) origins")
     host = parsed.hostname
-    if "*" in host and (host.count("*") != 1 or not host.startswith("*.")):
+    # A wildcard in the scheme or port is not an origin wildcard.
+    remainder = parsed.netloc
+    if host:
+        remainder = remainder.replace(host, "", 1)
+    if "*" in remainder:
+        raise CORSError("InvalidRequest", "Unsupported wildcard origin pattern")
+    if host.count("*") > 1:
+        raise CORSError("InvalidRequest", "Unsupported wildcard origin pattern")
+    if "*" in host and len(host) < 3:
         raise CORSError("InvalidRequest", "Unsupported wildcard origin pattern")
     if re.search(r"[^a-zA-Z0-9.*-]", host) and ":" not in host:
         raise CORSError("InvalidRequest", "Invalid CORS host")
@@ -107,8 +127,8 @@ def parse_cors_xml(payload: bytes) -> list[dict]:
             maximum = int(fields["MaxAgeSeconds"][0]) if fields["MaxAgeSeconds"] else 0
         except ValueError as exc:
             raise CORSError("InvalidRequest", "Invalid MaxAgeSeconds") from exc
-        if not 0 <= maximum <= 86400:
-            raise CORSError("InvalidRequest", "MaxAgeSeconds exceeds 24 hours")
+        if not 0 <= maximum <= MAX_MAX_AGE_SECONDS:
+            raise CORSError("InvalidRequest", "Invalid MaxAgeSeconds")
         rule_id = fields["ID"][0] if fields["ID"] else None
         if rule_id is not None and len(rule_id.encode("utf-8")) > 255:
             raise CORSError("InvalidRequest", "CORS rule ID too long")
@@ -141,6 +161,25 @@ def cors_xml(rules: list[dict]) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+@lru_cache(maxsize=1024)
+def _origin_regex(pattern: str) -> re.Pattern[str]:
+    """Compile one origin pattern, cached for the process lifetime.
+
+    ``*`` matches exactly one DNS label: never a dot, slash or colon, so
+    ``https://*.example.com`` cannot match ``a.b.example.com`` or
+    ``example.com.evil.test``.
+    """
+    return re.compile(
+        "^" + re.escape(pattern).replace(r"\*", r"[^./:]+") + "$")
+
+
+@lru_cache(maxsize=1024)
+def _header_regex(pattern: str) -> re.Pattern[str]:
+    """Compile an AllowedHeader/ExposeHeader glob (``x-amz-*``)."""
+    return re.compile(
+        "^" + re.escape(pattern).replace(r"\*", ".*") + "$", re.IGNORECASE)
+
+
 def _origin_matches(pattern: str, origin: str) -> bool:
     if not origin or len(origin) > 256 or any(ord(c) < 33 for c in origin):
         return False
@@ -150,12 +189,9 @@ def _origin_matches(pattern: str, origin: str) -> bool:
         return False
     if pattern == "*":
         return True
-    if "*" not in pattern:
-        return origin == pattern
-    # Match a single label at *.example.org; never echo untrusted wildcard
-    # patterns as literal Access-Control-Allow-Origin values.
-    regex = "^" + re.escape(pattern).replace(r"\*", r"[^./:]+") + "$"
-    return bool(re.fullmatch(regex, origin))
+    # Never echo an untrusted wildcard pattern as a literal
+    # Access-Control-Allow-Origin value: only a full match passes.
+    return bool(_origin_regex(pattern).fullmatch(origin))
 
 
 def matching_rule(rules: list[dict], origin: str, method: str,
@@ -166,11 +202,10 @@ def matching_rule(rules: list[dict], origin: str, method: str,
             _origin_matches(pattern, origin) for pattern in rule["origins"]
         ):
             continue
-        allowed = [header.lower() for header in rule["allowed_headers"]]
-        if not all(any(
-            re.fullmatch("^" + re.escape(pattern).replace(r"\*", ".*") + "$", name.lower())
-            for pattern in allowed
-        ) for name in requested_headers):
+        allowed = rule["allowed_headers"]
+        if not all(any(_header_regex(pattern).fullmatch(name)
+                       for pattern in allowed)
+                   for name in requested_headers):
             continue
         return rule
     return None

@@ -482,8 +482,17 @@ dependency order, each independently shippable; A and B first.
 - [ ] **Phase G — replication API surface**: per-bucket replication
       configs driving the EXISTING engine replication; repair becomes
       AWS-shaped reconciliation. Converts 1 + promotes writes.
-- [ ] **Phase H — CORS grammar widening**: wildcard subdomain origins,
-      expose-headers, full method list, compiled patterns. Converts 2.
+- [x] **Phase H — CORS grammar widening** (commit pending): one `*`
+      anywhere in the host (`*.example.com`, `api-*.example.com`)
+      matching exactly one DNS label — never a dot, slash or scheme, so
+      a lookalike suffix can never be echoed; the complete method set
+      (GET/HEAD/PUT/POST/DELETE), AllowedHeader/ExposeHeader globs, and
+      MaxAgeSeconds with the artificial 24-hour ceiling removed (AWS
+      documents none). Origin and header patterns are compiled once and
+      LRU-cached instead of rebuilt per preflight. CORS remains browser
+      policy only, never authentication. 2 operations promoted.
+      Inventory: **45 supported / 16 partial (0 by code) / 55
+      unsupported**.
 - [ ] **Phase I — website hosting**: per-bucket website configs behind
       an explicit audited public_read flag; /site/{bucket} route.
       Converts 1 + promotes writes.
@@ -512,32 +521,27 @@ dependency order, each independently shippable; A and B first.
       and a one-line summary next to every method+path row. The
       catalog is restricted to the JSON API surface (HTML pages are
       session views, not permissionable endpoints).
-- [ ] **Triage and land the open GitHub PRs.** Three PRs are open
-      against main, all branched from OLDER main states than the
-      current 71f3590 (per-route permissions, physical GC, S3 gap
-      closures) — expect conflicts and stale assumptions:
-      - **#25** "fix(gc/security): restore CI gate and reconcile
-        Telethon-only operational docs" — touches the GC/security
-        surface that has since been massively rewritten (gc_collect
-        module, GC UI toggle); review diff-by-diff against current
-        main, reimplement anything still valid on top of the new GC
-        code, close the rest as superseded.
-      - **#24** "docs(ci): count six automatic workflows plus manual
-        endurance correctly" — docs-only CI workflow counting; verify
-        the counts still hold after the quality-security.yml test
-        registrations added since, then merge or redo inline.
-      - **#22** "fix(ci/docs): verify Telethon storage roadmap and
-        repair config-only job regression" — the config-owned job
-        source regression was ALREADY fixed on main in 8c40325
-        (squash-merged as PR #23); check what remains (Telethon
-        roadmap docs), port or close as duplicate.
-      Process per PR: diff against current main → classify
-      (still-valid / superseded / wrong) → reimplement valid parts on
-      a fresh branch → all mandatory checks green on that exact SHA
-      (release rule 11) → squash-merge; close superseded ones with a
-      comment pointing at the main commit that superseded them.
-      Do NOT blind-merge: the GC and permission surfaces moved under
-      them.
+- [x] **Triage and land the open GitHub PRs** DONE (2026-10-26).
+      All three were branched from older main states and **all three
+      are closed as superseded**, with comments pointing at the main
+      commits that carry their intent — nothing unique was lost and no
+      stale surface was re-merged:
+      - **#25** — its gc_collect.py change (static SQL instead of an
+        interpolated `base` predicate) is already on main in a stronger
+        form (`288520e`: fully static statements + `# nosec B608` with
+        justification at each site, CI 1 Bandit green). The doc
+        reconciliation landed as `398de8b`.
+      - **#24** — the six-automatic-workflows wording was applied
+        directly on main as `398de8b` (README, CI guide, TODO,
+        IMPLEMENTATION_STATUS) with the audit pointer refreshed to
+        `9c4769d`.
+      - **#22** — `is_connected()` is already synchronous in main, the
+        config-driven job-root test semantics (403/503/422) are already
+        asserted against `webapp.JOB_SOURCE_ROOT`, and its verification
+        report carried stale SHAs and stale S3 counts. The doc count
+        correction it also carried is in `398de8b`.
+      Decision rule applied: **preserve the newest main**, never
+      blind-merge a branch that predates five metadata-parity phases.
 
 - [x] **Unified per-endpoint permissions for EVERY API route** DONE.
       The permission registry is derived from the live FastAPI route

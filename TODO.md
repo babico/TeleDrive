@@ -541,6 +541,17 @@ dependency order, each independently shippable; A and B first.
       version revocation, physical GC collection and bucket deletion.
       3 operations promoted. Inventory: **57 supported / 9 partial (0 by
       code) / 50 unsupported**.
+- [ ] **Full S3 coverage plan (56 kalan operasyon)** — see
+      [S3_FULL_COVERAGE_PLAN.md](docs/S3_FULL_COVERAGE_PLAN.md).
+      Every remaining operation has a concrete honest backing; only 4 are
+      permanently impossible (BitTorrent swarm, S3 Express directory
+      buckets, Object Lambda). Target: **112 supported / 0 partial / 4
+      unsupported**. Phases: L policy engine (8 op, ~6d), M SSE-C/SSE-S3
+      (8 op, ~8d), N reporting configs + real report generation (16 op,
+      ~9d), O easy real wins incl. annotations, metadata journal, atomic
+      rename, S3 Select, RestoreObject and the only-real-state
+      RequestPayment/Accelerate (20 op, ~9d). Recommended order by
+      value/effort: O2+O6 → L → N1-3 → M → O3 → N5+O1 → O4+O5+N4.
 - [ ] **Phase K — SSE envelope** (owner decision, conflicts with
       dedup/replication/search). Converts 1.
 - Kept by-design forever: RequestPayment, Accelerate — no honest

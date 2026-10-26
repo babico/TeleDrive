@@ -41,7 +41,10 @@ buckets = Table(
     # Phase E: public access block (four booleans stored as JSON,
     # default all-true like AWS) and the persisted object ownership
     # model (BucketOwnerEnforced — the one real model here).
-    Column("public_access_block", Text, nullable=False,
+    # VARCHAR rather than TEXT: MySQL rejects DEFAULT on TEXT/BLOB
+    # columns, and this column carries a real server default. The JSON
+    # payload is ~120 characters, so 512 is ample.
+    Column("public_access_block", String(512), nullable=False,
            server_default='{"BlockPublicAcls": true, '
            '"IgnorePublicAcls": true, "BlockPublicPolicy": true, '
            '"RestrictPublicBuckets": true}'),
@@ -109,11 +112,20 @@ def ensure_versioning_column(db) -> None:
         if sqlite:
             return {row[1] for row in db.connection.execute(_text(
                 f"PRAGMA table_info({table})"))}
+        # Filter by the CURRENT schema/database: an unfiltered
+        # information_schema lookup sees same-named tables in every
+        # database on the server, which silently skips the ALTER when
+        # another database already has the newer column set.
+        if db.engine.dialect.name == "mysql":
+            schema = "DATABASE()"
+        else:
+            schema = "current_schema()"
         return {row[0] for row in db.connection.execute(_text(
             "SELECT column_name FROM information_schema.columns "
             # nosec B608 — `table` is a hardcoded internal table name
-            # (storage_buckets/storage_objects), never user input.
-            f"WHERE table_name = '{table}'"))}
+            # (storage_buckets/storage_objects), never user input; the
+            # schema expression is a fixed dialect literal.
+            f"WHERE table_name = '{table}' AND table_schema = {schema}"))}
 
     bucket_columns = columns_of("storage_buckets")
     if bucket_columns and "versioning_state" not in bucket_columns:
@@ -137,9 +149,10 @@ def ensure_versioning_column(db) -> None:
             "object_lock_default_days INTEGER"))
         db.commit()
     if bucket_columns and "public_access_block" not in bucket_columns:
+        # VARCHAR, not TEXT: MySQL cannot DEFAULT a TEXT column.
         db.connection.execute(_text(
             "ALTER TABLE storage_buckets ADD COLUMN public_access_block "
-            "TEXT NOT NULL DEFAULT "
+            "VARCHAR(512) NOT NULL DEFAULT "
             "'{\"BlockPublicAcls\": true, \"IgnorePublicAcls\": true, "
             "\"BlockPublicPolicy\": true, \"RestrictPublicBuckets\": true}'"
         ))

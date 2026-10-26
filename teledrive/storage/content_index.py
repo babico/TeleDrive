@@ -57,8 +57,13 @@ def extract_text(path: Path, key: str) -> str | None:
 def ensure_content_search(database) -> None:
     """Create the dialect-specific FTS structures (idempotent)."""
     engine = database.engine
+    backend = engine.url.get_backend_name()
+    if backend not in ("sqlite", "postgresql"):
+        # MySQL and other backends have no tsvector/GIN; content search
+        # stays a PostgreSQL/SQLite accelerator rather than an error.
+        return
     try:
-        if engine.url.get_backend_name() == "sqlite":
+        if backend == "sqlite":
             with engine.begin() as connection:
                 connection.exec_driver_sql(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS object_content_fts "

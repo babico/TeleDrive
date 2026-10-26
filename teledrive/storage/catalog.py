@@ -124,7 +124,7 @@ def ensure_versioning_column(db) -> None:
     if bucket_columns and "object_lock_enabled" not in bucket_columns:
         db.connection.execute(_text(
             "ALTER TABLE storage_buckets ADD COLUMN object_lock_enabled "
-            "BOOLEAN NOT NULL DEFAULT 0"))
+            "BOOLEAN NOT NULL DEFAULT false"))
         db.commit()
     if bucket_columns and "object_lock_default_mode" not in bucket_columns:
         db.connection.execute(_text(
@@ -158,7 +158,7 @@ def ensure_versioning_column(db) -> None:
     if object_columns and "legal_hold" not in object_columns:
         db.connection.execute(_text(
             "ALTER TABLE storage_objects ADD COLUMN legal_hold "
-            "BOOLEAN NOT NULL DEFAULT 0"))
+            "BOOLEAN NOT NULL DEFAULT false"))
         db.commit()
     if object_columns and "retention_mode" not in object_columns:
         db.connection.execute(_text(

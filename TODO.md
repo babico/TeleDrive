@@ -476,9 +476,23 @@ dependency order, each independently shippable; A and B first.
       persisted ownership state from bucket metadata; ownership
       writes fail closed 501. 4 operations promoted. Inventory: **43
       supported / 18 partial (0 by code) / 55 unsupported**.
-- [ ] **Phase F — notifications + logging**: config tables +
-      transactional event outbox + retry worker; audit-log delivery
-      into a target bucket. Converts 2 + promotes writes.
+- [x] **Phase F — notifications + logging** (commit pending): real
+      per-bucket webhook notification config (SQL, encrypted secret,
+      owner-approved HTTP(S) destinations only — SQS/SNS/Lambda return an
+      honest 501) and a transactional event outbox written in the SAME
+      SQL transaction as every covered mutation (publish, copy, form
+      upload, multipart complete/abort, delete marker, version
+      revocation). A scheduler loop delivers with exponential backoff,
+      bounded attempts and an HMAC signature. Event vocabulary:
+      ObjectCreated:{Put,Copy,CompleteMultipartUpload,Post} and
+      ObjectRemoved:{Delete,DeleteMarkerCreated} plus their wildcards.
+      Get/PutBucketLogging store and return the real target (bucket +
+      prefix); delivering audit-log OBJECTS into the target bucket is an
+      explicit documented gap, not claimed. DDL runs at startup and in
+      the store constructor only — issuing it inside the mutation hot
+      path deadlocked SQLite against the caller's write lock. 6
+      operations promoted. Inventory: **54 supported / 12 partial (0 by
+      code) / 50 unsupported**.
 - [x] **Phase G — replication API surface** (commit pending): real
       per-bucket replication config mapped onto the EXISTING
       storage-engine cross-account replication — `Destination/Bucket`

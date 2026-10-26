@@ -142,10 +142,11 @@ On top of Phase D's grant store:
 - OwnershipControls stays BucketOwnerEnforced — that IS the real
   model — but now reads from bucket metadata rather than a constant.
 
-## Phase F — Notifications and logging 
+## Phase F — Notifications and logging — DONE
 
-**Converts:** GetBucketNotification(Configuration) — 2 partials;
-promotes the write ops.
+**Converted:** GetBucketNotification, GetBucketNotificationConfiguration,
+GetBucketLogging + PutBucketNotification, PutBucketNotificationConfiguration,
+PutBucketLogging — 6 operations promoted.
 
 - `storage_notification_configs` (bucket, event list, destination
   URL, secret ref) + `storage_event_outbox` (event type, bucket, key,

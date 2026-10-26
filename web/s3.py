@@ -57,6 +57,11 @@ from teledrive.s3.lifecycle import (LifecycleError, MAX_XML as MAX_LIFECYCLE_XML
 from teledrive.s3.replication import (ReplicationError,
     MAX_REPLICATION_XML_BYTES, BucketReplicationStore,
     parse_replication_xml, replication_xml)
+from teledrive.s3.notifications import (
+    NotificationError, NotificationStore, MAX_NOTIFICATION_XML_BYTES,
+    MAX_LOGGING_XML_BYTES, approved_destinations, destination_is_approved,
+    logging_xml, notification_xml, parse_logging_xml, parse_notification_xml,
+)
 from teledrive.s3.object_metadata import (
     ObjectMetadataStore, ObjectMetadataError, parse_object_metadata, signed_header_names,
     STANDARD_HEADERS,
@@ -720,6 +725,8 @@ class _S3RequestContext:
     is_bucket_lifecycle: bool = False
     is_bucket_policy_status: bool = False
     is_bucket_replication: bool = False
+    is_bucket_notification: bool = False
+    is_bucket_logging: bool = False
 
 
 async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
@@ -936,6 +943,18 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
                     media_type="application/xml", status_code=200)
 
 
+def _notification_allowlist() -> tuple[str, ...]:
+    """Owner-approved webhook destinations (storage.notification_destinations)."""
+    raw = os.environ.get("TELEDRIVE_NOTIFICATION_DESTINATIONS", "")
+    try:
+        storage = getattr(_webapp.effective_config(), "storage", None)
+        if isinstance(storage, dict) and storage.get("notification_destinations"):
+            raw = str(storage["notification_destinations"])
+    except Exception:
+        pass
+    return approved_destinations(raw)
+
+
 async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
     """Bucket control subresources: policy status, lifecycle, public access
     block, versioning, CORS and tagging. Returns None when the request does
@@ -959,6 +978,62 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
         return Response(
             _xml("PolicyStatus", [("IsPublic", "true" if is_public else "false")]),
             media_type="application/xml")
+    if ctx.is_bucket_notification:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = NotificationStore(catalog, master_key=ctx.master)
+        if request.method == "GET":
+            return Response(notification_xml(store.get_config(bucket)),
+                            media_type="application/xml")
+        if request.method == "PUT":
+            body = bytearray()
+            async for block in request.stream():
+                body.extend(block)
+                if len(body) > MAX_NOTIFICATION_XML_BYTES:
+                    raise NotificationError(
+                        "MalformedXML", "Notification XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(body))
+            config = parse_notification_xml(bytes(body))
+            if config is not None and not destination_is_approved(
+                    config["destination"], _notification_allowlist()):
+                raise NotificationError(
+                    "AccessDenied",
+                    "Webhook destination is not in the owner-approved "
+                    "notification allowlist (storage.notification_destinations)",
+                    403,
+                )
+            store.replace_config(bucket, config)
+            return Response(status_code=200)
+        return _error(
+            "NotImplemented",
+            "DeleteBucketNotificationConfiguration is not an S3 operation; "
+            "PUT an empty NotificationConfiguration to disable events", 501)
+    if ctx.is_bucket_logging:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = NotificationStore(catalog, master_key=ctx.master)
+        if request.method == "GET":
+            return Response(logging_xml(store.get_logging(bucket)),
+                            media_type="application/xml")
+        if request.method == "PUT":
+            body = bytearray()
+            async for block in request.stream():
+                body.extend(block)
+                if len(body) > MAX_LOGGING_XML_BYTES:
+                    raise NotificationError(
+                        "MalformedXML", "Logging XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(body))
+            config = parse_logging_xml(bytes(body))
+            if (config is not None
+                    and config["target_bucket"] not in catalog.list_buckets()):
+                raise NotificationError(
+                    "InvalidTargetBucketForLogging",
+                    "The logging target bucket does not exist", 400)
+            store.replace_logging(bucket, config)
+            return Response(status_code=200)
+        return _error(
+            "NotImplemented",
+            "Put an empty BucketLoggingStatus to disable access logging", 501)
     if ctx.is_bucket_lifecycle:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket not found", 404)
@@ -3040,6 +3115,12 @@ async def _handle(request: Request):
         is_bucket_lifecycle = bool(bucket and not separator and "lifecycle" in request.query_params)
         is_bucket_policy_status = bool(bucket and not separator and "policyStatus" in request.query_params)
         is_bucket_replication = bool(bucket and not separator and "replication" in request.query_params)
+        is_bucket_notification = bool(
+            bucket and not separator
+            and ("notification" in request.query_params
+                 or "notificationConfiguration" in request.query_params))
+        is_bucket_logging = bool(
+            bucket and not separator and "logging" in request.query_params)
         compat_bucket_read = None
         if bucket and not separator and request.method == "GET":
             compat_bucket_read = next(
@@ -3084,7 +3165,13 @@ async def _handle(request: Request):
             return _error("NotImplemented", "Tagging with multipart selectors unsupported", 501)
         if is_bucket_tagging and "versionId" in request.query_params:
             return _error("NotImplemented", "Bucket tags cannot select object versions", 501)
-        if compat_bucket_read is not None:
+        if is_bucket_notification:
+            action = {"GET": "s3:GetBucketNotification",
+                      "PUT": "s3:PutBucketNotification"}.get(request.method)
+        elif is_bucket_logging:
+            action = {"GET": "s3:GetBucketLogging",
+                      "PUT": "s3:PutBucketLogging"}.get(request.method)
+        elif compat_bucket_read is not None:
             action = _COMPAT_BUCKET_READS[compat_bucket_read]
         elif compat_object_read is not None:
             action = _COMPAT_OBJECT_READS[compat_object_read]
@@ -3203,6 +3290,12 @@ async def _handle(request: Request):
             active_compat = "object-lock"
         elif is_bucket_replication:
             active_compat = "replication"
+        elif is_bucket_notification:
+            active_compat = ("notificationConfiguration"
+                             if "notificationConfiguration" in request.query_params
+                             else "notification")
+        elif is_bucket_logging:
+            active_compat = "logging"
         if any(parameter in request.query_params and (
             (parameter != "versionId" or not (is_version_read or is_version_tagging or is_version_delete))
             and (parameter != "versions" or not is_version_listing)
@@ -3228,6 +3321,8 @@ async def _handle(request: Request):
             is_bucket_versioning=is_bucket_versioning,
             is_public_access_block=is_public_access_block,
             is_bucket_lifecycle=is_bucket_lifecycle,
+            is_bucket_notification=is_bucket_notification,
+            is_bucket_logging=is_bucket_logging,
             is_bucket_policy_status=is_bucket_policy_status,
             is_bucket_replication=is_bucket_replication,
         )
@@ -3363,6 +3458,8 @@ async def _handle(request: Request):
     except CORSError as exc:
         return _error(exc.code, str(exc), exc.status)
     except ReplicationError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except NotificationError as exc:
         return _error(exc.code, str(exc), exc.status)
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)

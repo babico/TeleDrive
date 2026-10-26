@@ -43,6 +43,8 @@ PERMISSIONS = frozenset({
     "s3:GetOwnershipControls", "s3:GetBucketPolicy",
     "s3:GetBucketReplication", "s3:GetBucketWebsite",
     "s3:GetBucketNotification", "s3:GetBucketLogging",
+    # Notification webhooks and access-logging configuration (Phase F).
+    "s3:PutBucketNotification", "s3:PutBucketLogging",
     "s3:GetBucketRequestPayment", "s3:GetAccelerateConfiguration",
     "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration",
     "s3:GetObjectRetention", "s3:GetObjectLegalHold",

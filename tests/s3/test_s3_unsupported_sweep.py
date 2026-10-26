@@ -37,9 +37,6 @@ REQUESTS = {
     # P2-F — website, notifications, logging writes
     "PutBucketWebsite": ("PUT", "/sweep-bucket?website"),
     "DeleteBucketWebsite": ("DELETE", "/sweep-bucket?website"),
-    "PutBucketNotification": ("PUT", "/sweep-bucket?notification"),
-    "PutBucketNotificationConfiguration": ("PUT", "/sweep-bucket?notificationConfiguration"),
-    "PutBucketLogging": ("PUT", "/sweep-bucket?logging"),
     # P3-G — analytics / inventory / metrics / intelligent-tiering
     "GetBucketAnalyticsConfiguration": ("GET", "/sweep-bucket?analytics&id=x"),
     "PutBucketAnalyticsConfiguration": ("PUT", "/sweep-bucket?analytics&id=x"),

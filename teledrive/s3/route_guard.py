@@ -93,8 +93,11 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 # Phase G: real replication configuration (SQL-backed,
                 # prefix-aware, over the existing replica engine).
                 "replication": {"GET", "PUT", "DELETE"},
-                "website": {"GET"}, "logging": {"GET"},
-                "notification": {"GET"}, "notificationConfiguration": {"GET"},
+                "website": {"GET"},
+                # Phase F: real notification/logging configuration stores.
+                "logging": {"GET", "PUT"},
+                "notification": {"GET", "PUT"},
+                "notificationConfiguration": {"GET", "PUT"},
                 "requestPayment": {"GET"}, "accelerate": {"GET"},
                 "encryption": {"GET"}, "object-lock": {"GET", "PUT"},
             }

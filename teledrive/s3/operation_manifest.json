@@ -356,35 +356,32 @@
     },
     {
       "name": "GetBucketNotification",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketNotificationConfiguration",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketNotification",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-F"
     },
     {
       "name": "PutBucketNotificationConfiguration",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-F"
     },
     {
       "name": "GetBucketLogging",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketLogging",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-F"
     },
     {

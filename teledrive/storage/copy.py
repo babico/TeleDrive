@@ -144,6 +144,15 @@ def copy_object(
             if updated.rowcount != 1:
                 raise CopyConflict("Destination was changed concurrently")
         catalog._record_published_uncommitted(manifests.get(identifier))
+        try:
+            from teledrive.s3.notifications import enqueue_event_safely
+            enqueue_event_safely(
+                db.connection, event_type="s3:ObjectCreated:Copy",
+                bucket=destination_bucket, object_key=destination_key,
+                version_id=identifier,
+            )
+        except Exception:
+            pass
         db.commit()
         return CopiedObject(identifier, original_tag, source.size, source.id)
     except IntegrityError as exc:

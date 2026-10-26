@@ -966,6 +966,30 @@ async def lifecycle_scheduler_loop() -> None:
         await asyncio.sleep(3600)
 
 
+async def notification_scheduler_loop() -> None:
+    """Deliver due S3 webhook events with bounded exponential backoff."""
+    while True:
+        connection = None
+        delivered = 0
+        try:
+            from teledrive.s3.credentials import load_master_key
+            from teledrive.s3.notifications import NotificationDelivery
+            connection = db_connect()
+            cat = BucketCatalog(ManifestStore(connection))
+            result = NotificationDelivery(
+                cat, master_key=load_master_key(),
+            ).deliver_due(now_ns=time.time_ns(), limit=50)
+            delivered = result.delivered
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("notification scheduler: " + type(exc).__name__, "scheduler")
+        finally:
+            if connection is not None:
+                connection.close()
+        await asyncio.sleep(30 if delivered else 60)
+
+
 def folder_watch_scan() -> dict:
     """One auto-sync pass: enqueue new/changed files from the source root.
 
@@ -1032,6 +1056,7 @@ async def folder_watch_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global upload_job_scheduler_task, lifecycle_scheduler_task
+    global notification_scheduler_task
     global folder_watch_task
     os.umask(0o077)
     # Settings first: ensure_config() mkdirs AUTH_DIR, which must already
@@ -1100,11 +1125,17 @@ async def lifespan(_: FastAPI):
     _main_event_loop = asyncio.get_running_loop()
     try:
         conn = db_connect()
+        # Notification/logging tables are created here, outside any request
+        # transaction: the mutation hot path only INSERTs (creating tables
+        # there deadlocks SQLite against the caller's write lock).
+        from teledrive.s3.notifications import ensure_notification_tables
+        ensure_notification_tables(conn.engine)
         conn.close()
     except Exception as exc:
         _log(_scrub_text(f"startup database warning: {exc}"), "startup")
     upload_job_scheduler_task = asyncio.create_task(upload_job_scheduler_loop())
     lifecycle_scheduler_task = asyncio.create_task(lifecycle_scheduler_loop())
+    notification_scheduler_task = asyncio.create_task(notification_scheduler_loop())
     folder_watch_task = asyncio.create_task(folder_watch_loop())
     session_health_task = asyncio.create_task(telegram_session_health_loop())
     yield
@@ -1114,6 +1145,9 @@ async def lifespan(_: FastAPI):
     if lifecycle_scheduler_task:
         lifecycle_scheduler_task.cancel()
         await asyncio.gather(lifecycle_scheduler_task, return_exceptions=True)
+    if notification_scheduler_task:
+        notification_scheduler_task.cancel()
+        await asyncio.gather(notification_scheduler_task, return_exceptions=True)
     if folder_watch_task:
         folder_watch_task.cancel()
         await asyncio.gather(folder_watch_task, return_exceptions=True)

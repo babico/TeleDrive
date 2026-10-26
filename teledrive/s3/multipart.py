@@ -305,6 +305,18 @@ class MultipartStore:
         changed = self.db.connection.execute(update(uploads).where(
             uploads.c.id == identifier, uploads.c.state == "active"
         ).values(state="aborted"))
+        if changed.rowcount == 1:
+            # Multipart abort is a logical removal in TeleDrive: no object was
+            # published, but the staged key's session is gone. Emit the honest
+            # ObjectRemoved event in the same transaction as the state change.
+            try:
+                from teledrive.s3.notifications import enqueue_event_safely
+                enqueue_event_safely(
+                    self.db.connection, event_type="s3:ObjectRemoved:Delete",
+                    bucket=bucket, object_key=key,
+                )
+            except Exception:
+                pass
         self.db.commit()
         if changed.rowcount != 1:
             raise MultipartError("OperationAborted", "Concurrent multipart mutation", 409)
@@ -649,6 +661,15 @@ class MultipartStore:
                     completion_leases.c.upload_id == identifier,
                     completion_leases.c.token == token,
                 ))
+                try:
+                    from teledrive.s3.notifications import enqueue_event_safely
+                    enqueue_event_safely(
+                        self.db.connection,
+                        event_type="s3:ObjectCreated:CompleteMultipartUpload",
+                        bucket=bucket, object_key=key, version_id=object_id,
+                    )
+                except Exception:
+                    pass
                 self.db.commit()
             except BaseException:
                 self.db.connection.rollback()

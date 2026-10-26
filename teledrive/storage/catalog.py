@@ -535,6 +535,19 @@ class BucketCatalog:
         ).scalar_one_or_none()
         return row is not None
 
+    def _enqueue_notification(self, event_type: str, bucket: str, key: str, *,
+                              version_id: str | None = None) -> None:
+        """Record an event on the CURRENT transaction; never fail the write."""
+        try:
+            from teledrive.s3.notifications import enqueue_event_safely
+            enqueue_event_safely(
+                self.db.connection, event_type=event_type, bucket=bucket,
+                object_key=key, version_id=version_id,
+            )
+        except Exception:
+            # The notification module already isolates its own failures.
+            pass
+
     def delete_marker(self, bucket: str, key: str, *,
                       expected_generation: int | None = None,
                       expected_object_id: str | None = None) -> str:
@@ -573,6 +586,8 @@ class BucketCatalog:
             self.db.connection.execute(insert(removed_versions).values(
                 object_id=row[0], removed_ns=time.time_ns(),
             ))
+            self._enqueue_notification(
+                "s3:ObjectRemoved:Delete", bucket, key, version_id=row[0])
             self.db.commit()
             return None
         marker = str(uuid4())
@@ -604,6 +619,9 @@ class BucketCatalog:
                 object_id=marker, bucket=bucket, key_hash=digest,
                 committed_ns=time.time_ns(),
             ))
+            self._enqueue_notification(
+                "s3:ObjectRemoved:DeleteMarkerCreated", bucket, key,
+                version_id=marker)
             self.db.commit()
             return marker
         except BaseException:
@@ -696,6 +714,9 @@ class BucketCatalog:
                              updated_at=int(time.time())))
                 if changed.rowcount != 1:
                     raise ValueError("Version HEAD changed concurrently")
+            self._enqueue_notification(
+                "s3:ObjectRemoved:Delete", bucket, key,
+                version_id=version_id)
             self.db.commit()
             return True
         except IntegrityError:
@@ -921,7 +942,8 @@ class BucketCatalog:
 
     def publish(self, identifier: str, *, now: int,
                 expected_generation: int | None = None,
-                expected_object_id: str | None = None) -> ObjectHead:
+                expected_object_id: str | None = None,
+                event_type: str = "s3:ObjectCreated:Put") -> ObjectHead:
         """Atomically update the current pointer after Telegram upload succeeds.
 
         expected_generation=0 is create-if-absent, and a positive value is
@@ -949,6 +971,8 @@ class BucketCatalog:
             except IntegrityError as exc:
                 raise ValueError("Concurrent object creation; retry with generation") from exc
             self._record_published_uncommitted(item)
+            self._enqueue_notification(
+                event_type, item.bucket, item.key, version_id=item.id)
             self.db.commit()
             # Phase C: buckets with a default retention lock every new
             # version at publish time (WORM from the first byte).
@@ -987,6 +1011,8 @@ class BucketCatalog:
                 object_id=existing[0], removed_ns=time.time_ns(),
             ))
         self._record_published_uncommitted(item)
+        self._enqueue_notification(
+            event_type, item.bucket, item.key, version_id=item.id)
         self.db.commit()
         self.apply_default_lock(item.id)
         return ObjectHead(item, generation + 1)

@@ -174,6 +174,36 @@ class ApiKeyStore:
             return None
         return result[0]
 
+    def scopes_for_token(self, token: str, *,
+                         now: int | None = None) -> frozenset[str] | None:
+        """Effective endpoint permissions of an ACTIVE key, or None.
+
+        Used for delegation checks: a key may never mint, rotate or
+        revoke authority it does not itself hold.
+        """
+        now = int(time.time()) if now is None else now
+        if (not isinstance(token, str) or len(token) > 200
+                or not token.startswith("td_live_")):
+            return None
+        row = self.db.connection.execute(
+            select(api_keys.c.scopes, api_keys.c.revoked,
+                   api_keys.c.expires_at)
+            .where(api_keys.c.digest == self._digest(token))
+        ).first()
+        if row is None or row[1] or (row[2] is not None and row[2] <= now):
+            return None
+        return expand_scopes(json.loads(row[0]))
+
+    def scopes_for_identifier(self, identifier: str) -> frozenset[str] | None:
+        """Effective permissions of a key by id/prefix (None if absent)."""
+        row = self.db.connection.execute(
+            select(api_keys.c.scopes)
+            .where((api_keys.c.id == identifier)
+                   | (api_keys.c.prefix == identifier))).first()
+        if row is None:
+            return None
+        return expand_scopes(json.loads(row[0]))
+
     def revoke(self, identifier: str) -> bool:
         changed = self.db.connection.execute(
             update(api_keys).where(api_keys.c.id == identifier, api_keys.c.revoked.is_(False))

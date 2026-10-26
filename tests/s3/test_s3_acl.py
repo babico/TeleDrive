@@ -179,7 +179,7 @@ def test_object_acl_restricts_only_its_key(service, second, readonly):
     assert b"free.bin" in listing.content
 
 
-def test_block_public_acls_locks_acl_writes_to_the_owner(service):
+def test_block_public_acls_locks_acl_writes_to_the_owner(service, second):
     """Phase E: with BlockPublicAcls on (default), only the stored
     ACL's owner may replace it; turning the flag off is the owner's
     deliberate decision to allow re-authoring."""
@@ -206,9 +206,13 @@ def test_block_public_acls_locks_acl_writes_to_the_owner(service):
     # The owner may still rewrite the ACL.
     assert signed(service, "PUT", "/acl-bucket?acl", body).status_code == 200
 
+    # Ownership can never be transferred, even by a FULL_CONTROL
+    # grantee: a document that names a different Owner is rejected.
+    assert denied.status_code == 403
+
     # The owner deliberately turns BlockPublicAcls off; the grantee's
-    # stored FULL_CONTROL now covers re-authoring (still no public
-    # path — grantees are always validated access keys).
+    # stored FULL_CONTROL then covers editing the grant list — but the
+    # OWNER stays the original credential (no takeover).
     relaxed = (b"<PublicAccessBlockConfiguration>"
                b"<BlockPublicAcls>false</BlockPublicAcls>"
                b"<IgnorePublicAcls>true</IgnorePublicAcls>"
@@ -217,14 +221,23 @@ def test_block_public_acls_locks_acl_writes_to_the_owner(service):
                b"</PublicAccessBlockConfiguration>")
     assert signed(service, "PUT", "/acl-bucket?publicAccessBlock",
                   relaxed).status_code == 200
-    allowed = signed(service, "PUT", "/acl-bucket?acl", hijack,
+    # Naming itself owner is refused outright.
+    takeover = signed(service, "PUT", "/acl-bucket?acl", hijack,
+                      access=writer.access_key, secret=writer.secret_key)
+    assert takeover.status_code == 400, takeover.text
+    assert b"owner cannot be changed" in takeover.content
+    # Editing the grants while keeping the real owner works.
+    edit = _policy_xml(main.access_key, [
+        (writer.access_key, "FULL_CONTROL", ""),
+        (second.access_key, "READ", ""),
+    ])
+    allowed = signed(service, "PUT", "/acl-bucket?acl", edit,
                      access=writer.access_key, secret=writer.secret_key)
     assert allowed.status_code == 200, allowed.text
-    # The re-authored ACL answers to its new owner; the previous
-    # owner is now fenced out by the same intersection gate.
-    read = signed(service, "GET", "/acl-bucket?acl",
-                  access=writer.access_key, secret=writer.secret_key)
-    assert f"<ID>{writer.access_key}</ID>".encode() in read.content
+    read = signed(service, "GET", "/acl-bucket?acl")
+    assert f"<ID>{main.access_key}</ID>".encode() in read.content
+    assert read.content.index(b"<Owner>") < read.content.index(
+        f"<ID>{main.access_key}</ID>".encode())
 
 
 def test_grantee_validation_and_permission_grammar(service, second):
@@ -279,3 +292,96 @@ def test_acl_requires_scope_and_existing_resources(service):
                    _policy_xml(main.access_key, []))
     assert reply.status_code == 404
     assert b"NoSuchKey" in reply.content
+
+
+def test_batch_delete_honours_per_object_acl(service):
+    """P8: a batch delete addresses no single key, so the request-level
+    gate sees only the bucket (here: no bucket ACL at all). An object
+    ACL on one entry must still fence that entry.
+    """
+    from teledrive.s3.credentials import S3CredentialStore
+    store = S3CredentialStore(service[3](), service[4])
+    second = store.create("deleter", ["s3:GetObject", "s3:PutObject",
+                                      "s3:DeleteObject"])
+    assert signed(service, "PUT", "/acl-bucket").status_code == 200
+    assert signed(service, "PUT", "/acl-bucket/gated.bin", b"g").status_code == 200
+    assert signed(service, "PUT", "/acl-bucket/free.bin", b"f").status_code == 200
+    main = service[1]
+    # Only an OBJECT ACL: gated.bin is opt-in restricted to its owner.
+    assert signed(service, "PUT", "/acl-bucket/gated.bin?acl",
+                  _policy_xml(main.access_key, [])).status_code == 200
+
+    body = (b"<Delete><Object><Key>gated.bin</Key></Object>"
+            b"<Object><Key>free.bin</Key></Object></Delete>")
+    import base64
+    import hashlib
+    reply = signed(service, "POST", "/acl-bucket?delete", body,
+                   extra_headers={"Content-MD5": base64.b64encode(
+                       hashlib.md5(body, usedforsecurity=False).digest()
+                   ).decode("ascii")},
+                   **_as(second))
+    assert reply.status_code == 200, reply.text
+    # gated.bin is refused per-entry; free.bin (no ACL) is deleted.
+    assert b"AccessDenied" in reply.content
+    assert reply.content.index(b"gated.bin") < reply.content.index(b"AccessDenied")
+    assert signed(service, "GET", "/acl-bucket/gated.bin").content == b"g"
+    assert signed(service, "GET", "/acl-bucket/free.bin").status_code == 404
+    # The owner can still delete the gated key in a batch.
+    owner_reply = signed(service, "POST", "/acl-bucket?delete", body,
+                         extra_headers={"Content-MD5": base64.b64encode(
+                             hashlib.md5(body, usedforsecurity=False).digest()
+                         ).decode("ascii")})
+    assert b"AccessDenied" not in owner_reply.content
+
+
+def test_copy_object_honours_the_source_object_acl(service, second):
+    """P8: the destination key is ACL-checked, but the SOURCE key must be
+    too — otherwise a narrowed object can be copied out.
+    """
+    assert signed(service, "PUT", "/acl-bucket").status_code == 200
+    assert signed(service, "PUT", "/acl-bucket/source.bin",
+                  b"secret-bytes").status_code == 200
+    main = service[1]
+    # Only an object ACL on the source: second has no grant for it.
+    assert signed(service, "PUT", "/acl-bucket/source.bin?acl",
+                  _policy_xml(main.access_key, [])).status_code == 200
+
+    copy = signed(service, "PUT", "/acl-bucket/copied.bin", b"",
+                  extra_headers={
+                      "x-amz-copy-source": "/acl-bucket/source.bin"},
+                  **_as(second))
+    assert copy.status_code == 403, copy.text
+    assert b"source object ACL" in copy.content
+    # Copying an UNGATED sibling still works (the object ACL only
+    # affects its own key).
+    assert signed(service, "PUT", "/acl-bucket/open.bin", b"open").status_code == 200
+    sibling = signed(service, "PUT", "/acl-bucket/open-copy.bin", b"",
+                     extra_headers={
+                         "x-amz-copy-source": "/acl-bucket/open.bin"},
+                     **_as(second))
+    assert sibling.status_code == 200, sibling.text
+    # The owner can still copy the gated source (implicit FULL_CONTROL).
+    allowed = signed(service, "PUT", "/acl-bucket/copied.bin", b"",
+                     extra_headers={
+                         "x-amz-copy-source": "/acl-bucket/source.bin"})
+    assert allowed.status_code == 200, allowed.text
+    assert signed(service, "GET", "/acl-bucket/copied.bin"
+                  ).content == b"secret-bytes"
+
+
+def test_reveal_refuses_expired_credential(service):
+    """P11: an expired credential cannot authenticate, so its secret
+    must not be revealed either."""
+    import pytest
+    from teledrive.s3.credentials import S3CredentialStore
+    store = S3CredentialStore(service[3](), service[4])
+    live = store.create("live", ["s3:GetObject"])
+    assert store.reveal(live.id)["secret_key"] == live.secret_key
+    # Expire it in the past directly (create rejects past expiry).
+    from sqlalchemy import update
+    from teledrive.s3.credentials import credentials
+    store.db.connection.execute(update(credentials).where(
+        credentials.c.id == live.id).values(expires_at=1))
+    store.db.commit()
+    with pytest.raises(ValueError, match="Expired"):
+        store.reveal(live.id)

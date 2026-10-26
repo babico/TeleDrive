@@ -86,7 +86,7 @@ def test_write_route_key_still_needs_the_csrf_header(api):
     client, _ = api
     # Granting a key the power to mint keys is an owner decision; when
     # granted, the write still goes through the CSRF fence.
-    key = create_key(client, ["post:/api/v1/admin/keys"])
+    key = create_key(client, ["post:/api/v1/admin/keys", "get:/api/v1/admin/keys"])
     headers = {"Authorization": f"Bearer {key['token']}"}
     body = {"name": "minted", "scopes": ["get:/api/v1/admin/keys"]}
     assert client.post("/api/v1/admin/keys", headers=headers,
@@ -102,6 +102,85 @@ def test_write_route_key_still_needs_the_csrf_header(api):
     assert client.get("/api/v1/admin/storage/health", headers={
         "Authorization": f"Bearer {minted.json()['token']}"
     }).status_code == 403
+
+
+def _mint(client, scopes):
+    res = client.post(
+        "/api/v1/admin/keys",
+        auth=("ci-admin", "ci-local-password-1234"),
+        headers={"x-teledrive-csrf": "1"},
+        json={"name": "delegator", "scopes": scopes},
+    )
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+def test_api_key_cannot_mint_beyond_its_own_permissions(api):
+    """Delegation ceiling: a key may only create authority it holds.
+
+    Without this, a key scoped to just the mint endpoint could issue
+    itself (or anyone) a fully privileged key — total escalation.
+    """
+    client, _ = api
+    delegator = _mint(client, ["post:/api/v1/admin/keys"])
+    headers = {"Authorization": f"Bearer {delegator['token']}",
+               "x-teledrive-csrf": "1"}
+
+    # A privilege above the caller's own set is refused.
+    escalated = client.post("/api/v1/admin/keys", headers=headers, json={
+        "name": "escalated",
+        "scopes": ["delete:/api/v1/admin/users/{user_id}"],
+    })
+    assert escalated.status_code == 403, escalated.text
+    assert "only delegate" in escalated.json()["detail"]
+
+    # admin:* is far above a single-route key.
+    assert client.post("/api/v1/admin/keys", headers=headers, json={
+        "name": "root", "scopes": ["admin:*"],
+    }).status_code == 403
+
+    # Delegating a permission the caller DOES hold is allowed.
+    allowed = client.post("/api/v1/admin/keys", headers=headers, json={
+        "name": "same", "scopes": ["post:/api/v1/admin/keys"],
+    })
+    assert allowed.status_code == 201, allowed.text
+
+
+def test_api_key_rotation_cannot_steal_a_more_privileged_key(api):
+    """Rotation returns the new secret, so rotating upward is theft."""
+    client, _ = api
+    # A privileged key exists (minted by the session admin).
+    privileged = _mint(client, ["admin:*"])
+    listed = client.get("/api/v1/admin/keys",
+                        auth=("ci-admin", "ci-local-password-1234")).json()
+    target = next(k for k in listed["keys"]
+                  if k["prefix"] == privileged["prefix"])
+
+    delegator = _mint(client, ["post:/api/v1/admin/keys/{identifier}/rotate"])
+    headers = {"Authorization": f"Bearer {delegator['token']}",
+               "x-teledrive-csrf": "1"}
+    stolen = client.post(f"/api/v1/admin/keys/{target['id']}/rotate",
+                         headers=headers)
+    assert stolen.status_code == 403, stolen.text
+    assert "only delegate" in stolen.json()["detail"]
+
+
+def test_api_key_cannot_revoke_above_its_own_authority(api):
+    client, _ = api
+    privileged = _mint(client, ["get:/api/v1/admin/keys"])
+    listed = client.get("/api/v1/admin/keys",
+                        auth=("ci-admin", "ci-local-password-1234")).json()
+    target = next(k for k in listed["keys"]
+                  if k["prefix"] == privileged["prefix"])
+    delegator = _mint(client, ["delete:/api/v1/admin/keys/{identifier}"])
+    headers = {"Authorization": f"Bearer {delegator['token']}",
+               "x-teledrive-csrf": "1"}
+    denied = client.delete(f"/api/v1/admin/keys/{target['id']}",
+                          headers=headers)
+    assert denied.status_code == 403, denied.text
+    # The privileged key still works.
+    assert client.get("/api/v1/admin/keys", headers={
+        "Authorization": f"Bearer {privileged['token']}"}).status_code == 200
 
 
 def test_catalog_endpoint_exposes_the_full_registry(api):

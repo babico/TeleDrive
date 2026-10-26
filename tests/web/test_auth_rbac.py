@@ -394,6 +394,28 @@ def test_operator_denied_admin_actions(authenv):
     assert client.get("/api/v1/admin/users", headers=auth).status_code == 403
 
 
+def test_physical_gc_is_admin_only(authenv):
+    """Irreversible Telegram media deletion is an owner decision.
+
+    The GC toggle and the collect trigger must not be reachable by an
+    operator — the documents call this an owner gate, so the role policy
+    has to match: operator 403, admin allowed.
+    """
+    client = authenv["client"]
+    op = _bearer(client, "opuser", "operator-password-1")
+    admin = _bearer(client, "admin", "admin-password-1")
+    assert client.put("/api/v1/admin/storage/gc", headers={**op, **CSRF},
+                      json={"enabled": False}).status_code == 403
+    assert client.post("/api/v1/admin/storage/gc/collect",
+                       headers={**op, **CSRF},
+                       json={"scope": "retained", "confirm": "PHYSICAL-GC"}
+                       ).status_code == 403
+    # Admin passes the role gate (the request may still fail on its own
+    # preconditions, but never with 403 from the role policy).
+    assert client.put("/api/v1/admin/storage/gc", headers={**admin, **CSRF},
+                      json={"enabled": False}).status_code != 403
+
+
 def test_operator_can_manage_channels(authenv):
     client = authenv["client"]
     auth = _bearer(client, "opuser", "operator-password-1")

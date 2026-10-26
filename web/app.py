@@ -491,6 +491,11 @@ def _required_roles(method: str, path: str) -> frozenset[str] | None:
         return _ROLE_ADMIN
     if path.startswith("/api/v1/admin/storage/buckets") and path.endswith("/quota"):
         return _ROLE_ADMIN
+    # Physical media deletion is an owner decision, not an operator one:
+    # the GC toggle and the collect/queue-drain kick off irreversible
+    # Telegram deletions, so they stay admin-only (matching the documents).
+    if path.startswith("/api/v1/admin/storage/gc"):
+        return _ROLE_ADMIN
     return _ROLE_WRITE
 
 
@@ -526,10 +531,14 @@ def require_auth(request: Request) -> None:
             request.method, request.url.path)
         conn = db_connect()
         try:
-            name = ApiKeyStore(conn).name_for_token(token)
+            store = ApiKeyStore(conn)
+            name = store.name_for_token(token)
             authorized = (permission is not None
-                          and ApiKeyStore(conn).authorize(
-                              token, permission))
+                          and store.authorize(token, permission))
+            # Delegation limit: a key may only mint/rotate/revoke within
+            # its OWN effective permission set. Recorded here because the
+            # management handlers must compare scopes, not just this route.
+            scopes = store.scopes_for_token(token) if authorized else None
         finally:
             conn.close()
         if authorized:
@@ -538,6 +547,7 @@ def require_auth(request: Request) -> None:
                 "username": f"api-key:{name or 'unknown'}",
                 "role": "api-key",
             }
+            request.state.api_key_scopes = scopes or frozenset()
             return
         _log(f"denied: api-key {request.method} {request.url.path}",
              "auth")
@@ -1595,9 +1605,46 @@ def list_api_key_permissions(_: None = Depends(require_auth)):
     }
 
 
+def _delegation_limit(request: Request) -> frozenset[str] | None:
+    """The permission ceiling of the CALLING principal.
+
+    ``None`` means unrestricted (an authenticated session user, whose
+    authority comes from the role policy). A bearer API key returns its
+    own effective permission set: it may never create, rotate or revoke
+    authority it does not itself hold — otherwise a key scoped to just
+    this endpoint could mint or steal a fully privileged key.
+    """
+    scopes = getattr(request.state, "api_key_scopes", None)
+    if scopes is None:
+        return None
+    return frozenset(scopes)
+
+
+def _require_within_delegation(request: Request,
+                               requested: frozenset[str],
+                               what: str) -> None:
+    limit = _delegation_limit(request)
+    if limit is None:
+        return
+    excess = requested - limit
+    if excess:
+        _log(f"denied: api-key attempted {what} beyond its own scopes "
+             f"({len(excess)} excess)", "auth")
+        raise HTTPException(
+            403,
+            "An API key can only delegate permissions it already holds",
+        )
+
+
 @app.post("/api/v1/admin/keys", tags=["API keys"], status_code=201, summary="Issue a scoped API key (secret returned once)")
 def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends(require_auth)):
     _same_origin(request)
+    from teledrive.api_keys import expand_scopes
+    # A key may only mint a key whose effective permissions are a subset
+    # of its own. The route permission is checked by require_auth; this
+    # stops privilege escalation through minting.
+    _require_within_delegation(
+        request, expand_scopes(payload.scopes), "key creation")
     _log(f"issue api key: name={payload.name} scopes={payload.scopes}", "api-keys")
     conn = db_connect()
     try:
@@ -1619,9 +1666,14 @@ def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends
 @app.delete("/api/v1/admin/keys/{identifier}", tags=["API keys"], summary="Revoke an API key immediately")
 def revoke_api_key(identifier: str, request: Request, _: None = Depends(require_auth)):
     _same_origin(request)
-    _log(f"revoke api key: id={identifier}", "api-keys")
     conn = db_connect()
     try:
+        target_scopes = ApiKeyStore(conn).scopes_for_identifier(identifier)
+        # A key may not revoke authority above its own (that is a
+        # denial-of-service lever against a more privileged key).
+        _require_within_delegation(
+            request, frozenset(target_scopes or ()), "key revocation")
+        _log(f"revoke api key: id={identifier}", "api-keys")
         if not ApiKeyStore(conn).revoke(identifier):
             raise HTTPException(404, "API key not found or already revoked")
         return {"ok": True}
@@ -1632,9 +1684,14 @@ def revoke_api_key(identifier: str, request: Request, _: None = Depends(require_
 @app.post("/api/v1/admin/keys/{identifier}/rotate", tags=["API keys"], summary="Rotate an API key; secret returned once")
 def rotate_api_key(identifier: str, request: Request, _: None = Depends(require_auth)):
     _same_origin(request)
-    _log(f"rotate api key: id={identifier}", "api-keys")
     conn = db_connect()
     try:
+        # Rotation returns the NEW SECRET, so rotating a key with more
+        # authority than the caller would hand over that authority.
+        target_scopes = ApiKeyStore(conn).scopes_for_identifier(identifier)
+        _require_within_delegation(
+            request, frozenset(target_scopes or ()), "key rotation")
+        _log(f"rotate api key: id={identifier}", "api-keys")
         try:
             key = ApiKeyStore(conn).rotate(identifier)
         except FileNotFoundError as exc:
@@ -3417,6 +3474,12 @@ def admin_presign_object(bucket: str, request: Request,
             store = S3CredentialStore(conn, load_master_key())
             if credential_id:
                 revealed = store.reveal(str(credential_id))
+                # A presigned GET needs this exact scope; issuing a URL
+                # for a credential that cannot read would fail later and
+                # leak a secret for nothing.
+                if "s3:GetObject" not in revealed.get("permissions", ()):
+                    raise HTTPException(
+                        422, "Credential lacks the s3:GetObject permission")
             else:
                 candidates = [c for c in store.list() if not c["revoked"]
                               and "s3:GetObject" in c["permissions"]]

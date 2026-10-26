@@ -159,18 +159,25 @@ class S3CredentialStore:
         row = self.db.connection.execute(select(
             credentials.c.id, credentials.c.access_key,
             credentials.c.encrypted_secret, credentials.c.revoked,
+            credentials.c.expires_at, credentials.c.permissions,
         ).where((credentials.c.id == identifier)
                 | (credentials.c.access_key == identifier))).first()
         if not row:
             raise ValueError("Unknown credential")
         if row[3]:
             raise ValueError("Revoked credentials have no active secret")
+        # An EXPIRED credential cannot authenticate, so its secret must
+        # not be handed out either: revealing it would be misleading and
+        # extend the secret's useful life past the operator's intent.
+        if row[4] is not None and int(row[4]) <= int(time.time()):
+            raise ValueError("Expired credentials have no active secret")
         try:
             secret = self.cipher.decrypt(row[2].encode()).decode()
         except (InvalidToken, ValueError, UnicodeError):
             raise ValueError("Credential secret cannot be decrypted "
                              "(master key changed?)") from None
-        return {"id": row[0], "access_key": row[1], "secret_key": secret}
+        return {"id": row[0], "access_key": row[1], "secret_key": secret,
+                "permissions": json.loads(row[5])}
 
     def update(self, identifier: str, *, name: str | None = None,
                permissions: list[str] | None = None,

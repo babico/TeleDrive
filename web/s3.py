@@ -838,6 +838,20 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
     batch = parse_batch(payload)
     result = ET.Element("DeleteResult", xmlns=NAMESPACE)
     for key_to_delete, version_id in batch.entries:
+        # Phase D/P8: the request-level gate only sees the BUCKET path
+        # (POST /bucket?delete has no object key), so a per-object ACL
+        # would never be consulted. Check every entry against its own
+        # key, exactly like a single-object DELETE.
+        if not _acl_allows(catalog, ctx.owner, "s3:DeleteObject", bucket,
+                           key_to_delete):
+            problem = ET.SubElement(result, "Error")
+            ET.SubElement(problem, "Key").text = key_to_delete
+            if version_id is not None:
+                ET.SubElement(problem, "VersionId").text = version_id
+            ET.SubElement(problem, "Code").text = "AccessDenied"
+            ET.SubElement(problem, "Message").text = (
+                "Access denied by resource ACL")
+            continue
         if version_id is not None:
             # Explicit per-entry version deletion, the same semantics as
             # DELETE ?versionId on a single object.
@@ -1778,6 +1792,9 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
     if ("x-amz-copy-source" not in signed
             or ctx.store.resolve(owner, "s3:GetObject") is None):
         raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
+    # P8: honour the SOURCE object's ACL for multipart part copies too.
+    _require_source_acl(ctx.catalog, owner,
+                        request.headers["x-amz-copy-source"])
     if (request.headers.get("x-amz-copy-source-if-match") is not None
             and "x-amz-copy-source-if-match" not in signed):
         raise SigV4Error("AccessDenied", "Copy precondition must be signed")
@@ -1886,6 +1903,24 @@ def _parse_iso8601_ns(raw: str) -> int:
     return int(moment.timestamp() * 1_000_000_000)
 
 
+def _require_source_acl(catalog, access_key: str, source_header: str) -> None:
+    """Fail closed when a copy source is narrowed by its own object ACL.
+
+    ``CopySource`` is a plain local bucket/key path (the callers reject
+    URLs and query strings). A malformed value is ignored here because
+    each caller parses and rejects it with its own protocol error.
+    """
+    path = unquote(source_header[1:] if source_header.startswith("/")
+                   else source_header)
+    src_bucket, slash, src_key = path.partition("/")
+    if not slash or not src_bucket or not src_key:
+        return
+    if not _acl_allows(catalog, access_key, "s3:GetObject", src_bucket,
+                       src_key):
+        raise SigV4Error("AccessDenied",
+                         "Access denied by source object ACL")
+
+
 def _acl_allows(catalog, access_key: str, action: str, bucket: str,
                 key: str | None) -> bool:
     """Fetch the resource's grant rows and apply the intersection."""
@@ -1913,7 +1948,9 @@ async def _read_acl_body(request: Request, *, bucket_level: bool) -> bytes:
 
 
 def _validated_acl(payload: bytes, *, object_level: bool, caller: str,
-                   store: S3CredentialStore) -> tuple[str, list[tuple[str, str]]]:
+                   store: S3CredentialStore,
+                   stored_owner: str | None = None
+                   ) -> tuple[str, list[tuple[str, str]]]:
     """Parse an AccessControlPolicy and validate its principals.
 
     Every CanonicalUser ID (owner and grantees) must be an active
@@ -1922,7 +1959,14 @@ def _validated_acl(payload: bytes, *, object_level: bool, caller: str,
     caller when the document omits the Owner block.
     """
     doc_owner, grants = parse_acl_xml(payload, object_level=object_level)
-    acl_owner = doc_owner or caller
+    # Ownership is IMMUTABLE. The first successful write establishes the
+    # caller as owner; every later write keeps that owner. Without this,
+    # any credential allowed to write the ACL could declare itself the
+    # owner and lock the real owner out (a full takeover).
+    acl_owner = stored_owner or caller
+    if doc_owner is not None and doc_owner != acl_owner:
+        raise AclError("InvalidArgument",
+                       "ACL owner cannot be changed")
     if not store.is_active(acl_owner):
         raise AclError("InvalidArgument",
                        "ACL owner is not an active credential")
@@ -1951,18 +1995,21 @@ async def _handle_bucket_acl(ctx: _S3RequestContext) -> Response:
         return _error("NotImplemented", "Unsupported ACL method", 501)
     payload = await _read_acl_body(request, bucket_level=True)
     try:
-        acl_owner, grants = _validated_acl(
-            payload, object_level=False, caller=ctx.owner, store=ctx.store)
+        stored_owner, _rows = catalog.bucket_acl(bucket)
         # Phase E: with BlockPublicAcls on, only the bucket ACL's
         # owner may author grants — the PAB flag guards the grant
         # store instead of (nonexistent) public ACLs. The first write
-        # (no stored ACL) still establishes the owner.
-        if catalog.public_access_block(bucket).get("BlockPublicAcls"):
-            stored_owner, _rows = catalog.bucket_acl(bucket)
-            if stored_owner is not None and stored_owner != ctx.owner:
-                raise AclError("AccessDenied",
-                               "BlockPublicAcls restricts ACL writes to "
-                               "the ACL owner", 403)
+        # (no stored ACL) still establishes the owner. Checked before
+        # the document is even parsed, so a grantee learns nothing.
+        if (catalog.public_access_block(bucket).get("BlockPublicAcls")
+                and stored_owner is not None
+                and stored_owner != ctx.owner):
+            raise AclError("AccessDenied",
+                           "BlockPublicAcls restricts ACL writes to "
+                           "the ACL owner", 403)
+        acl_owner, grants = _validated_acl(
+            payload, object_level=False, caller=ctx.owner, store=ctx.store,
+            stored_owner=stored_owner)
         catalog.set_bucket_acl(bucket, acl_owner, grants)
     except AclError as exc:
         return _error(exc.code, str(exc), exc.status)
@@ -1992,16 +2039,18 @@ async def _handle_object_acl(ctx: _S3RequestContext) -> Response:
         return _error("NotImplemented", "Unsupported ACL method", 501)
     payload = await _read_acl_body(request, bucket_level=False)
     try:
-        acl_owner, grants = _validated_acl(
-            payload, object_level=True, caller=ctx.owner, store=ctx.store)
+        stored_owner, _rows = catalog.object_acl(bucket, key)
         # Phase E: BlockPublicAcls guards object ACL writes the same
         # way — only the stored ACL's owner may replace them.
-        if catalog.public_access_block(bucket).get("BlockPublicAcls"):
-            stored_owner, _rows = catalog.object_acl(bucket, key)
-            if stored_owner is not None and stored_owner != ctx.owner:
-                raise AclError("AccessDenied",
-                               "BlockPublicAcls restricts ACL writes to "
-                               "the ACL owner", 403)
+        if (catalog.public_access_block(bucket).get("BlockPublicAcls")
+                and stored_owner is not None
+                and stored_owner != ctx.owner):
+            raise AclError("AccessDenied",
+                           "BlockPublicAcls restricts ACL writes to "
+                           "the ACL owner", 403)
+        acl_owner, grants = _validated_acl(
+            payload, object_level=True, caller=ctx.owner, store=ctx.store,
+            stored_owner=stored_owner)
         catalog.set_object_acl(bucket, key, acl_owner, grants)
     except AclError as exc:
         return _error(exc.code, str(exc), exc.status)
@@ -2302,6 +2351,10 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
     if ("x-amz-copy-source" not in signed_headers
             or store.resolve(owner, "s3:GetObject") is None):
         raise SigV4Error("AccessDenied", "Signed source and GetObject scope required")
+    # P8: the request-level ACL gate only sees the DESTINATION key. The
+    # source object's own ACL must be honoured too, or a credential whose
+    # access to that exact key was narrowed could still copy it out.
+    _require_source_acl(catalog, owner, source_header)
     qualifiers = (
         "x-amz-copy-source-if-match", "x-amz-copy-source-if-none-match",
         "x-amz-copy-source-if-modified-since",

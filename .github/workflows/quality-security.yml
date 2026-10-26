@@ -171,7 +171,8 @@ jobs:
             tests/s3/test_s3_multipart_preconditions.py \
             tests/s3/test_s3_gap_closures.py \
             tests/s3/test_s3_object_lock.py \
-            tests/s3/test_s3_acl.py
+            tests/s3/test_s3_acl.py \
+            tests/s3/test_s3_replication.py
       - name: Publish CI run summary
         if: always()
         shell: bash

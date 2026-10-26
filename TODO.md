@@ -479,9 +479,21 @@ dependency order, each independently shippable; A and B first.
 - [ ] **Phase F — notifications + logging**: config tables +
       transactional event outbox + retry worker; audit-log delivery
       into a target bucket. Converts 2 + promotes writes.
-- [ ] **Phase G — replication API surface**: per-bucket replication
-      configs driving the EXISTING engine replication; repair becomes
-      AWS-shaped reconciliation. Converts 1 + promotes writes.
+- [x] **Phase G — replication API surface** (commit pending): real
+      per-bucket replication config mapped onto the EXISTING
+      storage-engine cross-account replication — `Destination/Bucket`
+      names a configured TeleDrive credential set, never an AWS ARN;
+      prefix filters are resolved per object at upload and again at
+      repair; overlapping enabled rules are rejected (one replica per
+      chunk). Unsupported AWS options (DeleteMarkerReplication,
+      ReplicaModifications, storage classes, metrics, RTC) are rejected
+      501 instead of silently ignored; `Role` is opaque metadata (no
+      IAM). GET returns the real config or an honest 404. 3 operations
+      promoted. Inventory: **48 supported / 15 partial (0 by code) / 53
+      unsupported**.
+- [ ] **Phase I — website hosting**: per-bucket website configs behind
+      an explicit audited public_read flag; /site/{bucket} route.
+      Converts 1 + promotes writes.
 - [x] **Phase H — CORS grammar widening** (commit pending): one `*`
       anywhere in the host (`*.example.com`, `api-*.example.com`)
       matching exactly one DNS label — never a dot, slash or scheme, so
@@ -493,9 +505,6 @@ dependency order, each independently shippable; A and B first.
       policy only, never authentication. 2 operations promoted.
       Inventory: **45 supported / 16 partial (0 by code) / 55
       unsupported**.
-- [ ] **Phase I — website hosting**: per-bucket website configs behind
-      an explicit audited public_read flag; /site/{bucket} route.
-      Converts 1 + promotes writes.
 - [ ] **Phase J — tagging scope**: pending-tag journal applied at
       publish (attach_uncommitted pattern). Converts 3.
 - [ ] **Phase K — SSE envelope** (owner decision, conflicts with

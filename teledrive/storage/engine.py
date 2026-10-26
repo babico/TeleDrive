@@ -185,16 +185,42 @@ class TelegramObjectStorage:
         except Exception:
             return None
 
+    def replication_destination(self, bucket: str, key: str) -> str | None:
+        """The replica account label for one object, or None.
+
+        A stored per-bucket S3 replication configuration is authoritative:
+        when it exists but no enabled rule matches this key the object is
+        deliberately not replicated (a configured prefix must never be
+        silently ignored). Only buckets with no configuration fall back to
+        the operator-wide ``storage.replica_account`` setting.
+        """
+        try:
+            from teledrive.s3.replication import matching_destination
+            configured, destination = matching_destination(
+                self.manifests.db, bucket, key)
+        except Exception:
+            # An unreadable configuration disables replication for this
+            # object rather than replicating against an unintended target.
+            _engine_logger.warning(
+                "replication configuration unreadable for %s/%s; "
+                "replication disabled for this object", bucket, key,
+                exc_info=True)
+            return None
+        if configured:
+            return destination
+        return self._replica_target()
+
     async def _replicate_chunk(self, identifier: str, ordinal: int,
                                checksum: str, part_path: Path,
-                               primary_account: str) -> None:
+                               primary_account: str,
+                               replica: str | None) -> None:
         """Best-effort second Telegram copy of one chunk.
 
         The primary copy remains the source of truth: a failed replica
         send never fails the upload — the chunk is simply left for a
-        later repair sweep.
+        later repair sweep. ``replica`` is the already-resolved decision
+        (None means "do not replicate", never "use the global default").
         """
-        replica = self._replica_target()
         if not replica or replica == primary_account:
             return
         try:
@@ -226,9 +252,12 @@ class TelegramObjectStorage:
 
         Each primary chunk is downloaded and digest-verified before it is
         re-sent to the replica account, so a corrupt primary can never
-        propagate into the replica copy.
+        propagate into the replica copy. The target is resolved per object
+        from its bucket's replication configuration (falling back to the
+        operator-wide account only when the bucket has no configuration).
         """
-        replica = self._replica_target()
+        obj = self.manifests.get(identifier)
+        replica = self.replication_destination(obj.bucket, obj.key)
         if not replica:
             return 0
         content_id = self.manifests.resolve_content_id(identifier)
@@ -275,6 +304,11 @@ class TelegramObjectStorage:
             full_sha = hashlib.sha256()
             offset = 0
             ordinal = 0
+            # Resolve the replica decision once per object: a stored
+            # bucket configuration is prefix-aware, so every chunk of the
+            # object shares the same answer.
+            replica = (self.replication_destination(bucket, key)
+                       if replicate else None)
             try:
                 if on_begin is not None:
                     on_begin(identifier)
@@ -332,7 +366,7 @@ class TelegramObjectStorage:
                             if replicate:
                                 await self._replicate_chunk(
                                     identifier, ordinal_number, digest,
-                                    part_path, account)
+                                    part_path, account, replica)
                             part_path.unlink()
                 after = os.fstat(handle.fileno())
                 if (offset != before.st_size or before.st_dev != after.st_dev

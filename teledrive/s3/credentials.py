@@ -51,6 +51,9 @@ PERMISSIONS = frozenset({
     "s3:PutObjectLegalHold",
     # ACL grants (Phase D): write paths for the intersection model.
     "s3:PutBucketAcl", "s3:PutObjectAcl",
+    # Bucket replication (Phase G): the S3 surface over the existing
+    # cross-account replica engine. No AWS IAM or cross-region semantics.
+    "s3:PutBucketReplication", "s3:DeleteBucketReplication",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
 

@@ -26,7 +26,7 @@ from defusedxml.common import DefusedXmlException
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 
 from teledrive.db import Database
 from teledrive.s3.credentials import S3CredentialStore, load_master_key
@@ -54,6 +54,9 @@ from teledrive.s3.public_access import (PublicAccessError, MAX_PUBLIC_ACCESS_XML
     parse_public_access_xml, public_access_xml)
 from teledrive.s3.lifecycle import (LifecycleError, MAX_XML as MAX_LIFECYCLE_XML,
     BucketLifecycleStore, parse_lifecycle_xml, lifecycle_xml)
+from teledrive.s3.replication import (ReplicationError,
+    MAX_REPLICATION_XML_BYTES, BucketReplicationStore,
+    parse_replication_xml, replication_xml)
 from teledrive.s3.object_metadata import (
     ObjectMetadataStore, ObjectMetadataError, parse_object_metadata, signed_header_names,
     STANDARD_HEADERS,
@@ -558,11 +561,35 @@ def _virtual_host_bucket(request: Request) -> str | None:
 # READ responses for the enforced private-only model; every configuration
 # attempt fails closed with 501 before any SQL or Telegram side effect.
 
+def _replication_destinations(db) -> set[str]:
+    """Configured TeleDrive credential labels that can receive a replica.
+
+    The live MTProto runtime is authoritative when it is loaded; the
+    persisted ``telegram_sessions`` accounts keep the API usable before a
+    runtime start (and match what the admin replication endpoint accepts).
+    """
+    labels: set[str] = set()
+    runtime = getattr(_webapp, "mtproto_storage_runtime", None)
+    transports = getattr(runtime, "transports", None)
+    if callable(transports):
+        try:
+            labels.update(str(label) for label in transports())
+        except Exception:
+            pass
+    try:
+        rows = db.connection.execute(text(
+            "SELECT account FROM telegram_sessions "
+            "WHERE account IS NOT NULL AND account != ''")).all()
+        labels.update(str(row[0]) for row in rows)
+    except Exception:
+        pass
+    return labels
+
+
 _COMPAT_BUCKET_READS: dict[str, str] = {
     "acl": "s3:GetBucketAcl",
     "ownershipControls": "s3:GetOwnershipControls",
     "policy": "s3:GetBucketPolicy",
-    "replication": "s3:GetBucketReplication",
     "website": "s3:GetBucketWebsite",
     "logging": "s3:GetBucketLogging",
     "notification": "s3:GetBucketNotification",
@@ -626,10 +653,6 @@ def _compat_bucket_read_response(selector: str, owner: str) -> Response:
         return _xml_ok(ET.Element("BucketLoggingStatus", xmlns=NAMESPACE))
     if selector == "policy":
         return _error("NoSuchBucketPolicy", "The bucket policy does not exist", 404)
-    if selector == "replication":
-        return _error("ReplicationConfigurationNotFoundError",
-                      "The specified bucket does not have a replication "
-                      "configuration", 404)
     if selector == "website":
         return _error("NoSuchWebsiteConfiguration",
                       "The specified bucket does not have a website "
@@ -696,6 +719,7 @@ class _S3RequestContext:
     is_public_access_block: bool = False
     is_bucket_lifecycle: bool = False
     is_bucket_policy_status: bool = False
+    is_bucket_replication: bool = False
 
 
 async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
@@ -960,6 +984,39 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
             rules.replace(bucket, None)
             return Response(status_code=204)
         return _error("NotImplemented", "Unsupported lifecycle method", 501)
+    if ctx.is_bucket_replication:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = BucketReplicationStore(
+            catalog, destinations=lambda: _replication_destinations(ctx.db))
+        if request.method == "GET":
+            config = store.get(bucket)
+            if config is None:
+                return _error(
+                    "ReplicationConfigurationNotFoundError",
+                    "The specified bucket does not have a replication "
+                    "configuration", 404)
+            return Response(replication_xml(config), media_type="application/xml")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_REPLICATION_XML_BYTES:
+                    raise ReplicationError(
+                        "MalformedXML", "Replication XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            store.replace(bucket, parse_replication_xml(
+                bytes(payload), store.destination_labels()))
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise ReplicationError(
+                        "InvalidRequest",
+                        "DeleteBucketReplication cannot have a body")
+            store.delete(bucket)
+            return Response(status_code=204)
+        return _error("NotImplemented", "Unsupported replication method", 501)
     if ctx.is_public_access_block:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -2982,6 +3039,7 @@ async def _handle(request: Request):
         is_public_access_block = bool(bucket and not separator and "publicAccessBlock" in request.query_params)
         is_bucket_lifecycle = bool(bucket and not separator and "lifecycle" in request.query_params)
         is_bucket_policy_status = bool(bucket and not separator and "policyStatus" in request.query_params)
+        is_bucket_replication = bool(bucket and not separator and "replication" in request.query_params)
         compat_bucket_read = None
         if bucket and not separator and request.method == "GET":
             compat_bucket_read = next(
@@ -3013,6 +3071,13 @@ async def _handle(request: Request):
                    for name in request.query_params)
         ):
             return _error("InvalidArgument", "Invalid bucket versioning selector", 400)
+        if is_bucket_replication and (
+            len(request.query_params.getlist("replication")) != 1
+            or request.query_params.get("replication") != ""
+            or any(name != "replication" and not name.startswith("X-Amz-")
+                   for name in request.query_params)
+        ):
+            return _error("InvalidArgument", "Invalid replication selector", 400)
         if (is_object_tagging or is_bucket_tagging) and any(
             k in request.query_params for k in ("uploads", "uploadId")
         ):
@@ -3087,6 +3152,12 @@ async def _handle(request: Request):
             }.get(request.method)
         elif is_bucket_policy_status:
             action = "s3:GetBucketPolicyStatus" if request.method == "GET" else None
+        elif is_bucket_replication:
+            action = {
+                "GET": "s3:GetBucketReplication",
+                "PUT": "s3:PutBucketReplication",
+                "DELETE": "s3:DeleteBucketReplication",
+            }.get(request.method)
         elif bucket and not separator and "location" in request.query_params:
             action = "s3:GetBucketLocation" if request.method == "GET" else None
         elif mpu_start or mpu_part or mpu_complete:
@@ -3130,6 +3201,8 @@ async def _handle(request: Request):
             active_compat = "legal-hold"
         elif not separator and "object-lock" in request.query_params:
             active_compat = "object-lock"
+        elif is_bucket_replication:
+            active_compat = "replication"
         if any(parameter in request.query_params and (
             (parameter != "versionId" or not (is_version_read or is_version_tagging or is_version_delete))
             and (parameter != "versions" or not is_version_listing)
@@ -3156,6 +3229,7 @@ async def _handle(request: Request):
             is_public_access_block=is_public_access_block,
             is_bucket_lifecycle=is_bucket_lifecycle,
             is_bucket_policy_status=is_bucket_policy_status,
+            is_bucket_replication=is_bucket_replication,
         )
         if form_upload:
             return await _handle_form_upload(ctx)
@@ -3287,6 +3361,8 @@ async def _handle(request: Request):
     except VersioningError as exc:
         return _error(exc.code, str(exc), exc.status)
     except CORSError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except ReplicationError as exc:
         return _error(exc.code, str(exc), exc.status)
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)

@@ -315,18 +315,17 @@
     },
     {
       "name": "GetBucketReplication",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketReplication",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-D"
     },
     {
       "name": "DeleteBucketReplication",
-      "status": "unsupported",
+      "status": "supported",
       "workstream": "P2-D"
     },
     {

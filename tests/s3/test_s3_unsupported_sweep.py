@@ -33,8 +33,6 @@ REQUESTS = {
     "PutBucketEncryption": ("PUT", "/sweep-bucket?encryption"),
     "DeleteBucketEncryption": ("DELETE", "/sweep-bucket?encryption"),
     # P2-D — replication and restore
-    "PutBucketReplication": ("PUT", "/sweep-bucket?replication"),
-    "DeleteBucketReplication": ("DELETE", "/sweep-bucket?replication"),
     "RestoreObject": ("POST", "/sweep-bucket/asset.bin?restore"),
     # P2-F — website, notifications, logging writes
     "PutBucketWebsite": ("PUT", "/sweep-bucket?website"),

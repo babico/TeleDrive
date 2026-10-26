@@ -89,7 +89,10 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 # Compatibility probes are GET-only; every configuration
                 # attempt (PUT/DELETE) stays fail-closed 501 via `forbidden`.
                 "ownershipControls": {"GET"},
-                "policy": {"GET"}, "replication": {"GET"},
+                "policy": {"GET"},
+                # Phase G: real replication configuration (SQL-backed,
+                # prefix-aware, over the existing replica engine).
+                "replication": {"GET", "PUT", "DELETE"},
                 "website": {"GET"}, "logging": {"GET"},
                 "notification": {"GET"}, "notificationConfiguration": {"GET"},
                 "requestPayment": {"GET"}, "accelerate": {"GET"},

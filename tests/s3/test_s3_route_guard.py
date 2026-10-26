@@ -59,6 +59,14 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
         if reply.status_code == 200:
             root = ET.fromstring(reply.content)
             assert root.tag.rsplit("}", 1)[-1] != "ListBucketResult"
+    elif method == "PUT" and selector in ("replication",):
+        # Phase G: real replication configuration; an empty body is
+        # MalformedXML — never a fallback to bucket CRUD.
+        assert reply.status_code == 400, (method, selector, reply.text)
+        assert b"MalformedXML" in reply.content
+    elif method == "DELETE" and selector == "replication":
+        # Phase G: deleting an absent configuration is idempotent.
+        assert reply.status_code == 204, (method, selector, reply.text)
     elif method == "PUT" and selector in ("object-lock", "acl"):
         # Phase C/D: real lock and ACL configuration controls. An empty
         # body is MalformedXML — never a fallback to bucket CRUD.
@@ -167,7 +175,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":45, "partial":16, "unsupported":55,
+        "supported":48, "partial":15, "unsupported":53,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -181,7 +189,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      for item in data["operations"]
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
-    assert Counter(manifest_gaps.values()) == {"by design": 16}
+    assert Counter(manifest_gaps.values()) == {"by design": 15}
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",
     }

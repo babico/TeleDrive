@@ -158,9 +158,10 @@ promotes the write ops.
   audit-log stream is delivered into the target bucket as objects on
   a schedule (reusing the storage engine itself).
 
-## Phase G — Replication API surface 
+## Phase G — Replication API surface — DONE
 
-**Converts:** GetBucketReplication — 1 partial; promotes the writes.
+**Converted:** GetBucketReplication + PutBucketReplication,
+DeleteBucketReplication — 3 operations promoted.
 
 The storage engine ALREADY does cross-account replication
 (`storage.replica_account`, `storage_replica_chunks`, digest-verifying

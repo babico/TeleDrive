@@ -25,8 +25,8 @@ import json
 import time
 
 from sqlalchemy import (BigInteger, Boolean, Column, Integer, String,
-                        Table, Text, delete, func, insert, not_, select,
-                        text, update)
+                        Table, Text, delete, func, insert, inspect, not_,
+                        select, text, update)
 
 from .catalog import (catalog_metadata, heads, published_versions,
                      removed_versions)
@@ -431,6 +431,13 @@ class RetainedMediaGC:
             db.execute(update(objects).where(
                 objects.c.id == object_id).values(
                 status="gc-collected"))
+            # Phase J: a deferred tag journal for this version can never
+            # be applied once its payload is physically gone.
+            if inspect(db.engine).has_table("storage_pending_tags"):
+                from teledrive.s3.tagging import (
+                    delete_pending_tags_uncommitted,
+                )
+                delete_pending_tags_uncommitted(db, object_id)
         self.db.commit()
         return "collected"
 

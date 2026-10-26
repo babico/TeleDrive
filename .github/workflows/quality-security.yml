@@ -173,7 +173,8 @@ jobs:
             tests/s3/test_s3_object_lock.py \
             tests/s3/test_s3_acl.py \
             tests/s3/test_s3_replication.py \
-            tests/s3/test_s3_notifications.py
+            tests/s3/test_s3_notifications.py \
+            tests/s3/test_s3_tagging_journal.py
       - name: Publish CI run summary
         if: always()
         shell: bash

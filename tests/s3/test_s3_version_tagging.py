@@ -55,18 +55,29 @@ def test_version_specific_tag_mutations_are_independent_and_retain_telegram(serv
     assert service[2].uploads == before
 
 
-def test_unpublished_and_foreign_versions_cannot_be_tagged(service):
+def test_unpublished_version_tags_are_journaled_and_foreign_versions_rejected(service):
     assert signed(service, "PUT", "/backup-bucket").status_code == 200
     db = service[3]()
     try:
         catalog = BucketCatalog(ManifestStore(db))
         staged = catalog.manifests.begin("backup-bucket", "never.bin", 0, 123)
         catalog.manifests.finish(staged, hashlib.sha256(b"").hexdigest(), 123)
+        foreign = catalog.manifests.begin("backup-bucket", "other.bin", 0, 123)
+        catalog.manifests.finish(foreign, hashlib.sha256(b"").hexdigest(), 123)
     finally:
         db.close()
+    path = "/backup-bucket/never.bin?tagging&versionId=" + staged
+    # GET never exposes the deferred journal for an unpublished version.
+    hidden = signed(service, "GET", path)
+    assert hidden.status_code == 404
+    assert b"NoSuchVersion" in hidden.content
+    # Phase J: writes against the CURRENT staging generation are journaled.
+    assert signed(service, "PUT", path, _tag_xml("bad", "data")).status_code == 200
+    assert signed(service, "DELETE", path).status_code == 204
+    # A version that belongs to a different key stays unaddressable.
     for method in ("GET", "DELETE", "PUT"):
-        path = "/backup-bucket/never.bin?tagging&versionId=" + staged
-        result = signed(service, method, path,
+        foreign_path = "/backup-bucket/never.bin?tagging&versionId=" + foreign
+        result = signed(service, method, foreign_path,
                         _tag_xml("bad", "data") if method == "PUT" else b"")
         assert result.status_code == 404
         assert b"NoSuchVersion" in result.content

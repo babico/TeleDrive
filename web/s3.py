@@ -2388,14 +2388,6 @@ async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
         selected_id = request.query_params.get("versionId", "")
         if not selected_id or len(selected_id) > 80:
             return _error("InvalidArgument", "Invalid object VersionId", 400)
-        if not catalog.is_visible_version(bucket, key, selected_id):
-            return _error("NoSuchVersion", "Object version is not published", 404)
-        try:
-            version_item = catalog.manifests.get(selected_id)
-        except FileNotFoundError:
-            return _error("NoSuchVersion", "Object version is not ready", 404)
-        if version_item.bucket != bucket or version_item.key != key:
-            return _error("NoSuchVersion", "Version ownership mismatch", 404)
         target_id = selected_id
     else:
         try:
@@ -2404,13 +2396,21 @@ async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
             return _error("NoSuchKey", "Object does not exist", 404)
     tags = ObjectTagStore(catalog)
     if request.method == "GET":
+        if is_version_tagging:
+            # Phase J: never expose a deferred (unpublished) journal through
+            # GET. Only a proven published version is readable.
+            if not catalog.is_visible_version(bucket, key, target_id):
+                return _error("NoSuchVersion", "Object version is not published", 404)
         return Response(_tag_xml(tags.get(target_id)),
                         media_type="application/xml", status_code=200,
                         headers={"x-amz-version-id": target_id})
     if request.method == "PUT":
         parsed = await _tag_request_tags(request)
         if is_version_tagging:
-            tags.replace_published(bucket, key, target_id, parsed)
+            # Published -> real tags; READY-but-unpublished -> journal that
+            # publish applies atomically in the head-move transaction.
+            tags.replace_version(bucket, key, target_id, parsed,
+                                 actor=ctx.owner)
         else:
             tags.replace_current(bucket, key, parsed)
         return Response(status_code=200, headers={"x-amz-version-id": target_id})
@@ -2419,7 +2419,7 @@ async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
             if block:
                 raise TaggingError("InvalidRequest", "DeleteObjectTagging must have no body")
         if is_version_tagging:
-            tags.replace_published(bucket, key, target_id, [])
+            tags.replace_version(bucket, key, target_id, [], actor=ctx.owner)
         else:
             tags.replace_current(bucket, key, [])
         return Response(status_code=204, headers={"x-amz-version-id": target_id})

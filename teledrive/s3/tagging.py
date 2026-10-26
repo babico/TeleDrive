@@ -6,16 +6,17 @@ source. An object head is locked before current-version tag mutation.
 """
 from __future__ import annotations
 
-import re
+import json
 import time
 
 from sqlalchemy import (
-    Column, ForeignKey, String, Table, delete, insert, select, update,
+    BigInteger, Column, ForeignKey, String, Table, Text, delete, insert,
+    select, update,
 )
-from sqlalchemy.exc import IntegrityError
 
 from teledrive.storage.catalog import (
-    BucketCatalog, heads, removed_versions, catalog_metadata,
+    BucketCatalog, heads, published_versions, removed_versions,
+    catalog_metadata,
 )
 from teledrive.storage.manifest import metadata as _meta, objects
 object_tags = Table(
@@ -23,6 +24,16 @@ object_tags = Table(
     Column("object_id", String(36), ForeignKey("storage_objects.id"), primary_key=True),
     Column("tag_key", String(512), primary_key=True),
     Column("tag_value", String(1024), nullable=False),
+)
+# Phase J: tagging writes against a READY-but-unpublished version are
+# journaled here and applied in the SAME transaction as the head move.
+# A pending row is never observable through GetObjectTagging.
+pending_tags = Table(
+    "storage_pending_tags", _meta,
+    Column("object_id", String(36), ForeignKey("storage_objects.id"), primary_key=True),
+    Column("tags", Text, nullable=False),
+    Column("updated_ns", BigInteger, nullable=False),
+    Column("actor", String(255), nullable=False),
 )
 
 
@@ -65,11 +76,65 @@ def validate_tags(tags: list[tuple[str, str]], *, max_tags: int = 10) -> list[tu
     return result
 
 
+def _decode_pending_tags(raw: str) -> list[tuple[str, str]]:
+    return [(str(key), str(value)) for key, value in json.loads(raw)]
+
+
+def journal_pending_tags_uncommitted(connection, object_id: str,
+                                     tags: list[tuple[str, str]],
+                                     actor: str) -> None:
+    """Stage validated tags in the caller's transaction; never commit.
+
+    The journal is keyed by one object version and is applied exactly once
+    inside ``BucketCatalog.publish``. An empty tag set removes the row.
+    """
+    connection.execute(delete(pending_tags).where(
+        pending_tags.c.object_id == object_id))
+    if tags:
+        connection.execute(insert(pending_tags).values(
+            object_id=object_id,
+            tags=json.dumps(tags, ensure_ascii=False),
+            updated_ns=time.time_ns(),
+            actor=(actor or "")[:255],
+        ))
+
+
+def apply_pending_tags_uncommitted(connection, object_id: str) -> bool:
+    """Apply a journaled tag set in the publish transaction.
+
+    Returns True when a journal row existed. The row is deleted only in
+    the same transaction that installs the real version tags, so a failed
+    publish leaves neither visible tags nor a half-applied journal.
+    """
+    raw = connection.execute(
+        select(pending_tags.c.tags).where(
+            pending_tags.c.object_id == object_id)
+    ).scalar_one_or_none()
+    if raw is None:
+        return False
+    tags = validate_tags(_decode_pending_tags(raw))
+    connection.execute(delete(object_tags).where(
+        object_tags.c.object_id == object_id))
+    for tag_key, tag_value in tags:
+        connection.execute(insert(object_tags).values(
+            object_id=object_id, tag_key=tag_key, tag_value=tag_value,
+        ))
+    connection.execute(delete(pending_tags).where(
+        pending_tags.c.object_id == object_id))
+    return True
+
+
+def delete_pending_tags_uncommitted(connection, object_id: str) -> None:
+    """Reclaim a journal row in the caller's revision/GC transaction."""
+    connection.execute(delete(pending_tags).where(
+        pending_tags.c.object_id == object_id))
+
+
 class ObjectTagStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog = catalog
         self.db = catalog.db
-        _meta.create_all(self.db.engine, tables=[object_tags])
+        _meta.create_all(self.db.engine, tables=[object_tags, pending_tags])
 
     def get(self, object_id: str) -> list[tuple[str, str]]:
         return list(self.db.connection.execute(
@@ -77,6 +142,14 @@ class ObjectTagStore:
             .where(object_tags.c.object_id == object_id)
             .order_by(object_tags.c.tag_key)
         ).all())
+
+    def get_pending(self, object_id: str) -> list[tuple[str, str]] | None:
+        """Inspection helper; never used by a public GET response."""
+        raw = self.db.connection.execute(
+            select(pending_tags.c.tags).where(
+                pending_tags.c.object_id == object_id)
+        ).scalar_one_or_none()
+        return None if raw is None else _decode_pending_tags(raw)
 
     def replace_current(self, bucket: str, key: str,
                         tags: list[tuple[str, str]]) -> str:
@@ -146,6 +219,64 @@ class ObjectTagStore:
                     object_id=identifier, tag_key=tag_key, tag_value=tag_value,
                 ))
             self.db.commit()
+        except BaseException:
+            self.db.connection.rollback()
+            raise
+
+    def replace_version(self, bucket: str, key: str, identifier: str,
+                        tags: list[tuple[str, str]], *,
+                        actor: str = "") -> str:
+        """Tag a published version, or journal a READY-but-unpublished one.
+
+        The object row lock serializes this decision with ``publish``: if a
+        concurrent publish commits first this writes the real version tags;
+        otherwise it stages the journal that publish applies atomically.
+        Returns ``"published"`` or ``"pending"``.
+        """
+        tags = validate_tags(tags)
+        try:
+            locked = self.db.connection.execute(
+                update(objects).where(
+                    objects.c.id == identifier,
+                    objects.c.bucket == bucket,
+                    objects.c.object_key == key,
+                    objects.c.status == "ready",
+                ).values(updated_at=objects.c.updated_at)
+            )
+            if locked.rowcount != 1:
+                raise TaggingError("NoSuchVersion", "Object version unavailable", 404)
+            revoked = self.db.connection.execute(
+                select(removed_versions.c.object_id).where(
+                    removed_versions.c.object_id == identifier
+                ).with_for_update()
+            ).scalar_one_or_none()
+            if revoked is not None:
+                raise TaggingError("NoSuchVersion", "Object version revoked", 404)
+            published = self.db.connection.execute(
+                select(published_versions.c.object_id).where(
+                    published_versions.c.object_id == identifier)
+            ).scalar_one_or_none()
+            if published is not None:
+                if not self.catalog.is_visible_version(bucket, key, identifier):
+                    raise TaggingError(
+                        "NoSuchVersion", "Object version unavailable", 404)
+                self.db.connection.execute(
+                    delete(object_tags).where(
+                        object_tags.c.object_id == identifier)
+                )
+                for tag_key, tag_value in tags:
+                    self.db.connection.execute(insert(object_tags).values(
+                        object_id=identifier, tag_key=tag_key,
+                        tag_value=tag_value,
+                    ))
+                delete_pending_tags_uncommitted(self.db.connection, identifier)
+                mode = "published"
+            else:
+                journal_pending_tags_uncommitted(
+                    self.db.connection, identifier, tags, actor)
+                mode = "pending"
+            self.db.commit()
+            return mode
         except BaseException:
             self.db.connection.rollback()
             raise

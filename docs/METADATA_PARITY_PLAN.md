@@ -200,9 +200,10 @@ repair). Map the S3 API onto it:
   Objects remain private unless the flag is set; share-link routes
   are unaffected.
 
-## Phase J — Tagging scope (deferred journal) 
+## Phase J — Tagging scope (deferred journal) — DONE
 
-**Converts:** Get/Put/DeleteObjectTagging — 3 partials.
+**Converted:** GetObjectTagging, PutObjectTagging, DeleteObjectTagging —
+3 operations promoted.
 
 - Keep the write fence (staged manifests stay non-addressable by
   VersionId), but accept tagging writes against the CURRENT head's

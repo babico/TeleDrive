@@ -588,6 +588,7 @@ class BucketCatalog:
             ))
             self._enqueue_notification(
                 "s3:ObjectRemoved:Delete", bucket, key, version_id=row[0])
+            self._delete_pending_tags(row[0])
             self.db.commit()
             return None
         marker = str(uuid4())
@@ -717,6 +718,7 @@ class BucketCatalog:
             self._enqueue_notification(
                 "s3:ObjectRemoved:Delete", bucket, key,
                 version_id=version_id)
+            self._delete_pending_tags(version_id)
             self.db.commit()
             return True
         except IntegrityError:
@@ -953,14 +955,27 @@ class BucketCatalog:
         digest = self._keyhash(item.key)
         if item.bucket not in self.list_buckets():
             raise ValueError("Bucket does not exist")
+        # Phase J: serialize publication with a concurrent tagging write on
+        # this exact version. That writer either journals before this lock
+        # (so the journal is applied below) or observes the published row
+        # after it and writes real tags instead.
+        locked = self.db.connection.execute(
+            update(objects).where(objects.c.id == identifier).values(
+                updated_at=objects.c.updated_at)
+        )
+        if locked.rowcount != 1:
+            self.db.connection.rollback()
+            raise ValueError("Object version unavailable")
         existing = self.db.connection.execute(
             select(heads.c.object_id, heads.c.generation)
             .where(heads.c.bucket == item.bucket, heads.c.key_hash == digest)
         ).first()
         if existing is None:
             if expected_object_id is not None:
+                self.db.connection.rollback()
                 raise ValueError("Object changed; object ID precondition failed")
             if expected_generation not in (None, 0):
+                self.db.connection.rollback()
                 raise ValueError("Object changed; generation precondition failed")
             try:
                 with self.db.connection.begin_nested():
@@ -969,8 +984,10 @@ class BucketCatalog:
                         generation=1, updated_at=now,
                     ))
             except IntegrityError as exc:
+                self.db.connection.rollback()
                 raise ValueError("Concurrent object creation; retry with generation") from exc
             self._record_published_uncommitted(item)
+            self._apply_pending_tags(identifier)
             self._enqueue_notification(
                 event_type, item.bucket, item.key, version_id=item.id)
             self.db.commit()
@@ -983,13 +1000,17 @@ class BucketCatalog:
             objects.c.bucket, objects.c.object_key, objects.c.status,
         ).where(objects.c.id == existing[0])).one_or_none()
         if old is None or old[0] != item.bucket or old[1] != item.key:
+            self.db.connection.rollback()
             raise RuntimeError("Object hash collision detected")
         if old[2] not in ("ready", "delete-marker"):
+            self.db.connection.rollback()
             raise RuntimeError("Current head refers to a non-published object")
         generation = int(existing[1])
         if expected_object_id is not None and expected_object_id != existing[0]:
+            self.db.connection.rollback()
             raise ValueError("Object changed; object ID precondition failed")
         if expected_generation is not None and expected_generation != generation:
+            self.db.connection.rollback()
             raise ValueError("Object changed; generation precondition failed")
         changed = self.db.connection.execute(
             update(heads)
@@ -1011,11 +1032,30 @@ class BucketCatalog:
                 object_id=existing[0], removed_ns=time.time_ns(),
             ))
         self._record_published_uncommitted(item)
+        self._apply_pending_tags(identifier)
         self._enqueue_notification(
             event_type, item.bucket, item.key, version_id=item.id)
         self.db.commit()
         self.apply_default_lock(item.id)
         return ObjectHead(item, generation + 1)
+
+    def _apply_pending_tags(self, identifier: str) -> None:
+        """Apply a Phase J tag journal in the current publish transaction."""
+        from teledrive.s3.tagging import apply_pending_tags_uncommitted
+        try:
+            apply_pending_tags_uncommitted(self.db.connection, identifier)
+        except BaseException:
+            # A malformed journal or SQL failure must not publish a version
+            # without the tags its writer was promised.
+            self.db.connection.rollback()
+            raise
+
+    def _delete_pending_tags(self, identifier: str) -> None:
+        """Reclaim a Phase J journal row in the caller's transaction."""
+        if not inspect(self.db.engine).has_table("storage_pending_tags"):
+            return
+        from teledrive.s3.tagging import delete_pending_tags_uncommitted
+        delete_pending_tags_uncommitted(self.db.connection, identifier)
 
     def list_objects(self, bucket: str, *, prefix: str = "",
                      after: str | None = None, limit: int = 100) -> list[ObjectHead]:
@@ -1102,5 +1142,14 @@ class BucketCatalog:
                 text("DELETE FROM storage_bucket_cors WHERE bucket = :bucket"),
                 {"bucket": name},
             )
+        # Phase J: never leave a deferred tag journal behind. Rows owned by
+        # this bucket are removed explicitly; orphan rows (their manifest is
+        # already gone) are equally unreclaimable and removed as well.
+        if inspect(self.db.engine).has_table("storage_pending_tags"):
+            self.db.connection.execute(text(
+                "DELETE FROM storage_pending_tags WHERE object_id IN "
+                "(SELECT id FROM storage_objects WHERE bucket = :bucket) "
+                "OR object_id NOT IN (SELECT id FROM storage_objects)"
+            ), {"bucket": name})
         self.db.connection.execute(delete(buckets).where(buckets.c.name == name))
         self.db.commit()

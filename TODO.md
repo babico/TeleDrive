@@ -519,8 +519,17 @@ dependency order, each independently shippable; A and B first.
       policy only, never authentication. 2 operations promoted.
       Inventory: **45 supported / 16 partial (0 by code) / 55
       unsupported**.
-- [ ] **Phase J — tagging scope**: pending-tag journal applied at
-      publish (attach_uncommitted pattern). Converts 3.
+- [x] **Phase J — tagging scope** (commit pending): deferred tag
+      journal. `Put/DeleteObjectTagging` on the current head's pending
+      generation now journals into `storage_pending_tags` instead of
+      refusing; `BucketCatalog.publish` applies the journal in the SAME
+      transaction as the head CAS (rollback takes the tags with it), and
+      the journal is never exposed by `GetObjectTagging` — a
+      non-published version still answers NoSuchVersion, so staging is
+      not addressable through tags. Journal rows are reclaimed on
+      version revocation, physical GC collection and bucket deletion.
+      3 operations promoted. Inventory: **57 supported / 9 partial (0 by
+      code) / 50 unsupported**.
 - [ ] **Phase K — SSE envelope** (owner decision, conflicts with
       dedup/replication/search). Converts 1.
 - Kept by-design forever: RequestPayment, Accelerate — no honest

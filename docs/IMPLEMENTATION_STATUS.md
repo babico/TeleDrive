@@ -18,7 +18,7 @@
 
 **Published release:** [v1.0.7](https://github.com/babico/TeleDrive/releases/tag/v1.0.7), source SHA `747747652cd1ca36878453d49daf627d8c0a60ad`. Published release contents are not automatically updated when new development commits reach `main`. Release notes and binaries belong on [GitHub Releases](https://github.com/babico/TeleDrive/releases), not in a separate per-version Markdown file.
 
-**Current CI audit (2026-10-23):** the seven workflows on `4ff51d44a839e8b21c0ac05bb202fe94d62dd8e0` produced six successes and **one failure** (CI 2 · Integration). The failure was an obsolete environment-variable test expecting HTTP 503 instead of the actual HTTP 422 outside-root rejection; it does not demonstrate data corruption. This is being corrected in regression tests. Earlier nine-workflow baseline `c2b76880b4ada3d61d47a7926ea819244047fa33` passed under the now-retired Bot/Desktop architecture. Do not infer success on newer revisions; check [exact-SHA Actions](https://github.com/babico/TeleDrive/actions).
+**Current CI audit (2026-10-26):** all **six automatic workflows** on `9c4769d` passed. The seventh workflow YAML is the manual endurance soak (`workflow_dispatch`) and is not part of the automatic matrix. Earlier nine-workflow baseline `c2b76880b4ada3d61d47a7926ea819244047fa33` passed under the now-retired Bot/Desktop architecture. Do not infer success on newer revisions; check [exact-SHA Actions](https://github.com/babico/TeleDrive/actions).
 
 ### P0: implementation boundaries
 

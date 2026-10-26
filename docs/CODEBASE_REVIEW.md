@@ -7,6 +7,23 @@
 
 ---
 
+## 0.1 Düzeltme durumu (2026-10-26)
+
+Denetimden sonra kapatılan bulgular — her biri regresyon testiyle:
+
+| Bulgu | Durum | Commit / kanıt |
+|---|---|---|
+| **P4** API key ile yetki yükseltme (mint/rotate/revoke) | ✅ Kapandı | `9c4769d` — delegasyon tavanı: anahtar yalnız kendi izin kümesi içinde devredebilir; `test_api_key_cannot_mint_beyond_its_own_permissions`, `..._rotation_cannot_steal_a_more_privileged_key`, `..._cannot_revoke_above_its_own_authority` |
+| **P8** batch delete / CopyObject / UploadPartCopy ACL bypass | ✅ Kapandı | `9c4769d` — her batch girdisi kendi key'iyle, her iki copy yolu kaynak ACL'iyle denetleniyor; `test_batch_delete_honours_per_object_acl`, `test_copy_object_honours_the_source_object_acl` |
+| **P9** ACL sahipliği devredilebilir (takeover) | ✅ Kapandı | `9c4769d` — sahiplik değiştirilemez; başka Owner adı 400; `test_block_public_acls_locks_acl_writes_to_the_owner` |
+| **P11** süresi geçmiş credential reveal + presign kapsamı | ✅ Kapandı | `9c4769d` — `reveal()` expired'ı reddeder, presign `s3:GetObject` ister; `test_reveal_refuses_expired_credential` |
+| **P3** fiziksel GC operator'e açık | ✅ Kapandı | `9c4769d` — GC toggle + collect artık admin-only; `test_physical_gc_is_admin_only` |
+| **P7** audit kimliği spoof edilebilir | ✅ Kapandı | `4365694` — doğrulanmamış Basic adı `unverified-basic` yazılır; canlıda doğrulandı (`[unverified-basic] ... -> 401`) |
+| O4 şema başlatma yarışı | ⏳ Açık | Ayrı bir migration/kilit refactor'ı gerektiriyor (§3.3) |
+| P1/P2/P5/P6/P10, O1/O5/O12, A1–A4 | ⏳ Açık | Yapısal refactor; §4'teki sıraya göre ele alınmalı |
+
+> Not: P5 (session ile bearer arasındaki yetki asimetrisi) ve P6 (legacy Basic = koşulsuz admin) **tasarım kararı** gerektirir; ikisi de geriye dönük uyumluluk sözleşmesini değiştirir, bu yüzden otomatik düzeltilmedi.
+
 ## 0. Yönetici Özeti
 
 - **20.051 satır** üretim kodu (`teledrive/**/*.py`, `web/*.py`) ve **3.506 satır** frontend (`web/static/*.js|html`, vendor dahil; iş kodu 3.402) var. Test kodu **~23.500 satır**; test/üretim oranı sağlıklı (~1.17).

@@ -43,6 +43,9 @@ PERMISSIONS = frozenset({
     "s3:GetOwnershipControls", "s3:GetBucketPolicy",
     "s3:GetBucketReplication", "s3:GetBucketWebsite",
     "s3:GetBucketNotification", "s3:GetBucketLogging",
+    # Website configuration (Phase I). The public read gate itself is an
+    # admin API decision, never an S3 credential permission.
+    "s3:PutBucketWebsite", "s3:DeleteBucketWebsite",
     # Notification webhooks and access-logging configuration (Phase F).
     "s3:PutBucketNotification", "s3:PutBucketLogging",
     "s3:GetBucketRequestPayment", "s3:GetAccelerateConfiguration",

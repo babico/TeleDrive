@@ -337,19 +337,18 @@
     },
     {
       "name": "GetBucketWebsite",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketWebsite",
-      "status": "unsupported",
-      "workstream": "P2-F"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteBucketWebsite",
-      "status": "unsupported",
-      "workstream": "P2-F"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketNotification",

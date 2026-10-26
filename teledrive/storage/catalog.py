@@ -50,6 +50,11 @@ buckets = Table(
            '"RestrictPublicBuckets": true}'),
     Column("object_ownership", String(32), nullable=False,
            server_default="BucketOwnerEnforced"),
+    # Phase I: website hosting is public only after an explicit, audited
+    # admin decision. It defaults to FALSE and is never implied by a
+    # stored website configuration.
+    Column("public_read", Boolean, nullable=False,
+           server_default=false()),
 )
 object_acl_grants = Table(
     "storage_object_acl_grants", catalog_metadata,
@@ -161,6 +166,13 @@ def ensure_versioning_column(db) -> None:
         db.connection.execute(_text(
             "ALTER TABLE storage_buckets ADD COLUMN object_ownership "
             "VARCHAR(32) NOT NULL DEFAULT 'BucketOwnerEnforced'"))
+        db.commit()
+    if bucket_columns and "public_read" not in bucket_columns:
+        # Phase I: website hosting stays private until an explicit admin
+        # decision. Existing deployments therefore start closed.
+        db.connection.execute(_text(
+            "ALTER TABLE storage_buckets ADD COLUMN public_read "
+            "BOOLEAN NOT NULL DEFAULT false"))
         db.commit()
     object_columns = columns_of("storage_objects")
     if object_columns and "retention_until_ns" not in object_columns:
@@ -463,6 +475,15 @@ class BucketCatalog:
         if value is None:
             raise FileNotFoundError("Bucket does not exist")
         return value
+
+    def public_read(self, bucket: str) -> bool:
+        """The website public-read gate (default FALSE)."""
+        value = self.db.connection.execute(
+            select(buckets.c.public_read)
+            .where(buckets.c.name == bucket)).scalar_one_or_none()
+        if value is None:
+            raise FileNotFoundError("Bucket does not exist")
+        return bool(value)
 
     def acl_grants_for(self, bucket: str, key: str | None) -> tuple[list, list]:
         """(bucket_rows, object_rows) for the ACL intersection gate:
@@ -1159,5 +1180,15 @@ class BucketCatalog:
                 "(SELECT id FROM storage_objects WHERE bucket = :bucket) "
                 "OR object_id NOT IN (SELECT id FROM storage_objects)"
             ), {"bucket": name})
+        # Phase I: deleting a bucket must not leave website state or a
+        # public_read gate behind. The bucket row is removed below, but
+        # clear both explicitly so the intent is local and testable.
+        if inspect(self.db.engine).has_table("storage_website_configs"):
+            self.db.connection.execute(
+                text("DELETE FROM storage_website_configs WHERE bucket = :bucket"),
+                {"bucket": name},
+            )
+        self.db.connection.execute(
+            update(buckets).where(buckets.c.name == name).values(public_read=False))
         self.db.connection.execute(delete(buckets).where(buckets.c.name == name))
         self.db.commit()

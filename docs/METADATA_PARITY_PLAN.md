@@ -187,9 +187,10 @@ repair). Map the S3 API onto it:
 - `storage_cors_rules` validation table gains pattern-compilation for
   origin matching (compiled per rule, cached).
 
-## Phase I — Website hosting 
+## Phase I — Website hosting — DONE
 
-**Converts:** GetBucketWebsite — 1 partial; promotes the writes.
+**Converted:** GetBucketWebsite + PutBucketWebsite, DeleteBucketWebsite —
+3 operations promoted.
 
 - `storage_website_configs` (index document, error document) per
   bucket, gated by a per-bucket `public_read` flag (an explicit,

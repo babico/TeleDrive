@@ -62,6 +62,10 @@ from teledrive.s3.notifications import (
     MAX_LOGGING_XML_BYTES, approved_destinations, destination_is_approved,
     logging_xml, notification_xml, parse_logging_xml, parse_notification_xml,
 )
+from teledrive.s3.website import (
+    MAX_WEBSITE_XML_BYTES, WebsiteConfigStore, WebsiteError,
+    parse_website_xml, website_xml,
+)
 from teledrive.s3.object_metadata import (
     ObjectMetadataStore, ObjectMetadataError, parse_object_metadata, signed_header_names,
     STANDARD_HEADERS,
@@ -725,6 +729,7 @@ class _S3RequestContext:
     is_bucket_lifecycle: bool = False
     is_bucket_policy_status: bool = False
     is_bucket_replication: bool = False
+    is_bucket_website: bool = False
     is_bucket_notification: bool = False
     is_bucket_logging: bool = False
 
@@ -978,6 +983,39 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
         return Response(
             _xml("PolicyStatus", [("IsPublic", "true" if is_public else "false")]),
             media_type="application/xml")
+    if ctx.is_bucket_website:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = WebsiteConfigStore(catalog)
+        if request.method == "GET":
+            config = store.get(bucket)
+            if config is None or not config.get("enabled", True):
+                return _error(
+                    "NoSuchWebsiteConfiguration",
+                    "The specified bucket does not have a website "
+                    "configuration", 404)
+            return Response(website_xml(config), media_type="application/xml")
+        if request.method == "PUT":
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_WEBSITE_XML_BYTES:
+                    raise WebsiteError("MalformedXML",
+                                       "Website XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(payload))
+            store.replace(bucket, parse_website_xml(bytes(payload)))
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise WebsiteError(
+                        "InvalidRequest",
+                        "DeleteBucketWebsite cannot have a body")
+            # Atomic: removes the configuration and revokes public_read,
+            # so a deleted site never leaves a publicly readable bucket.
+            store.delete(bucket)
+            return Response(status_code=204)
+        return _error("NotImplemented", "Unsupported website method", 501)
     if ctx.is_bucket_notification:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -3115,6 +3153,7 @@ async def _handle(request: Request):
         is_bucket_lifecycle = bool(bucket and not separator and "lifecycle" in request.query_params)
         is_bucket_policy_status = bool(bucket and not separator and "policyStatus" in request.query_params)
         is_bucket_replication = bool(bucket and not separator and "replication" in request.query_params)
+        is_bucket_website = bool(bucket and not separator and "website" in request.query_params)
         is_bucket_notification = bool(
             bucket and not separator
             and ("notification" in request.query_params
@@ -3171,6 +3210,12 @@ async def _handle(request: Request):
         elif is_bucket_logging:
             action = {"GET": "s3:GetBucketLogging",
                       "PUT": "s3:PutBucketLogging"}.get(request.method)
+        elif is_bucket_website:
+            action = {
+                "GET": "s3:GetBucketWebsite",
+                "PUT": "s3:PutBucketWebsite",
+                "DELETE": "s3:DeleteBucketWebsite",
+            }.get(request.method)
         elif compat_bucket_read is not None:
             action = _COMPAT_BUCKET_READS[compat_bucket_read]
         elif compat_object_read is not None:
@@ -3325,6 +3370,7 @@ async def _handle(request: Request):
             is_bucket_logging=is_bucket_logging,
             is_bucket_policy_status=is_bucket_policy_status,
             is_bucket_replication=is_bucket_replication,
+            is_bucket_website=is_bucket_website,
         )
         if form_upload:
             return await _handle_form_upload(ctx)
@@ -3460,6 +3506,8 @@ async def _handle(request: Request):
     except ReplicationError as exc:
         return _error(exc.code, str(exc), exc.status)
     except NotificationError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except WebsiteError as exc:
         return _error(exc.code, str(exc), exc.status)
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)

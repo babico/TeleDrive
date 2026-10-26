@@ -105,8 +105,6 @@ def test_object_lock_reads_return_not_configured(service, bucket):
     ("PUT", "/compat-bucket?ownershipControls"),
     ("PUT", "/compat-bucket?policy"),
     ("DELETE", "/compat-bucket?policy"),
-    ("PUT", "/compat-bucket?website"),
-    ("DELETE", "/compat-bucket?website"),
     ("PUT", "/compat-bucket?requestPayment"),
     ("PUT", "/compat-bucket?accelerate"),
     ("PUT", "/compat-bucket?encryption"),
@@ -116,6 +114,8 @@ def test_object_lock_reads_return_not_configured(service, bucket):
     # PUT ?acl (bucket and object) is a REAL Phase D control — covered
     # by tests/s3/test_s3_acl.py. PUT/DELETE ?replication are REAL Phase
     # G controls — covered by tests/s3/test_s3_replication.py.
+    # Website configuration is a REAL Phase I control — covered by
+    # tests/s3/test_s3_website.py.
     # Notification and logging are REAL Phase F stores — covered by
     # tests/s3/test_s3_notifications.py.
     ("POST", "/compat-bucket/item?restore"),

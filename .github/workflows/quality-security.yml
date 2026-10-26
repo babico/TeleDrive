@@ -174,7 +174,8 @@ jobs:
             tests/s3/test_s3_acl.py \
             tests/s3/test_s3_replication.py \
             tests/s3/test_s3_notifications.py \
-            tests/s3/test_s3_tagging_journal.py
+            tests/s3/test_s3_tagging_journal.py \
+            tests/s3/test_s3_website.py
       - name: Publish CI run summary
         if: always()
         shell: bash
@@ -217,6 +218,7 @@ jobs:
             tests/web/test_public_s3_origin.py \
             tests/web/test_public_certificate.py \
             tests/web/test_settings_persistence.py \
+            tests/web/test_website_admin.py \
             tests/web/test_auth_rbac.py \
             tests/web/test_per_route_permissions.py \
             tests/meta/test_host_soak.py \

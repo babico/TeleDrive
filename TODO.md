@@ -505,9 +505,20 @@ dependency order, each independently shippable; A and B first.
       IAM). GET returns the real config or an honest 404. 3 operations
       promoted. Inventory: **48 supported / 15 partial (0 by code) / 53
       unsupported**.
-- [ ] **Phase I — website hosting**: per-bucket website configs behind
-      an explicit audited public_read flag; /site/{bucket} route.
-      Converts 1 + promotes writes.
+- [x] **Phase I — website hosting** (commit pending): per-bucket
+      index/error documents in `storage_website_configs`, served
+      anonymously at `/site/{bucket}/...` ONLY when the bucket's
+      `public_read` gate is on — a default-false column that only an
+      admin (not operator, not an S3 credential) can flip, audit-logged.
+      Serving resolves current ready heads only (no staging, no delete
+      markers, no history), implements directory-index and error-document
+      semantics, never lists directories, rejects traversal/absolute
+      paths and serves an inert sandboxed CSP (`default-src 'none'`, no
+      same-origin access to the app). DeleteBucketWebsite clears the
+      config AND the gate together, and bucket deletion cleans up both.
+      RedirectAllRequestsTo/RoutingRules return an honest 501. 3
+      operations promoted. Inventory: **60 supported / 8 partial (0 by
+      code) / 48 unsupported**.
 - [x] **Phase H — CORS grammar widening** (commit pending): one `*`
       anywhere in the host (`*.example.com`, `api-*.example.com`)
       matching exactly one DNS label — never a dot, slash or scheme, so

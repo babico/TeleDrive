@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 57 supported, 9 partial (0 by code, 9 by design), 50 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 60 supported, 8 partial (0 by code, 8 by design), 48 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -96,6 +96,9 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [GetObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTagging.html) | ✅ Supported | Current or published VersionId tags. The deferred journal is never exposed: a non-published version still answers NoSuchVersion, so staging remains unaddressable through tags. |
 | [PutObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObjectTagging.html) | ✅ Supported | Tags a published version directly, or JOURNALs them for the current head's pending generation (`storage_pending_tags`) when not yet published. Grammar is strictly validated (10 tags, key/value bounds, no duplicates) before either path. The journal is applied in the SAME transaction as the head move at publish, so no window exists in which staging becomes addressable; a failed publish rolls back the tags with it. |
 | [DeleteObjectTagging](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjectTagging.html) | ✅ Supported | Same two-path contract as PutObjectTagging (published direct, pending journal). Journal rows are reclaimed on version revocation, physical GC collection and bucket deletion. |
+| [GetBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html) | ✅ Supported | Reads the bucket's real index/error document configuration or an honest 404 `NoSuchWebsiteConfiguration`. |
+| [PutBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketWebsite.html) | ✅ Supported | Stores index and error documents (strict 16 KiB bounded XML). `RedirectAllRequestsTo` and `RoutingRules` are rejected 501 rather than silently ignored. Writing this document never publishes anything: the anonymous `/site/{bucket}/` route stays inert until an admin turns on `public_read` for the bucket. |
+| [DeleteBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketWebsite.html) | ✅ Supported | Removes the config AND clears `public_read` in the same transaction, so deleting a site can never leave a publicly readable bucket behind. |
 | [ListObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjects.html) | ✅ Supported | V1 listing with per-object `Owner` in `Contents` (deployment owner identity, as AWS V1 always includes), prefix, delimiter, marker, CommonPrefixes, encoding-type=url, bounded max-keys and NextMarker continuation (including CommonPrefix markers). |
 | [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html) | ✅ Supported | V2 listing with `fetch-owner` controlling the per-object `Owner` element, HMAC-scoped continuation, start-after, prefix, delimiter, CommonPrefixes, encoding-type=url, KeyCount and bounded max-keys. |
 | [UploadPart](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html) | ✅ Supported | 1–10,000 part numbers, configured part-size bound, aws-chunked streaming part bodies with the same decoder and trailer verification as PutObject, and every supplied checksum verified before any Telegram send: SHA-256, Content-MD5, SHA-1, CRC32, CRC32C and CRC64NVME. |
@@ -167,7 +170,6 @@ Accelerate stay by-design (no honest backing exists).
 | [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html) | 🟡 Partial | by design | private-only: absent AWS headers describe features that do not exist here | Basic object metadata and selected VersionId/read preconditions. |
 | [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | 🟡 Partial | by design | private-only: SSE/retention/storage-tier variants have no backing | Signed initiation and selected metadata. |
 | [GetBucketPolicy](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketPolicy.html) | 🟡 Partial | by design | private-only: no policy engine exists to read | Always 404 `NoSuchBucketPolicy`; policy writes fail closed. |
-| [GetBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html) | 🟡 Partial | by design | private-only: website hosting contradicts the private model | Always 404 `NoSuchWebsiteConfiguration`; website writes fail closed. |
 | [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | by design | private-only: SSE has no backing over Telegram | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
 | [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | by design | private-only: no requester-pays billing exists | Always `Payer=BucketOwner`; request-payer writes fail closed. |
 | [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | by design | private-only: no transfer acceleration exists | Always `Suspended`; accelerate writes fail closed. |
@@ -261,8 +263,6 @@ Specify whether private-only hosting permits website mode; use transactional out
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [PutBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketWebsite.html) | ❌ Unsupported | P2-F |
-| [DeleteBucketWebsite](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketWebsite.html) | ❌ Unsupported | P2-F |
 
 ### P3-G — Analytics, inventory, metrics and tier policies
 

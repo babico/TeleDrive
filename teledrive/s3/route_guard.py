@@ -93,7 +93,9 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 # Phase G: real replication configuration (SQL-backed,
                 # prefix-aware, over the existing replica engine).
                 "replication": {"GET", "PUT", "DELETE"},
-                "website": {"GET"},
+                # Phase I: real website configuration + public read gate
+                # (the gate itself is admin-only, outside S3).
+                "website": {"GET", "PUT", "DELETE"},
                 # Phase F: real notification/logging configuration stores.
                 "logging": {"GET", "PUT"},
                 "notification": {"GET", "PUT"},

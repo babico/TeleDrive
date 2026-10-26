@@ -38,6 +38,10 @@ from teledrive.db import redact_database_url
 from teledrive.api_keys import ApiKeyStore
 from teledrive.s3.credentials import S3CredentialStore, load_master_key, DEFAULT_PERMISSIONS
 from teledrive.s3.multipart import MultipartStore
+from teledrive.s3.object_metadata import ObjectMetadataStore
+from teledrive.s3.website import (
+    WebsiteConfigStore, WebsiteError, validate_document_name,
+)
 from teledrive.storage.gc import StorageGCInventory
 from teledrive.storage.gc_collect import RetainedMediaGC
 from teledrive.storage.manifest import ManifestStore
@@ -516,6 +520,11 @@ def _required_roles(method: str, path: str) -> frozenset[str] | None:
             or path.startswith("/api/v1/admin/s3-credentials")):
         return _ROLE_ADMIN
     if path.startswith("/api/v1/admin/storage/buckets") and path.endswith("/quota"):
+        return _ROLE_ADMIN
+    # Phase I: turning on public_read publishes the bucket's current
+    # objects anonymously. That is an owner decision, not an operator one.
+    if (path.startswith("/api/v1/admin/storage/buckets")
+            and path.endswith("/website")):
         return _ROLE_ADMIN
     # Physical media deletion is an owner decision, not an operator one:
     # the GC toggle and the collect/queue-drain kick off irreversible
@@ -1276,13 +1285,23 @@ async def security_middleware(request: Request, call_next):
             "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;"
         )
+    elif request.url.path == "/site" or request.url.path.startswith("/site/"):
+        # Hosted website content shares the app origin. Sandboxing it into
+        # an opaque origin plus default-src 'none' prevents it from reading
+        # app cookies/API responses or loading any subresource.
+        response.headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+        )
     else:
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
             "form-action 'self'; object-src 'none'; connect-src 'self'; img-src 'self' data:; "
             "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'"
         )
-    if request.url.path in {"/", "/docs", "/redoc", "/openapi.json"} or request.url.path.startswith("/api/"):
+    if (request.url.path in {"/", "/docs", "/redoc", "/openapi.json"}
+            or request.url.path.startswith("/api/")
+            or request.url.path.startswith("/site/")):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -3564,6 +3583,92 @@ def admin_put_bucket_cors(bucket: str, request: Request,
     return {"ok": True, "rules": len(rules)}
 
 
+@app.get("/api/v1/admin/storage/buckets/{bucket}/website",
+         tags=["Object catalog"],
+         summary="Read the bucket website configuration and public-read gate")
+def admin_get_bucket_website(bucket: str, _: None = Depends(require_auth)):
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        config = WebsiteConfigStore(catalog).get(bucket)
+        return {
+            "configured": config is not None,
+            "index_document": config["index_document"] if config else None,
+            "error_document": config["error_document"] if config else None,
+            "public_read": catalog.public_read(bucket),
+        }
+    finally:
+        conn.close()
+
+
+@app.put("/api/v1/admin/storage/buckets/{bucket}/website",
+         tags=["Object catalog"],
+         summary="Configure website hosting and the public-read gate")
+def admin_put_bucket_website(bucket: str, request: Request,
+                             payload: dict = Body(...),
+                             _: None = Depends(require_auth)):
+    """Owner/admin-only website configuration.
+
+    ``public_read=true`` PUBLISHES the bucket's current objects anonymously
+    at ``/site/{bucket}/...``. It is a deliberate public-exposure decision:
+    every current ready object becomes readable by anyone who can reach the
+    app origin. The flag is stored in bucket metadata, defaults to FALSE,
+    and is cleared by DeleteBucketWebsite and bucket deletion.
+
+    The separate S3 PutBucketWebsite API writes only the index/error
+    document and never flips this gate.
+    """
+    _same_origin(request)
+    # An API key is not a role: even a key holding this endpoint's
+    # permission must not publish a bucket. Public exposure stays an
+    # owner/admin session decision.
+    role = (getattr(request.state, "user", None) or {}).get("role")
+    if role != "admin":
+        raise HTTPException(403, "Website public exposure requires admin role")
+    index_document = payload.get("index_document")
+    error_document = payload.get("error_document")
+    public_read = payload.get("public_read")
+    if not isinstance(public_read, bool):
+        raise HTTPException(422, "public_read must be a boolean")
+    try:
+        index_document = validate_document_name(index_document, "index_document")
+        error_document = (None if error_document in (None, "")
+                          else validate_document_name(error_document,
+                                                      "error_document"))
+    except WebsiteError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if bucket not in catalog.list_buckets():
+            raise HTTPException(404, "Bucket not found")
+        WebsiteConfigStore(catalog).replace(bucket, {
+            "index_document": index_document,
+            "error_document": error_document,
+            "enabled": True,
+        }, public_read=public_read)
+    finally:
+        conn.close()
+    actor = (getattr(request.state, "user", None) or {}).get(
+        "username", "system")
+    _log(f"bucket website configured: bucket={bucket} "
+         f"index={index_document} error={error_document} "
+         f"public_read={public_read}", "storage", user=actor)
+    result = {
+        "ok": True,
+        "index_document": index_document,
+        "error_document": error_document,
+        "public_read": public_read,
+    }
+    if public_read:
+        result["notice"] = (
+            "public_read publishes the bucket's current objects anonymously "
+            f"at /site/{bucket}/")
+    return result
+
+
 def _public_s3_origin(request: Request) -> str:
     """Public base URL of the S3 listener, for presigned links.
 
@@ -5368,3 +5473,169 @@ async def public_share_post(token: str, request: Request):
 def health():
     return {"ok": True}
 
+
+# --- Public website hosting (Phase I) ------------------------------------
+#
+# Website content is served on the APP ORIGIN, so the response must not be
+# usable as a same-origin attack surface. Every response carries
+# ``Content-Security-Policy: sandbox; default-src 'none'; ...``: the sandbox
+# moves the document into an opaque origin (no cookies, no same-origin API
+# reads) and default-src 'none' forbids scripts, styles, images and frames.
+# The bucket's current ready objects only are addressable: staging manifests,
+# delete markers, removed versions and ACL metadata never enter this path.
+
+_SITE_CSP = ("sandbox; default-src 'none'; base-uri 'none'; "
+             "form-action 'none'; frame-ancestors 'none'; object-src 'none'")
+_SITE_MIME = re.compile(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+\Z")
+
+
+def _site_not_found() -> Response:
+    """Uniform 404: nonexistent bucket, disabled gate and no config look alike."""
+    return Response(b"Not Found\n", status_code=404, headers={
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Security-Policy": _SITE_CSP,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+    })
+
+
+def _site_path(value: str) -> str | None:
+    """Decode repeatedly and reject traversal / absolute filesystem paths.
+
+    Starlette already decodes the path parameter once; a second and third
+    decode catch ``%252e%252e`` style double encoding. ``..`` and ``.``
+    segments, backslashes, NUL/control characters, absolute paths and
+    ``scheme://`` values are refused before any key lookup.
+    """
+    candidate = value
+    for _ in range(3):
+        if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+            return None
+        if "\\" in candidate or "://" in candidate:
+            return None
+        if candidate.startswith("/") or candidate.startswith("~"):
+            return None
+        if re.match(r"[A-Za-z]:[/\\]", candidate):
+            return None
+        # A single trailing slash is the directory form; empty/interior
+        # double slashes are ambiguous and refused.
+        segments = candidate.split("/") if candidate else []
+        if segments and segments[-1] == "":
+            segments = segments[:-1]
+        if any(segment in {"", ".", ".."} for segment in segments):
+            return None
+        decoded = urllib.parse.unquote(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+    else:
+        return None
+    return candidate
+
+
+def _site_content_type(catalog, item) -> str:
+    """Stored Content-Type when it is a plain media type, else a safe default."""
+    try:
+        stored = ObjectMetadataStore(catalog).get(item.id).get("content-type")
+    except Exception:
+        stored = None
+    base = (stored or "").split(";", 1)[0].strip().lower()
+    if not _SITE_MIME.fullmatch(base):
+        return "application/octet-stream"
+    if base.startswith("text/"):
+        return base + "; charset=utf-8"
+    return base
+
+
+def _site_headers(catalog, item, status_code: int) -> tuple[dict, int]:
+    headers = {
+        "Content-Type": _site_content_type(catalog, item),
+        "Content-Length": str(item.size),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": _SITE_CSP,
+        "Cache-Control": "no-store",
+        "ETag": '"' + item.sha256 + '"',
+        "Last-Modified": time.strftime(
+            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(item.created_at)),
+    }
+    return headers, status_code
+
+
+async def _serve_site(bucket: str, path: str, request: Request) -> Response:
+    try:
+        BucketCatalog.validate_bucket(bucket)
+    except ValueError:
+        return _site_not_found()
+    safe_path = _site_path(path)
+    if safe_path is None:
+        return _site_not_found()
+
+    conn = db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        try:
+            config = WebsiteConfigStore(catalog).get(bucket)
+            public_read = catalog.public_read(bucket)
+        except FileNotFoundError:
+            conn.close()
+            return _site_not_found()
+        if not config or not config.get("enabled", True) or not public_read:
+            conn.close()
+            return _site_not_found()
+
+        index_document = config["index_document"]
+        if safe_path == "" or safe_path.endswith("/"):
+            candidates = [safe_path + index_document]
+        else:
+            candidates = [safe_path, safe_path + "/" + index_document]
+        item = None
+        status_code = 200
+        for key in candidates:
+            try:
+                item = catalog.get(bucket, key).item
+                break
+            except FileNotFoundError:
+                continue
+        if item is None and config.get("error_document"):
+            try:
+                item = catalog.get(bucket, config["error_document"]).item
+                status_code = 404
+            except FileNotFoundError:
+                item = None
+        if item is None:
+            conn.close()
+            return _site_not_found()
+
+        headers, status_code = _site_headers(catalog, item, status_code)
+        if request.method == "HEAD":
+            conn.close()
+            return Response(status_code=status_code, headers=headers)
+        transport = storage_transport(conn)
+        root = Path(STORAGE_SCRATCH_DIR)
+        _secure_mkdir(root)
+        engine = TelegramObjectStorage(
+            ManifestStore(conn), transport,
+            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=root)
+    except BaseException:
+        conn.close()
+        raise
+
+    async def stream():
+        try:
+            async for piece in engine.iter_bytes(item.id):
+                yield piece
+        finally:
+            conn.close()
+
+    return StreamingResponse(stream(), status_code=status_code,
+                             headers=headers)
+
+
+@app.get("/site/{bucket}", include_in_schema=False)
+async def public_website_root(bucket: str, request: Request):
+    return await _serve_site(bucket, "", request)
+
+
+@app.get("/site/{bucket}/{path:path}", include_in_schema=False)
+async def public_website_object(bucket: str, path: str, request: Request):
+    return await _serve_site(bucket, path, request)

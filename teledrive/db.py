@@ -240,6 +240,34 @@ def redact_database_url(url: str) -> str:
         return "<invalid database URL>"
 
 
+def _checkpoint_wal_best_effort(engine: "Engine") -> None:
+    """Flush a shared SQLite WAL without ever stalling a caller.
+
+    Uses a raw pooled connection so SQLAlchemy's automatic transaction
+    does not wrap the PRAGMA (a checkpoint inside a transaction fails or
+    blocks), and caps the busy timeout so a concurrent reader costs
+    milliseconds, not seconds.
+    """
+    try:
+        raw = engine.raw_connection()
+    except Exception:
+        return
+    try:
+        cursor = raw.cursor()
+        try:
+            cursor.execute("PRAGMA busy_timeout=200")
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            cursor.close()
+    except Exception:
+        pass
+    finally:
+        try:
+            raw.close()
+        except Exception:
+            pass
+
+
 @dataclass
 class Database:
     url: str
@@ -248,23 +276,29 @@ class Database:
     owns_engine: bool = True
 
     def close(self) -> None:
+        """Release this connection; checkpoint a shared SQLite WAL if cheap.
+
+        Shared (cached) engines keep pooled connections alive, so disposal
+        never checkpoints the WAL. Flushing it keeps the file
+        self-contained for readers that open it directly (DR rebuild
+        publication), but the checkpoint MUST NOT run on this connection:
+        an open transaction still holds table locks, and SQLite then
+        blocks for the full busy_timeout (30s) before giving up. That cost
+        was paid by every test teardown.
+
+        The checkpoint therefore runs on a separate pooled connection
+        with a tiny busy timeout, so it either succeeds immediately or
+        gives up in milliseconds -- it is best-effort by contract.
+        """
+        connection, engine, owns_engine = (
+            self.connection, self.engine, self.owns_engine)
         try:
-            if not self.owns_engine \
-                    and self.engine.url.get_backend_name() == "sqlite":
-                # Shared (cached) engines keep pooled connections alive, so
-                # the WAL journal is NOT checkpointed by disposal. Flush it
-                # now so the database file is self-contained for readers
-                # that open it directly (e.g. DR rebuild publication).
-                try:
-                    self.connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
-                except Exception:
-                    pass
+            connection.close()
         finally:
-            try:
-                self.connection.close()
-            finally:
-                if self.owns_engine:
-                    self.engine.dispose()
+            if not owns_engine and engine.url.get_backend_name() == "sqlite":
+                _checkpoint_wal_best_effort(engine)
+            if owns_engine:
+                engine.dispose()
 
     def commit(self) -> None:
         self.connection.commit()

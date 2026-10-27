@@ -6,7 +6,7 @@ Unimplemented S3 operations explicitly return NotImplemented (501).
 
 Phase O wire shapes implemented here:
 
-* RenameObject: ``POST /{bucket}/{destination}?rename`` with the source in the
+* RenameObject: ``PUT /{bucket}/{destination}?renameObject`` with the source in
   signed ``x-amz-rename-source: bucket/source`` header (the AWS directory-bucket
   shape). TeleDrive also accepts standard buckets — a documented SUPERSET of
   AWS, which limits RenameObject to directory buckets — because the rename is a
@@ -2290,6 +2290,32 @@ def _parse_iso8601_ns(raw: str) -> int:
     return int(moment.timestamp() * 1_000_000_000)
 
 
+async def _read_verified_body(request: Request, store, permission: str, *,
+                               max_bytes: int) -> tuple[bytes, dict[str, str]]:
+    """Read a bounded request body, decoding aws-chunked if present.
+
+    boto3 attaches SDK checksums to blob payloads as aws-chunked trailers
+    (x-amz-sdk-checksum-algorithm plus x-amz-checksum-crc32 in the
+    trailer), so a handler that reads request.stream() directly sees chunk
+    framing instead of the payload and then reports the declared checksum
+    as missing. Returns (payload, trailer_headers).
+    """
+    decoder = None
+    if streaming_mode(request) is not None:
+        decoder = AwsChunkedDecoder(request, store.resolve, permission)
+        blocks = decoder.blocks()
+    else:
+        blocks = request.stream()
+    body = bytearray()
+    async for block in blocks:
+        body.extend(block)
+        if len(body) > max_bytes:
+            raise AnnotationError(
+                "InvalidRequest",
+                f"Request payload exceeds {max_bytes} bytes")
+    return bytes(body), (decoder.trailer if decoder is not None else {})
+
+
 def _require_source_acl(catalog, store, access_key: str, source_header: str,
                         request) -> None:
     """Fail closed when a copy source is narrowed by policy or its ACL."""
@@ -2836,20 +2862,15 @@ async def _handle_object_annotations(ctx: _S3RequestContext) -> Response:
                         media_type="text/plain", status_code=200,
                         headers=headers)
     if request.method == "PUT":
-        payload = bytearray()
-        async for block in request.stream():
-            payload.extend(block)
-            if len(payload) > MAX_ANNOTATION_VALUE_BYTES:
-                raise AnnotationError(
-                    "InvalidRequest",
-                    f"Annotation payload exceeds "
-                    f"{MAX_ANNOTATION_VALUE_BYTES} bytes")
-        body = bytes(payload)
+        body, trailer = await _read_verified_body(
+            request, ctx.store, "s3:PutObjectAnnotation",
+            max_bytes=MAX_ANNOTATION_VALUE_BYTES)
         _verify_upload_sha256(
             request, hashlib.sha256(body).digest(),
             md5_digest=hashlib.md5(body, usedforsecurity=False).digest(),
             sha1_digest=hashlib.sha1(body, usedforsecurity=False).digest(),
             crc64nvme_value=crc64nvme(body),
+            trailer=trailer,
         )
         value = validate_annotation_value(body)
         store.put(object_id, name, value)
@@ -3502,7 +3523,7 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
 
 
 async def _handle_object_rename(ctx: _S3RequestContext) -> Response:
-    """POST ?rename: atomically move the current head to this destination key.
+    """PUT ?renameObject: atomically move the current head to this key.
 
     Wire shape (the AWS directory-bucket shape): the destination key is the
     request URI key and ``x-amz-rename-source`` carries the source as a local
@@ -3785,7 +3806,10 @@ async def _handle(request: Request):
         mpu_abort = bool(mpu_id and request.method == "DELETE")
         mpu_list = bool(mpu_id and request.method == "GET")
         is_object_attributes = bool(separator and "attributes" in request.query_params)
-        is_object_rename = bool(separator and "rename" in request.query_params)
+        is_object_rename = bool(
+            separator
+            and ("renameObject" in request.query_params
+                 or "rename" in request.query_params))
         is_object_select = bool(separator and "select" in request.query_params)
         is_object_restore = bool(separator and "restore" in request.query_params)
         is_object_tagging = bool(separator and "tagging" in request.query_params)
@@ -3959,7 +3983,7 @@ async def _handle(request: Request):
                 return _error("NotImplemented", "Unsupported GetObjectAttributes variant", 501)
             action = "s3:GetObjectAttributes"
         elif is_object_rename:
-            action = "s3:RenameObject" if request.method == "POST" else None
+            action = "s3:RenameObject" if request.method == "PUT" else None
         elif is_object_select:
             action = "s3:SelectObjectContent" if request.method == "POST" else None
         elif is_object_restore:

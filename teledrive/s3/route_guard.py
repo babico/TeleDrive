@@ -45,7 +45,7 @@ _EMPTY_FLAG = frozenset({
     "acl", "ownershipControls", "policy", "replication", "website", "logging",
     "notification", "notificationConfiguration", "requestPayment", "accelerate",
     "encryption", "object-lock", "retention", "legal-hold", "abac",
-    "rename", "select", "restore",
+    "rename", "renameObject", "select", "restore",
     "analytics", "inventory", "metrics",
 })
 # No upper/lower-case folding for S3 query fields: AWS subresources are
@@ -183,10 +183,14 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
             # Other object controls still fail closed, even if correctly signed.
             allowed = (frozenset({"attributes", "versionId"})
                        if method == "GET" else frozenset())
-        elif "rename" in real:
-            # Phase O: AWS directory-bucket shape — POST destination key with
-            # the source named by the signed x-amz-rename-source header.
-            allowed = frozenset({"rename"}) if method == "POST" else frozenset()
+        elif "renameObject" in real or "rename" in real:
+            # Phase O: the REAL AWS wire shape is
+            #   PUT /{bucket}/{destination}?renameObject
+            # with the source in the signed x-amz-rename-source header.
+            # `?rename` is accepted as an alias so both spellings work.
+            selector = "renameObject" if "renameObject" in real else "rename"
+            allowed = (frozenset({selector})
+                       if method == "PUT" else frozenset())
         elif "select" in real:
             # SelectObjectContent requires both selectors; select-type must
             # be 2 (enforced by the handler).

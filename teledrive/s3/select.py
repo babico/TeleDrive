@@ -360,7 +360,7 @@ _TOKEN_RE = re.compile(r"""
   | (?P<number>-?(?:\d+(?:\.\d*)?|\.\d+))
   | (?P<ident>[A-Za-z_][A-Za-z0-9_]*)
   | (?P<op><=|>=|<>|!=|=|<|>)
-  | (?P<punct>[(),*])
+  | (?P<punct>[(),*.])
 """, re.VERBOSE)
 
 
@@ -429,7 +429,17 @@ class _Parser:
         token = self.take()
         if token.kind != "ident":
             raise SelectError("InvalidRequest", "Expected a column name")
-        return token.value
+        name = token.value
+        # AWS examples qualify columns with the S3Object alias
+        # (`SELECT s.name FROM S3Object s`). Accept the dotted form and
+        # keep only the column part; the alias itself carries no meaning
+        # because there is exactly one source object.
+        while self.accept("punct", "."):
+            follower = self.take()
+            if follower.kind != "ident":
+                raise SelectError("InvalidRequest", "Expected a column name")
+            name = follower.value
+        return name
 
     def expression(self):
         return self.or_expression()
@@ -478,7 +488,14 @@ class _Parser:
             if upper in ("AND", "OR", "NOT"):
                 raise SelectError("InvalidRequest", "Expected a SQL operand")
             self.index += 1
-            return ("column", token.value)
+            name = token.value
+            while self.accept("punct", "."):
+                follower = self.take()
+                if follower.kind != "ident":
+                    raise SelectError("InvalidRequest",
+                                      "Expected a column name")
+                name = follower.value
+            return ("column", name)
         raise SelectError("InvalidRequest", "Expected a SQL operand")
 
     def comparison(self):
@@ -507,6 +524,15 @@ def parse_select_sql(sql: str) -> Query:
         columns = tuple(names)
     parser.expect_keyword("FROM")
     parser.expect_keyword("S3OBJECT")
+    # Optional table alias: `FROM S3Object s`. Ignored semantically (one
+    # source object), but required for the documented AWS query shape.
+    if parser.accept_keyword("AS"):
+        parser.identifier()
+    else:
+        token = parser.peek()
+        if (token is not None and token.kind == "ident"
+                and token.value.upper() not in ("WHERE", "LIMIT")):
+            parser.index += 1
     where = None
     if parser.accept_keyword("WHERE"):
         where = parser.expression()

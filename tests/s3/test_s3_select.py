@@ -270,3 +270,22 @@ def test_select_permission_separation_and_route_guard(service):
     assert ET.fromstring(denied.content).findtext("Code") == "AccessDenied"
     assert signed(service, "GET", "/select-bucket/data.csv?select").status_code == 501
     assert signed(service, "POST", "/select-bucket/data.csv?select").status_code == 400
+
+
+def test_select_accepts_the_documented_table_alias_form(service):
+    """AWS examples qualify columns with the S3Object alias.
+
+    `SELECT s.name FROM S3Object s WHERE s.age > '35'` is the shape in the
+    AWS docs; the alias carries no meaning here (one source object) but it
+    must parse and evaluate, not be rejected as unsupported SQL.
+    """
+    assert signed(service, "PUT", "/select-bucket").status_code == 200
+    body = b"name,age\nalice,30\nbob,41\n"
+    assert signed(service, "PUT", "/select-bucket/people.csv",
+                  body).status_code == 200
+    response = _select(
+        service, "select-bucket", "people.csv",
+        _csv_request("SELECT s.name FROM S3Object s WHERE s.age > '35'"))
+    assert response.status_code == 200, response.text
+    assert b"bob" in response.content
+    assert b"alice" not in response.content

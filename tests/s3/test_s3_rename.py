@@ -27,7 +27,7 @@ def _catalog(service):
 
 def _rename(service, bucket, destination, source, **kwargs):
     return signed(
-        service, "POST", f"/{bucket}/{destination}?rename",
+        service, "PUT", f"/{bucket}/{destination}?renameObject",
         extra_headers={"x-amz-rename-source": f"{bucket}/{source}"},
         **kwargs,
     )
@@ -90,7 +90,7 @@ def test_rename_is_same_bucket_only(service):
     _seed(service)
     assert signed(service, "PUT", "/other-bucket").status_code == 200
     response = signed(
-        service, "POST", "/rename-bucket/destination.bin?rename",
+        service, "PUT", "/rename-bucket/destination.bin?renameObject",
         extra_headers={"x-amz-rename-source": "other-bucket/source.bin"},
     )
     assert response.status_code == 400, response.text
@@ -211,9 +211,12 @@ def test_rename_permission_and_route_guard(service):
     )
     assert denied.status_code == 403
     assert ET.fromstring(denied.content).findtext("Code") == "AccessDenied"
-    # Non-POST methods and a missing signed source fail closed.
-    assert signed(service, "GET", "/rename-bucket/source.bin?rename").status_code == 501
-    assert signed(service, "PUT", "/rename-bucket/source.bin?rename").status_code == 501
-    missing = signed(service, "POST", "/rename-bucket/destination.bin?rename")
+    # Wrong methods and a missing signed source fail closed. The real AWS
+    # wire shape is PUT ?renameObject; `?rename` stays an accepted alias.
+    assert signed(service, "GET",
+                  "/rename-bucket/source.bin?renameObject").status_code == 501
+    assert signed(service, "POST",
+                  "/rename-bucket/source.bin?renameObject").status_code == 501
+    missing = signed(service, "PUT", "/rename-bucket/destination.bin?renameObject")
     assert missing.status_code == 400
     assert signed(service, "GET", "/rename-bucket/source.bin").content == b"rename-me"

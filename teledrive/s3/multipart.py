@@ -317,6 +317,14 @@ class MultipartStore:
                 )
             except Exception:
                 pass
+            try:
+                from teledrive.s3.metadata_journal import journal_event_safely
+                journal_event_safely(
+                    self.db.connection, event="deleted", bucket=bucket,
+                    object_key=key, detail={"reason": "multipart_aborted"},
+                )
+            except Exception:
+                pass
         self.db.commit()
         if changed.rowcount != 1:
             raise MultipartError("OperationAborted", "Concurrent multipart mutation", 409)
@@ -667,6 +675,15 @@ class MultipartStore:
                         self.db.connection,
                         event_type="s3:ObjectCreated:CompleteMultipartUpload",
                         bucket=bucket, object_key=key, version_id=object_id,
+                    )
+                except Exception:
+                    pass
+                try:
+                    from teledrive.s3.metadata_journal import journal_event_safely
+                    journal_event_safely(
+                        self.db.connection, event="created", bucket=bucket,
+                        object_key=key, version_id=object_id,
+                        detail={"multipart": True},
                     )
                 except Exception:
                     pass

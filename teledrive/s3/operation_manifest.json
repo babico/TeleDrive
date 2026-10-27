@@ -461,48 +461,48 @@
     },
     {
       "name": "CreateBucketMetadataConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "CreateBucketMetadataTableConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketMetadataConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetBucketMetadataTableConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteBucketMetadataConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteBucketMetadataTableConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "UpdateBucketMetadataAnnotationTableConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "UpdateBucketMetadataInventoryTableConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "UpdateBucketMetadataJournalTableConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetObjectAnnotation",

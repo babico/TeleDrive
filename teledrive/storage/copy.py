@@ -153,6 +153,16 @@ def copy_object(
             )
         except Exception:
             pass
+        try:
+            from teledrive.s3.metadata_journal import journal_event_safely
+            journal_event_safely(
+                db.connection, event="created",
+                bucket=destination_bucket, object_key=destination_key,
+                version_id=identifier,
+                detail={"source_key": source_key, "copy": True},
+            )
+        except Exception:
+            pass
         db.commit()
         return CopiedObject(identifier, original_tag, source.size, source.id)
     except IntegrityError as exc:

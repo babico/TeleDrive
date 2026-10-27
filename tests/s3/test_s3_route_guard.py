@@ -26,6 +26,9 @@ CONTROL_SELECTORS = (
     "ownershipControls", "accelerate", "requestPayment", "select",
     "select-type", "restore", "torrent", "analytics", "inventory",
     "metrics", "intelligent-tiering", "x-unknown-provider-option", "abac",
+    # Phase O3: real S3 Metadata configuration controls (never bucket CRUD).
+    "metadataConfiguration", "metadataTable", "metadataJournalTable",
+    "metadataInventoryTable", "metadataAnnotationTable",
 )
 EXACT_SUPPORTED = {"location", "cors", "tagging", "versioning",
                    "publicAccessBlock", "lifecycle"}
@@ -101,6 +104,29 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
         # Phase L: deleting an absent policy/ownership configuration is
         # idempotent (ownership resets to BucketOwnerEnforced).
         assert reply.status_code == 204, (method, selector, reply.text)
+    elif selector in ("metadataConfiguration", "metadataTable"):
+        # Phase O3: a real S3 Metadata control, never bucket CRUD.
+        if method == "GET":
+            # Absent configuration: honest 404, not a listing.
+            assert reply.status_code == 404, (method, selector, reply.text)
+            assert b"NoSuchConfiguration" in reply.content
+        elif method == "DELETE":
+            # Deleting an absent configuration is idempotent (204).
+            assert reply.status_code == 204, (method, selector, reply.text)
+        else:
+            # HEAD/PUT are not valid for these AWS selectors.
+            assert reply.status_code == 501, (method, selector, reply.text)
+        assert b"ListBucketResult" not in reply.content
+    elif selector in ("metadataJournalTable", "metadataInventoryTable",
+                      "metadataAnnotationTable"):
+        # Phase O3: the three Update operations are PUT-only; an empty body
+        # is MalformedXML, never a bucket CRUD fallback.
+        if method == "PUT":
+            assert reply.status_code == 400, (method, selector, reply.text)
+            assert b"MalformedXML" in reply.content
+        else:
+            assert reply.status_code == 501, (method, selector, reply.text)
+        assert b"ListBucketResult" not in reply.content
     else:
         assert reply.status_code == 501, (method, selector, reply.text)
         if method != "HEAD":
@@ -204,7 +230,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":93, "partial":7, "unsupported":16,
+        "supported":102, "partial":7, "unsupported":7,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -220,7 +246,9 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     assert doc_gaps == manifest_gaps
     assert Counter(manifest_gaps.values()) == {"by design": 7}
     # P3-G (analytics/inventory/metrics/tiering) is fully implemented now,
-    # so it no longer appears as a remaining workstream label.
+    # so it no longer appears as a remaining workstream label. P3-H stays
+    # required: metadata configuration moved to "implemented", but five
+    # AWS-managed/directory-bucket operations remain genuinely unsupported.
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-H",
     }

@@ -89,6 +89,16 @@ PERMISSIONS = frozenset({
     "s3:PutBucketIntelligentTieringConfiguration",
     "s3:DeleteBucketIntelligentTieringConfiguration",
     "s3:ListBucketIntelligentTieringConfigurations",
+    # S3 Metadata configuration (Phase O3). AWS uses the SAME IAM action for
+    # the V1 and V2 create/get/delete operations, so only one scope exists
+    # for each of those verbs. The three update operations have their own
+    # action names in the AWS API reference.
+    "s3:CreateBucketMetadataTableConfiguration",
+    "s3:GetBucketMetadataTableConfiguration",
+    "s3:DeleteBucketMetadataTableConfiguration",
+    "s3:UpdateBucketMetadataJournalTableConfiguration",
+    "s3:UpdateBucketMetadataInventoryTableConfiguration",
+    "s3:UpdateBucketMetadataAnnotationTableConfiguration",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
 MAX_CREDENTIAL_TAGS = 50

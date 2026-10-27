@@ -162,7 +162,8 @@ class ObjectTagStore:
         return None if raw is None else _decode_pending_tags(raw)
 
     def replace_current(self, bucket: str, key: str,
-                        tags: list[tuple[str, str]]) -> str:
+                        tags: list[tuple[str, str]], *,
+                        actor: str = "") -> str:
         tags = validate_tags(tags)
         # Lock the current head row while replacing its version-scoped tags.
         # On PostgreSQL/MySQL this UPDATE serializes concurrent head changes.
@@ -183,11 +184,25 @@ class ObjectTagStore:
                 self.db.connection.execute(insert(object_tags).values(
                     object_id=current.item.id, tag_key=tag_key, tag_value=tag_value
                 ))
+            self._journal_tag_change(bucket, key, current.item.id, tags, actor)
             self.db.commit()
             return current.item.id
         except BaseException:
             self.db.connection.rollback()
             raise
+
+    def _journal_tag_change(self, bucket: str, key: str, object_id: str,
+                            tags: list[tuple[str, str]], actor: str) -> None:
+        """Append a metadata-journal tag event on the CURRENT transaction."""
+        try:
+            from teledrive.s3.metadata_journal import journal_event_safely
+            journal_event_safely(
+                self.db.connection, event="tagged", bucket=bucket,
+                object_key=key, version_id=object_id, actor=actor,
+                detail={"tag_count": len(tags)},
+            )
+        except Exception:
+            pass
 
     def replace_published(self, bucket: str, key: str, identifier: str,
                           tags: list[tuple[str, str]]) -> None:
@@ -228,6 +243,7 @@ class ObjectTagStore:
                 self.db.connection.execute(insert(object_tags).values(
                     object_id=identifier, tag_key=tag_key, tag_value=tag_value,
                 ))
+            self._journal_tag_change(bucket, key, identifier, tags, "")
             self.db.commit()
         except BaseException:
             self.db.connection.rollback()
@@ -280,6 +296,7 @@ class ObjectTagStore:
                         tag_value=tag_value,
                     ))
                 delete_pending_tags_uncommitted(self.db.connection, identifier)
+                self._journal_tag_change(bucket, key, identifier, tags, actor)
                 mode = "published"
             else:
                 journal_pending_tags_uncommitted(

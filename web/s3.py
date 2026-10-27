@@ -106,6 +106,16 @@ from teledrive.s3.report_configs import (
     ReportConfigError, ReportConfigStore, config_xml as report_config_xml,
     list_xml as report_list_xml, parse_document as parse_report_document,
 )
+from teledrive.s3.metadata_journal import (
+    MAX_METADATA_XML_BYTES, MetadataConfigurationError,
+    MetadataConfigurationStore, configuration_xml as metadata_configuration_xml,
+    parse_annotation_update as parse_metadata_annotation_update,
+    parse_create_configuration as parse_metadata_create_configuration,
+    parse_create_table_configuration as parse_metadata_create_table_configuration,
+    parse_inventory_update as parse_metadata_inventory_update,
+    parse_journal_update as parse_metadata_journal_update,
+    table_configuration_xml as metadata_table_configuration_xml,
+)
 from teledrive.s3.object_metadata import (
     ObjectMetadataStore, ObjectMetadataError, parse_object_metadata, signed_header_names,
     STANDARD_HEADERS,
@@ -801,6 +811,7 @@ class _S3RequestContext:
     is_bucket_logging: bool = False
     report_kind: str | None = None
     is_bucket_tiering: bool = False
+    metadata_selector: str | None = None
 
 
 async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
@@ -1034,6 +1045,135 @@ def _notification_allowlist() -> tuple[str, ...]:
     return approved_destinations(raw)
 
 
+async def _handle_bucket_metadata_configuration(
+        ctx: _S3RequestContext) -> Response:
+    """Phase O3: S3 Metadata configuration and real journal-backed GET.
+
+    Real AWS selectors (verified against the API reference):
+      * ``?metadataConfiguration``        POST/GET/DELETE (V2)
+      * ``?metadataTable``                POST/GET/DELETE (V1)
+      * ``?metadataJournalTable``         PUT
+      * ``?metadataInventoryTable``       PUT
+      * ``?metadataAnnotationTable``      PUT
+
+    GET renders the stored configuration plus statistics from the real
+    ``storage_metadata_journal`` table. The table identifiers are documented
+    TeleDrive strings, never fabricated AWS S3 Tables ARNs.
+    """
+    request = ctx.request
+    bucket = ctx.bucket
+    catalog = ctx.catalog
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "Bucket does not exist", 404)
+    store = MetadataConfigurationStore(catalog)
+    selector = ctx.metadata_selector
+
+    async def read_body() -> bytes:
+        payload = bytearray()
+        async for block in request.stream():
+            payload.extend(block)
+            if len(payload) > MAX_METADATA_XML_BYTES:
+                raise MetadataConfigurationError(
+                    "MalformedXML",
+                    "Metadata configuration XML exceeds 16 KiB")
+        body = bytes(payload)
+        if body:
+            _verify_bucket_control_payload(request, body)
+        return body
+
+    if selector == "metadataConfiguration":
+        if request.method == "POST":
+            parsed = parse_metadata_create_configuration(await read_body())
+            store.create(bucket, parsed)
+            return Response(status_code=200)
+        if request.method == "GET":
+            config = store.get_with_stats(bucket)
+            if config is None:
+                return _error(
+                    NO_SUCH_CONFIGURATION,
+                    "The specified metadata configuration does not exist", 404)
+            return Response(
+                metadata_configuration_xml(
+                    bucket, config, config["journal_stats"]),
+                media_type="application/xml")
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise MetadataConfigurationError(
+                        "InvalidRequest",
+                        "DeleteBucketMetadataConfiguration cannot have a body")
+            store.delete(bucket)
+            return Response(status_code=204)
+        return _error("MethodNotAllowed",
+                      "Use POST, GET or DELETE for metadataConfiguration", 405)
+
+    if selector == "metadataTable":
+        if request.method == "POST":
+            parsed = parse_metadata_create_table_configuration(await read_body())
+            store.create(bucket, parsed)
+            return Response(status_code=200)
+        # AWS documents that the V1 GET/DELETE operations answer 405 for a
+        # configuration created through the V2 API.
+        config = store.get(bucket)
+        if request.method == "GET":
+            if config is None:
+                return _error(
+                    NO_SUCH_CONFIGURATION,
+                    "The specified metadata configuration does not exist", 404)
+            if config.get("api_version") == 2:
+                return _error(
+                    "MethodNotAllowed",
+                    "This bucket has a V2 metadata configuration; use "
+                    "GetBucketMetadataConfiguration", 405)
+            with_stats = store.get_with_stats(bucket)
+            return Response(
+                metadata_table_configuration_xml(
+                    bucket, with_stats, with_stats["journal_stats"]),
+                media_type="application/xml")
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise MetadataConfigurationError(
+                        "InvalidRequest",
+                        "DeleteBucketMetadataTableConfiguration cannot have "
+                        "a body")
+            if config is not None and config.get("api_version") == 2:
+                return _error(
+                    "MethodNotAllowed",
+                    "This bucket has a V2 metadata configuration; use "
+                    "DeleteBucketMetadataConfiguration", 405)
+            store.delete(bucket)
+            return Response(status_code=204)
+        return _error("MethodNotAllowed",
+                      "Use POST, GET or DELETE for metadataTable", 405)
+
+    if selector == "metadataJournalTable":
+        if request.method != "PUT":
+            return _error("MethodNotAllowed",
+                          "Use PUT for metadataJournalTable", 405)
+        retention = parse_metadata_journal_update(await read_body())
+        store.update_journal(bucket, retention)
+        return Response(status_code=200)
+
+    if selector == "metadataInventoryTable":
+        if request.method != "PUT":
+            return _error("MethodNotAllowed",
+                          "Use PUT for metadataInventoryTable", 405)
+        enabled = parse_metadata_inventory_update(await read_body())
+        store.update_inventory(bucket, enabled)
+        return Response(status_code=200)
+
+    if selector == "metadataAnnotationTable":
+        if request.method != "PUT":
+            return _error("MethodNotAllowed",
+                          "Use PUT for metadataAnnotationTable", 405)
+        enabled, role = parse_metadata_annotation_update(await read_body())
+        store.update_annotation(bucket, enabled, role)
+        return Response(status_code=200)
+
+    return _error("NotImplemented", "Unsupported metadata operation", 501)
+
+
 async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
     """Bucket control subresources: policy status, lifecycle, public access
     block, versioning, CORS and tagging. Returns None when the request does
@@ -1041,6 +1181,8 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
     request = ctx.request
     bucket = ctx.bucket
     catalog = ctx.catalog
+    if ctx.metadata_selector is not None:
+        return await _handle_bucket_metadata_configuration(ctx)
     if ctx.is_bucket_policy:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -2921,7 +3063,8 @@ async def _handle_object_annotations(ctx: _S3RequestContext) -> Response:
             trailer=trailer,
         )
         value = validate_annotation_value(body)
-        store.put(object_id, name, value)
+        store.put(object_id, name, value, actor=ctx.owner, bucket=bucket,
+                  object_key=key)
         return Response(
             put_annotation_xml(key, name), media_type="application/xml",
             status_code=200,
@@ -2936,7 +3079,8 @@ async def _handle_object_annotations(ctx: _S3RequestContext) -> Response:
                     "InvalidRequest",
                     "DeleteObjectAnnotation must have no body")
         # Idempotent by contract: absent annotation still answers 204.
-        store.delete(object_id, name)
+        store.delete(object_id, name, actor=ctx.owner, bucket=bucket,
+                     object_key=key)
         return Response(status_code=204,
                         headers={"x-amz-object-version-id": object_id})
     return _error("NotImplemented",
@@ -2978,7 +3122,7 @@ async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
             tags.replace_version(bucket, key, target_id, parsed,
                                  actor=ctx.owner)
         else:
-            tags.replace_current(bucket, key, parsed)
+            tags.replace_current(bucket, key, parsed, actor=ctx.owner)
         return Response(status_code=200, headers={"x-amz-version-id": target_id})
     if request.method == "DELETE":
         async for block in request.stream():
@@ -2987,7 +3131,7 @@ async def _handle_object_tagging(ctx: _S3RequestContext) -> Response:
         if is_version_tagging:
             tags.replace_version(bucket, key, target_id, [], actor=ctx.owner)
         else:
-            tags.replace_current(bucket, key, [])
+            tags.replace_current(bucket, key, [], actor=ctx.owner)
         return Response(status_code=204, headers={"x-amz-version-id": target_id})
     return _error("NotImplemented", "Unsupported object tagging method", 501)
 
@@ -3941,6 +4085,14 @@ async def _handle(request: Request):
         is_bucket_tiering = bool(
             bucket and not separator
             and "intelligent-tiering" in request.query_params)
+        metadata_selector = next(
+            (name for name in (
+                "metadataConfiguration", "metadataTable",
+                "metadataJournalTable", "metadataInventoryTable",
+                "metadataAnnotationTable",
+            ) if bucket and not separator and name in request.query_params),
+            None,
+        )
         compat_bucket_read = None
         if bucket and not separator and request.method == "GET":
             compat_bucket_read = next(
@@ -4027,6 +4179,20 @@ async def _handle(request: Request):
             if request.method in {"PUT", "DELETE"} and not id_values:
                 return _error("InvalidArgument",
                               "Tiering configuration id query is required", 400)
+        if metadata_selector is not None:
+            if (request.method not in {
+                    "GET", "POST", "PUT", "DELETE"}):
+                return _error("MethodNotAllowed",
+                              "Unsupported metadata configuration method", 405)
+            allowed_params = {metadata_selector}
+            if any(name not in allowed_params and not name.startswith("X-Amz-")
+                   for name in request.query_params):
+                return _error("InvalidArgument",
+                              "Invalid metadata configuration selector", 400)
+            if (len(request.query_params.getlist(metadata_selector)) != 1
+                    or request.query_params.get(metadata_selector) != ""):
+                return _error("InvalidArgument",
+                              "Invalid metadata configuration selector", 400)
         if is_bucket_notification:
             action = {"GET": "s3:GetBucketNotification",
                       "PUT": "s3:PutBucketNotification"}.get(request.method)
@@ -4066,6 +4232,24 @@ async def _handle(request: Request):
                     "PUT": "s3:PutBucketIntelligentTieringConfiguration",
                     "DELETE": "s3:DeleteBucketIntelligentTieringConfiguration",
                 }.get(request.method)
+        elif metadata_selector is not None:
+            # Phase O3. The V1 and V2 create/get/delete operations share ONE
+            # IAM action name in AWS (verified in the API reference).
+            if metadata_selector in ("metadataConfiguration", "metadataTable"):
+                action = {
+                    "POST": "s3:CreateBucketMetadataTableConfiguration",
+                    "GET": "s3:GetBucketMetadataTableConfiguration",
+                    "DELETE": "s3:DeleteBucketMetadataTableConfiguration",
+                }.get(request.method)
+            elif metadata_selector == "metadataJournalTable":
+                action = ("s3:UpdateBucketMetadataJournalTableConfiguration"
+                          if request.method == "PUT" else None)
+            elif metadata_selector == "metadataInventoryTable":
+                action = ("s3:UpdateBucketMetadataInventoryTableConfiguration"
+                          if request.method == "PUT" else None)
+            else:
+                action = ("s3:UpdateBucketMetadataAnnotationTableConfiguration"
+                          if request.method == "PUT" else None)
         elif is_bucket_website:
             action = {
                 "GET": "s3:GetBucketWebsite",
@@ -4262,6 +4446,7 @@ async def _handle(request: Request):
             is_bucket_logging=is_bucket_logging,
             report_kind=report_kind,
             is_bucket_tiering=is_bucket_tiering,
+            metadata_selector=metadata_selector,
             is_bucket_policy_status=is_bucket_policy_status,
             is_bucket_policy=is_bucket_policy,
             is_bucket_ownership=is_bucket_ownership,
@@ -4421,6 +4606,8 @@ async def _handle(request: Request):
     except ReportConfigError as exc:
         return _error(exc.code, str(exc), exc.status)
     except TieringError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except MetadataConfigurationError as exc:
         return _error(exc.code, str(exc), exc.status)
     except WebsiteError as exc:
         return _error(exc.code, str(exc), exc.status)

@@ -1196,6 +1196,10 @@ async def lifespan(_: FastAPI):
         ensure_annotation_tables(conn.engine)
         from teledrive.s3.tiering import ensure_tiering_tables
         ensure_tiering_tables(conn.engine)
+        # S3 Metadata journal (Phase O3): same DDL rule as notifications —
+        # created at startup, never inside a mutation transaction.
+        from teledrive.s3.metadata_journal import ensure_metadata_tables
+        ensure_metadata_tables(conn.engine)
         conn.close()
     except Exception as exc:
         _log(_scrub_text(f"startup database warning: {exc}"), "startup")

@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 93 supported, 7 partial (0 by code, 7 by design), 16 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 102 supported, 7 partial (0 by code, 7 by design), 7 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -162,6 +162,15 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [PutBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketIntelligentTieringConfiguration.html) | ✅ Supported | Stores a bounded Smart-Tiering document (16 KiB, strict XML). AccessTier is limited to ARCHIVE_ACCESS / DEEP_ARCHIVE_ACCESS; unknown tier names are rejected. A scheduler really transitions `storage_class` from real access timestamps, and an archived object answers 403 InvalidObjectState until restored — so the tier label has an observable consequence. The Telegram chunks never move: this is an access gate in our catalog, explicitly not AWS Glacier. |
 | [DeleteBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketIntelligentTieringConfiguration.html) | ✅ Supported | Removes one configuration by id (204, idempotent). Objects already transitioned stay in their class until the next pass. |
 | [ListBucketIntelligentTieringConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketIntelligentTieringConfigurations.html) | ✅ Supported | Lists every stored configuration id (complete and sorted). |
+| [CreateBucketMetadataConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucketMetadataConfiguration.html) | ✅ Supported | Creates a V2 metadata configuration backed by TeleDrive's REAL SQL mutation journal (`storage_metadata_journal`), not AWS-managed Apache Iceberg/S3 Tables. A second create answers 409 `BucketMetadataConfigurationAlreadyExists`; that name is a TeleDrive code, not an AWS-documented error. |
+| [CreateBucketMetadataTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucketMetadataTableConfiguration.html) | ✅ Supported | Creates the V1 configuration, retaining the client-supplied `S3TablesDestination` as an opaque label only — no S3 Tables bucket is provisioned or claimed. 409 on an existing configuration. |
+| [GetBucketMetadataConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketMetadataConfiguration.html) | ✅ Supported | Returns the stored V2 configuration plus statistics from the real journal. Identifiers are TeleDrive-shaped (`teledrive:metadata:<bucket>`), never AWS ARNs; an absent configuration is 404 `NoSuchConfiguration`. |
+| [GetBucketMetadataTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketMetadataTableConfiguration.html) | ✅ Supported | Returns the V1 configuration and real journal statistics; the V1 selector answers 405 when the bucket holds a V2 configuration. Absent configuration is 404 `NoSuchConfiguration`. |
+| [DeleteBucketMetadataConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketMetadataConfiguration.html) | ✅ Supported | Deletes the configuration and its local journal rows (204, idempotent). Unlike AWS it leaves no managed table behind. |
+| [DeleteBucketMetadataTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketMetadataTableConfiguration.html) | ✅ Supported | Deletes a V1 configuration (204, idempotent); answers 405 if the bucket holds a V2 configuration. |
+| [UpdateBucketMetadataAnnotationTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataAnnotationTableConfiguration.html) | ✅ Supported | Toggles annotation journaling and stores the optional role; 404 `NoSuchConfiguration` when the configuration is missing. |
+| [UpdateBucketMetadataInventoryTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataInventoryTableConfiguration.html) | ✅ Supported | Toggles inventory-table state over the same journal; 404 `NoSuchConfiguration` when the configuration is missing. |
+| [UpdateBucketMetadataJournalTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataJournalTableConfiguration.html) | ✅ Supported | Sets the real retention window (Days 7 and above, or DISABLED); expired journal rows are trimmed in bounded batches. 404 `NoSuchConfiguration` when missing. |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -320,15 +329,6 @@ metadata-level copy+delete and could be supported if a client needs it.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [CreateBucketMetadataConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucketMetadataConfiguration.html) | ❌ Unsupported | P3-H |
-| [CreateBucketMetadataTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucketMetadataTableConfiguration.html) | ❌ Unsupported | P3-H |
-| [GetBucketMetadataConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketMetadataConfiguration.html) | ❌ Unsupported | P3-H |
-| [GetBucketMetadataTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketMetadataTableConfiguration.html) | ❌ Unsupported | P3-H |
-| [DeleteBucketMetadataConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketMetadataConfiguration.html) | ❌ Unsupported | P3-H |
-| [DeleteBucketMetadataTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketMetadataTableConfiguration.html) | ❌ Unsupported | P3-H |
-| [UpdateBucketMetadataAnnotationTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataAnnotationTableConfiguration.html) | ❌ Unsupported | P3-H |
-| [UpdateBucketMetadataInventoryTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataInventoryTableConfiguration.html) | ❌ Unsupported | P3-H |
-| [UpdateBucketMetadataJournalTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataJournalTableConfiguration.html) | ❌ Unsupported | P3-H |
 | [GetObjectTorrent](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTorrent.html) | ❌ Unsupported | P3-H |
 | [CreateSession](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateSession.html) | ❌ Unsupported | P3-H |
 | [ListDirectoryBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListDirectoryBuckets.html) | ❌ Unsupported | P3-H |

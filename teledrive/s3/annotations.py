@@ -247,7 +247,8 @@ class AnnotationStore:
                 "created_ns": int(row[2]), "updated_ns": int(row[3])}
 
     def put(self, object_id: str, name: str, value: str, *,
-            now_ns: int | None = None) -> dict:
+            now_ns: int | None = None, actor: str = "",
+            bucket: str = "", object_key: str = "") -> dict:
         """Create or replace exactly one annotation in one transaction.
 
         The limit check and the write share a transaction; a concurrent
@@ -283,20 +284,46 @@ class AnnotationStore:
                     annotations.c.object_id == object_id,
                     annotations.c.name == name,
                 ).values(value=value, updated_ns=now_ns))
+            self._journal_annotation_change(
+                object_id, name, bucket, object_key, actor)
             self.db.commit()
         except BaseException:
             self.db.connection.rollback()
             raise
         return self.get(object_id, name)
 
-    def delete(self, object_id: str, name: str) -> bool:
+    def delete(self, object_id: str, name: str, *, actor: str = "",
+               bucket: str = "", object_key: str = "") -> bool:
         """Idempotent: an absent annotation is still a successful DELETE."""
         changed = self.db.connection.execute(delete(annotations).where(
             annotations.c.object_id == object_id,
             annotations.c.name == name,
         ))
+        if changed.rowcount:
+            self._journal_annotation_change(
+                object_id, name, bucket, object_key, actor)
         self.db.commit()
         return changed.rowcount > 0
+
+    def _journal_annotation_change(self, object_id: str, name: str,
+                                   bucket: str, object_key: str,
+                                   actor: str) -> None:
+        """Record the annotation change on the CURRENT transaction.
+
+        The caller may omit bucket/key (older call sites); journaling is then
+        skipped rather than guessed. A SAVEPOINT isolates any failure.
+        """
+        if not bucket or not object_key:
+            return
+        try:
+            from teledrive.s3.metadata_journal import journal_event_safely
+            journal_event_safely(
+                self.db.connection, event="annotation_changed", bucket=bucket,
+                object_key=object_key, version_id=object_id, actor=actor,
+                detail={"annotation": name},
+            )
+        except Exception:
+            pass
 
     def list(self, object_id: str, *, prefix: str = "",
              after: str | None = None, limit: int = MAX_ANNOTATION_RESULTS

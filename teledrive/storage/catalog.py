@@ -242,6 +242,14 @@ class BucketCatalog:
             ensure_pending_tag_table(self.db.engine)
         except Exception:  # noqa: BLE001 - tagging is optional bookkeeping
             pass
+        # Phase O3: metadata journal tables must exist before any mutation
+        # transaction tries to append a row. DDL at construction time (and at
+        # application startup), never inside the mutation hot path.
+        try:
+            from teledrive.s3.metadata_journal import ensure_metadata_tables
+            ensure_metadata_tables(self.db.engine)
+        except Exception:  # noqa: BLE001 - journaling is optional bookkeeping
+            pass
 
     @staticmethod
     def validate_bucket(name: str) -> None:
@@ -698,6 +706,25 @@ class BucketCatalog:
             # The notification module already isolates its own failures.
             pass
 
+    def _journal_metadata(self, event: str, bucket: str, key: str, *,
+                          version_id: str | None = None,
+                          detail: dict | None = None) -> None:
+        """Append an S3 Metadata journal row on the CURRENT transaction.
+
+        Only buckets with a metadata configuration are journaled. The write
+        is confined to a SAVEPOINT by ``journal_event_safely`` so a journal
+        failure can never fail the storage mutation that it describes.
+        """
+        try:
+            from teledrive.s3.metadata_journal import journal_event_safely
+            journal_event_safely(
+                self.db.connection, event=event, bucket=bucket,
+                object_key=key, version_id=version_id, detail=detail,
+            )
+        except Exception:
+            # journal_event_safely already isolates its own failures.
+            pass
+
     def delete_marker(self, bucket: str, key: str, *,
                       expected_generation: int | None = None,
                       expected_object_id: str | None = None) -> str:
@@ -738,6 +765,9 @@ class BucketCatalog:
             ))
             self._enqueue_notification(
                 "s3:ObjectRemoved:Delete", bucket, key, version_id=row[0])
+            self._journal_metadata(
+                "deleted", bucket, key, version_id=row[0],
+                detail={"reason": "suspended_version_removed"})
             self._delete_pending_tags(row[0])
             self.db.commit()
             return None
@@ -773,6 +803,9 @@ class BucketCatalog:
             self._enqueue_notification(
                 "s3:ObjectRemoved:DeleteMarkerCreated", bucket, key,
                 version_id=marker)
+            self._journal_metadata(
+                "deleted", bucket, key, version_id=marker,
+                detail={"reason": "delete_marker_created"})
             self.db.commit()
             return marker
         except BaseException:
@@ -868,6 +901,8 @@ class BucketCatalog:
             self._enqueue_notification(
                 "s3:ObjectRemoved:Delete", bucket, key,
                 version_id=version_id)
+            self._journal_metadata(
+                "version_revoked", bucket, key, version_id=version_id)
             self._delete_pending_tags(version_id)
             self._delete_annotations(version_id)
             self.db.commit()
@@ -1141,6 +1176,9 @@ class BucketCatalog:
             self._apply_pending_tags(identifier)
             self._enqueue_notification(
                 event_type, item.bucket, item.key, version_id=item.id)
+            self._journal_metadata(
+                "created", item.bucket, item.key, version_id=item.id,
+                detail={"size": int(item.size)})
             self.db.commit()
             # Phase C: buckets with a default retention lock every new
             # version at publish time (WORM from the first byte).
@@ -1186,6 +1224,9 @@ class BucketCatalog:
         self._apply_pending_tags(identifier)
         self._enqueue_notification(
             event_type, item.bucket, item.key, version_id=item.id)
+        self._journal_metadata(
+            "created", item.bucket, item.key, version_id=item.id,
+            detail={"size": int(item.size)})
         self.db.commit()
         self.apply_default_lock(item.id)
         return ObjectHead(item, generation + 1)
@@ -1306,6 +1347,9 @@ class BucketCatalog:
                 object_acl_grants.c.bucket == bucket,
                 object_acl_grants.c.key_hash == source_digest,
             ).values(key_hash=destination_digest))
+            self._journal_metadata(
+                "renamed", bucket, destination_key, version_id=source_id,
+                detail={"source_key": source_key})
             self.db.commit()
             return ObjectHead(self.manifests.get(source_id), generation + 1)
         except BaseException:
@@ -1454,6 +1498,16 @@ class BucketCatalog:
                 "DELETE FROM storage_object_annotations WHERE object_id IN "
                 "(SELECT id FROM storage_objects WHERE bucket = :bucket) "
                 "OR object_id NOT IN (SELECT id FROM storage_objects)"
+            ), {"bucket": name})
+        # Phase O3: a deleted bucket must not leave a metadata configuration
+        # or journal rows behind (the journal is the bucket's local table).
+        if inspect(self.db.engine).has_table("storage_metadata_journal"):
+            self.db.connection.execute(text(
+                "DELETE FROM storage_metadata_journal WHERE bucket = :bucket"
+            ), {"bucket": name})
+        if inspect(self.db.engine).has_table("storage_metadata_configs"):
+            self.db.connection.execute(text(
+                "DELETE FROM storage_metadata_configs WHERE bucket = :bucket"
             ), {"bucket": name})
         self.db.connection.execute(
             update(buckets).where(buckets.c.name == name).values(public_read=False))

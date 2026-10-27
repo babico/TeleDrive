@@ -35,6 +35,12 @@ _BUCKET_CONTROL = frozenset({
     "analytics", "inventory", "metrics",
     # Intelligent-Tiering configuration CRUD (AWS query selector).
     "intelligent-tiering",
+    # S3 Metadata (Phase O3). Exact AWS selectors, verified against the API
+    # reference: V2 uses ?metadataConfiguration, V1 uses ?metadataTable, and
+    # each update operation has its own singular table selector.
+    "metadataConfiguration", "metadataTable",
+    "metadataJournalTable", "metadataInventoryTable",
+    "metadataAnnotationTable",
     # Read-only AWS compatibility probes (see web/s3.py _COMPAT_BUCKET_READS).
     "acl", "ownershipControls", "policy", "replication", "website", "logging",
     "notification", "notificationConfiguration", "requestPayment", "accelerate",
@@ -50,6 +56,8 @@ _EMPTY_FLAG = frozenset({
     "rename", "renameObject", "select", "restore",
     "analytics", "inventory", "metrics",
     "intelligent-tiering",
+    "metadataConfiguration", "metadataTable", "metadataJournalTable",
+    "metadataInventoryTable", "metadataAnnotationTable",
 })
 # No upper/lower-case folding for S3 query fields: AWS subresources are
 # case-sensitive. A misspelled control may not be silently ignored.
@@ -117,6 +125,13 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "inventory": {"GET", "PUT", "DELETE"},
                 "metrics": {"GET", "PUT", "DELETE"},
                 "intelligent-tiering": {"GET", "PUT", "DELETE"},
+                # Phase O3: real metadata configuration CRUD. Create is POST
+                # (not PUT) in AWS; the update operations are PUT.
+                "metadataConfiguration": {"GET", "POST", "DELETE"},
+                "metadataTable": {"GET", "POST", "DELETE"},
+                "metadataJournalTable": {"PUT"},
+                "metadataInventoryTable": {"PUT"},
+                "metadataAnnotationTable": {"PUT"},
             }
             if selector in {"analytics", "inventory", "metrics",
                             "intelligent-tiering"}:

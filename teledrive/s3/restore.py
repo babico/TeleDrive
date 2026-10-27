@@ -1,15 +1,19 @@
-"""S3 RestoreObject request validation (honest without an archive tier).
+"""S3 RestoreObject validation and the real archive-tier restore window.
 
-TeleDrive currently has exactly one immediately-readable storage class. AWS
-returns ``403 InvalidObjectState`` when RestoreObject addresses an object that
-is not archived, so that is the truthful response for every object here.
-The request XML is still validated strictly first: a malformed body is a 400,
-not a misleading storage-state error.
+Intelligent-Tiering (``teledrive/s3/tiering.py``) marks an object
+``ARCHIVE_ACCESS``/``DEEP_ARCHIVE_ACCESS``. That label is a catalog access
+gate: the Telegram chunks never move, but GetObject/HeadObject answer
+``403 InvalidObjectState`` until a restore window is open.
 
-Future tiering seam: when a later phase marks an object ``ARCHIVE``, only
-``teledrive/s3/restore.py::is_applicable`` and the handler's
-``_perform_restore`` branch need to change. No other routing, permission or
-XML code assumes the current single-tier behavior.
+* Standard-class object -> RestoreObject is ``403 InvalidObjectState`` (the
+  AWS-conformant answer: the object is already immediately readable).
+* Archived object -> strict RestoreRequest XML is validated, then the handler
+  sets ``storage_objects.restore_until_ns``. A second restore while that
+  window is still open is ``409 RestoreAlreadyInProgress`` (AWS semantics).
+* While the window is open, reads work normally and HEAD reports
+  ``x-amz-restore: ongoing-request="false", expiry-date="..."``.
+* When the window expires the object is gated again; no background job is
+  required for the gate to close.
 """
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ from defusedxml.common import DefusedXmlException
 from xml.etree.ElementTree import ParseError
 
 MAX_RESTORE_XML_BYTES = 16 * 1024
+MAX_RESTORE_DAYS = 36500
+_ARCHIVED_CLASSES = frozenset({"ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS"})
 _TIERS = frozenset({"Standard", "Bulk", "Expedited"})
 
 
@@ -61,9 +67,10 @@ def parse_restore_request(body: bytes) -> RestoreRequest:
         seen.add(name)
         if name == "Days":
             raw = (child.text or "").strip()
-            if not raw.isdigit() or not 1 <= int(raw) <= 36500:
+            if not raw.isdigit() or not 1 <= int(raw) <= MAX_RESTORE_DAYS:
                 raise RestoreError(
-                    "MalformedXML", "Days must be an integer between 1 and 36500")
+                    "MalformedXML",
+                    f"Days must be an integer between 1 and {MAX_RESTORE_DAYS}")
             days = int(raw)
         elif name == "Description":
             if list(child) or len((child.text or "").encode("utf-8")) > 1024:
@@ -99,10 +106,23 @@ def parse_restore_request(body: bytes) -> RestoreRequest:
 
 
 def is_applicable(item) -> bool:
-    """The single tiering seam: is this object in an archived class?
+    """The single tiering seam: is this object in an archived class?"""
+    return getattr(item, "storage_class", "STANDARD") in _ARCHIVED_CLASSES
 
-    There is no archive column/phase yet, so this is always False. A future
-    phase may consult a real storage-class marker here; the handler already
-    routes True to its separate ``_perform_restore`` branch.
-    """
-    return getattr(item, "storage_class", "STANDARD") == "ARCHIVE"
+
+def is_restored(item, *, now_ns: int) -> bool:
+    """True while a restore window is still open for an archived object."""
+    if not is_applicable(item):
+        return False
+    until = getattr(item, "restore_until_ns", None)
+    return until is not None and int(until) > int(now_ns)
+
+
+def restore_header(item, *, now_ns: int) -> str | None:
+    """AWS-shaped ``x-amz-restore`` value while restored, else None."""
+    if not is_restored(item, now_ns=now_ns):
+        return None
+    from email.utils import formatdate
+    expiry = formatdate(
+        int(int(item.restore_until_ns) / 1_000_000_000), usegmt=True)
+    return f'ongoing-request="false", expiry-date="{expiry}"'

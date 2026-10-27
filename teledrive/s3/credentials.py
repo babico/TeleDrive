@@ -83,6 +83,12 @@ PERMISSIONS = frozenset({
     "s3:DeleteBucketInventoryConfiguration",
     "s3:GetBucketMetricsConfiguration", "s3:PutBucketMetricsConfiguration",
     "s3:DeleteBucketMetricsConfiguration",
+    # Intelligent-Tiering (Phase N5 + O1): real configuration CRUD plus the
+    # catalog access gate and RestoreObject window.
+    "s3:GetBucketIntelligentTieringConfiguration",
+    "s3:PutBucketIntelligentTieringConfiguration",
+    "s3:DeleteBucketIntelligentTieringConfiguration",
+    "s3:ListBucketIntelligentTieringConfigurations",
 })
 DEFAULT_PERMISSIONS = tuple(sorted(PERMISSIONS))
 MAX_CREDENTIAL_TAGS = 50

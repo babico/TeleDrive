@@ -39,7 +39,7 @@ from defusedxml.common import DefusedXmlException
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import insert, select, text
+from sqlalchemy import insert, select, text, update
 
 from teledrive.db import Database
 from teledrive.s3.credentials import S3CredentialStore, load_master_key
@@ -117,7 +117,13 @@ from teledrive.s3.select import (
 )
 from teledrive.s3.restore import (
     RestoreError, MAX_RESTORE_XML_BYTES, is_applicable as _restore_is_applicable,
-    parse_restore_request,
+    is_restored as _restore_is_restored, parse_restore_request,
+    restore_header as _restore_header,
+)
+from teledrive.s3.tiering import (
+    MAX_TIERING_XML_BYTES, NO_SUCH_CONFIGURATION as NO_SUCH_TIERING_CONFIGURATION,
+    TieringError, TieringStore, config_xml as tiering_config_xml,
+    list_xml as tiering_list_xml, parse_document as parse_tiering_document,
 )
 from teledrive.storage.catalog import BucketCatalog, published_versions
 from teledrive.storage.copy import copy_object, CopyConflict
@@ -794,6 +800,7 @@ class _S3RequestContext:
     is_bucket_notification: bool = False
     is_bucket_logging: bool = False
     report_kind: str | None = None
+    is_bucket_tiering: bool = False
 
 
 async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
@@ -1176,6 +1183,47 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
             return Response(status_code=204)
         return _error("NotImplemented",
                       "Unsupported report configuration method", 501)
+    if ctx.is_bucket_tiering:
+        if bucket not in catalog.list_buckets():
+            return _error("NoSuchBucket", "Bucket does not exist", 404)
+        store = TieringStore(catalog)
+        config_id = request.query_params.get("id")
+        if request.method == "GET":
+            if config_id is not None:
+                if not config_id:
+                    return _error("InvalidArgument",
+                                  "Tiering configuration id is empty", 400)
+                value = store.get(bucket, config_id)
+                if value is None:
+                    return _error(
+                        NO_SUCH_TIERING_CONFIGURATION,
+                        "The specified configuration does not exist", 404)
+                return Response(tiering_config_xml(value),
+                                media_type="application/xml")
+            return Response(tiering_list_xml(store.list(bucket)),
+                            media_type="application/xml")
+        if request.method == "PUT":
+            body = bytearray()
+            async for block in request.stream():
+                body.extend(block)
+                if len(body) > MAX_TIERING_XML_BYTES:
+                    raise TieringError(
+                        "MalformedXML",
+                        "Tiering configuration XML exceeds 16 KiB")
+            _verify_bucket_control_payload(request, bytes(body))
+            config = parse_tiering_document(bytes(body), expected_id=config_id)
+            store.put(bucket, config_id, config)
+            return Response(status_code=200)
+        if request.method == "DELETE":
+            async for block in request.stream():
+                if block:
+                    raise TieringError(
+                        "InvalidRequest",
+                        "Delete tiering configuration cannot have a body")
+            store.delete(bucket, config_id)
+            return Response(status_code=204)
+        return _error("NotImplemented",
+                      "Unsupported tiering configuration method", 501)
     if ctx.is_bucket_website:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -3397,9 +3445,10 @@ def _object_attributes(ctx: _S3RequestContext, item,
         ).decode("ascii")
         ET.SubElement(checksum, "ChecksumType").text = "FULL_OBJECT"
     if "StorageClass" in requested:
-        # TeleDrive exposes one immutable STANDARD-like tier; archived
-        # or replica-backed AWS storage classes do not exist here.
-        ET.SubElement(result, "StorageClass").text = "STANDARD"
+        # The catalog's real access-tier label. Archived objects are gated
+        # by the read path unless a restore window is open.
+        ET.SubElement(result, "StorageClass").text = getattr(
+            item, "storage_class", "STANDARD")
     if "ObjectParts" in requested:
         layout = MultipartStore(catalog).object_parts_for_version(item.id, item.size)
         # AWS omits ObjectParts for a plain single PUT. This must not
@@ -3481,6 +3530,18 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
                 return result
             return _error("NoSuchKey", "The specified key does not exist", 404)
     item_etag = MultipartStore(catalog).object_etag(item.id, item.sha256)
+    read_now_ns = time.time_ns()
+    read_state = catalog.object_read_state(item.id, now_ns=read_now_ns)
+    if read_state["archived"]:
+        # AWS behaviour: the bytes may exist, but this storage class is not
+        # immediately readable. The Telegram chunks are untouched; the gate
+        # lives in our catalog and opens only via RestoreObject.
+        return _error(
+            "InvalidObjectState",
+            "The operation is not valid for the object's storage class; "
+            "the object is archived and must be restored before reading",
+            403,
+        )
     if ctx.is_object_attributes:
         return _object_attributes(ctx, item, item_etag)
     http_properties = ObjectMetadataStore(catalog).get(item.id)
@@ -3492,11 +3553,18 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
         })
     if precondition == 412:
         return _error("PreconditionFailed", "Object precondition failed", 412)
+    # Every successful GetObject/HeadObject counts, including ranged and
+    # versioned reads. Failed/denied/precondition requests never reach here.
+    catalog.record_object_access(item.id, now_ns=read_now_ns)
     if request.method == "HEAD":
-        return Response(status_code=200, headers=_headers(
+        headers = _headers(
             item, item_etag, http_properties,
             checksum_mode=(checksum_mode == "ENABLED"),
-        ))
+        )
+        restore_state = _restore_header(item, now_ns=read_now_ns)
+        if restore_state is not None:
+            headers["x-amz-restore"] = restore_state
+        return Response(status_code=200, headers=headers)
     start, end, partial = _range(request.headers.get("range"), item.size)
     transport = storage_transport(db)
     scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
@@ -3520,6 +3588,9 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     headers = _headers(item, item_etag, http_properties,
                        checksum_mode=(checksum_mode == "ENABLED"
                                       and not partial))
+    restore_state = _restore_header(item, now_ns=read_now_ns)
+    if restore_state is not None:
+        headers["x-amz-restore"] = restore_state
     headers["Content-Length"] = str(end - start)
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
@@ -3659,21 +3730,39 @@ async def _handle_select_object_content(ctx: _S3RequestContext) -> Response:
 
 async def _perform_restore(ctx: _S3RequestContext, item,
                            restore_request) -> Response:
-    """Future tiering seam — unreachable while no object is ARCHIVE."""
-    return _error(
-        "NotImplemented",
-        "Archive retrieval is not implemented; this method must only be "
-        "reached after the tiering phase provides an ARCHIVE storage class",
-        501,
-    )
+    """Open a bounded restore window on an archived catalog object.
+
+    The Telegram chunks never moved; this only flips the access gate. The
+    window is a stored nanosecond deadline, so expiry needs no scheduler.
+    """
+    now_ns = time.time_ns()
+    if _restore_is_restored(item, now_ns=now_ns):
+        # AWS RestoreObject answers 409 RestoreAlreadyInProgress while a
+        # restore window is still active for the same object.
+        return _error(
+            "RestoreAlreadyInProgress",
+            "The object restore is already in progress",
+            409,
+        )
+    until_ns = now_ns + restore_request.days * 86_400_000_000_000
+    try:
+        ctx.catalog.db.connection.execute(
+            update(objects).where(objects.c.id == item.id)
+            .values(restore_until_ns=until_ns))
+        ctx.catalog.db.commit()
+    except BaseException:
+        ctx.catalog.db.connection.rollback()
+        raise
+    return Response(status_code=202)
 
 
 async def _handle_restore_object(ctx: _S3RequestContext) -> Response:
-    """POST ?restore: strict AWS RestoreRequest, then truthful object state.
+    """POST ?restore: strict AWS RestoreRequest, then the real tier state.
 
-    TeleDrive has one immediately-readable class, so AWS-conformant behavior
-    is ``403 InvalidObjectState`` for every object. The single seam for a
-    future archive tier is ``restore.is_applicable`` plus ``_perform_restore``.
+    A STANDARD-class object is already immediately readable, so AWS-conformant
+    behaviour is ``403 InvalidObjectState``. An ARCHIVE_ACCESS/
+    DEEP_ARCHIVE_ACCESS object gets a real restore window (202) and reads work
+    again until that window expires.
     """
     request = ctx.request
     bucket = ctx.bucket
@@ -3849,6 +3938,9 @@ async def _handle(request: Request):
              if bucket and not separator and name in request.query_params),
             None,
         )
+        is_bucket_tiering = bool(
+            bucket and not separator
+            and "intelligent-tiering" in request.query_params)
         compat_bucket_read = None
         if bucket and not separator and request.method == "GET":
             compat_bucket_read = next(
@@ -3913,6 +4005,28 @@ async def _handle(request: Request):
             if request.method in {"PUT", "DELETE"} and not id_values:
                 return _error("InvalidArgument",
                               "Report configuration id query is required", 400)
+        if is_bucket_tiering:
+            if request.method not in {"GET", "PUT", "DELETE"}:
+                return _error(
+                    "MethodNotAllowed",
+                    "Intelligent-Tiering configuration uses GET, PUT or DELETE",
+                    405)
+            if any(name not in {"intelligent-tiering", "id"}
+                   and not name.startswith("X-Amz-")
+                   for name in request.query_params):
+                return _error("InvalidArgument",
+                              "Invalid tiering configuration selector", 400)
+            if (len(request.query_params.getlist("intelligent-tiering")) != 1
+                    or request.query_params.get("intelligent-tiering") != ""):
+                return _error("InvalidArgument",
+                              "Invalid tiering configuration selector", 400)
+            id_values = request.query_params.getlist("id")
+            if len(id_values) > 1:
+                return _error("InvalidArgument",
+                              "Ambiguous tiering configuration id", 400)
+            if request.method in {"PUT", "DELETE"} and not id_values:
+                return _error("InvalidArgument",
+                              "Tiering configuration id query is required", 400)
         if is_bucket_notification:
             action = {"GET": "s3:GetBucketNotification",
                       "PUT": "s3:PutBucketNotification"}.get(request.method)
@@ -3942,6 +4056,16 @@ async def _handle(request: Request):
                 "PUT": f"s3:PutBucket{report_kind.capitalize()}Configuration",
                 "DELETE": f"s3:DeleteBucket{report_kind.capitalize()}Configuration",
             }.get(request.method)
+        elif is_bucket_tiering:
+            if request.method == "GET":
+                action = ("s3:ListBucketIntelligentTieringConfigurations"
+                          if "id" not in request.query_params
+                          else "s3:GetBucketIntelligentTieringConfiguration")
+            else:
+                action = {
+                    "PUT": "s3:PutBucketIntelligentTieringConfiguration",
+                    "DELETE": "s3:DeleteBucketIntelligentTieringConfiguration",
+                }.get(request.method)
         elif is_bucket_website:
             action = {
                 "GET": "s3:GetBucketWebsite",
@@ -4137,6 +4261,7 @@ async def _handle(request: Request):
             is_bucket_notification=is_bucket_notification,
             is_bucket_logging=is_bucket_logging,
             report_kind=report_kind,
+            is_bucket_tiering=is_bucket_tiering,
             is_bucket_policy_status=is_bucket_policy_status,
             is_bucket_policy=is_bucket_policy,
             is_bucket_ownership=is_bucket_ownership,
@@ -4294,6 +4419,8 @@ async def _handle(request: Request):
     except NotificationError as exc:
         return _error(exc.code, str(exc), exc.status)
     except ReportConfigError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except TieringError as exc:
         return _error(exc.code, str(exc), exc.status)
     except WebsiteError as exc:
         return _error(exc.code, str(exc), exc.status)

@@ -35,6 +35,16 @@ objects = Table(
     Column("retention_until_ns", BigInteger),
     Column("legal_hold", Boolean, nullable=False, server_default="0"),
     Column("retention_mode", String(16)),
+    # Phase N5: real access tracking + Intelligent-Tiering label.
+    # access_count/last_accessed_ns are updated atomically by the read path.
+    # storage_class is an ACCESS GATE in this catalog, not a different
+    # Telegram medium: archived objects keep every chunk and still return
+    # 403 InvalidObjectState until RestoreObject sets restore_until_ns.
+    Column("access_count", BigInteger, nullable=False, server_default="0"),
+    Column("last_accessed_ns", BigInteger),
+    Column("storage_class", String(32), nullable=False,
+           server_default="STANDARD"),
+    Column("restore_until_ns", BigInteger),
     CheckConstraint("size >= 0", name="ck_storage_objects_size"),
 )
 chunks = Table(
@@ -115,6 +125,11 @@ class StoredObject:
     size: int
     sha256: str
     created_at: int
+    # Immutable bytes never change class; these fields are the catalog's
+    # access gate (see teledrive/s3/tiering.py). Defaults keep every
+    # existing constructor call source-compatible.
+    storage_class: str = "STANDARD"
+    restore_until_ns: int | None = None
 
 
 class ManifestError(RuntimeError):
@@ -375,7 +390,10 @@ class ManifestStore:
             raise FileNotFoundError("Object not found or not committed")
         return StoredObject(id=row["id"], bucket=row["bucket"], key=row["object_key"],
                             size=int(row["size"]), sha256=row["sha256"],
-                            created_at=int(row["created_at"]))
+                            created_at=int(row["created_at"]),
+                            storage_class=row["storage_class"],
+                            restore_until_ns=(None if row["restore_until_ns"] is None
+                                              else int(row["restore_until_ns"])))
 
     def resolve_content_id(self, identifier: str) -> str:
         """Locate immutable Telegram bytes for a ready object or server-side copy.

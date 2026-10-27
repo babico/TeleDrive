@@ -441,23 +441,23 @@
     },
     {
       "name": "GetBucketIntelligentTieringConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-G"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketIntelligentTieringConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-G"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteBucketIntelligentTieringConfiguration",
-      "status": "unsupported",
-      "workstream": "P3-G"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "ListBucketIntelligentTieringConfigurations",
-      "status": "unsupported",
-      "workstream": "P3-G"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "CreateBucketMetadataConfiguration",

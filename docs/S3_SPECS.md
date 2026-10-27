@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 89 supported, 7 partial (0 by code, 7 by design), 20 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 93 supported, 7 partial (0 by code, 7 by design), 16 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -158,6 +158,10 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [ListObjectAnnotations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectAnnotations.html) | ✅ Supported | Lists annotations with prefix filtering and HMAC-signed continuation tokens; bounded page sizes. |
 | [PutBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketRequestPayment.html) | ✅ Supported | Accepts exactly the one state that exists here, `Payer=BucketOwner`; `Requester` is rejected 501 because no requester-pays billing exists. The value is therefore writable without being a lie. |
 | [PutBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketAccelerateConfiguration.html) | ✅ Supported | Accepts exactly `Status=Suspended`; `Enabled` is rejected 501 because there is no edge network. Supports the single real state instead of pretending. |
+| [GetBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketIntelligentTieringConfiguration.html) | ✅ Supported | Reads one stored Intelligent-Tiering configuration by id, or an honest 404 `NoSuchConfiguration`. |
+| [PutBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketIntelligentTieringConfiguration.html) | ✅ Supported | Stores a bounded Smart-Tiering document (16 KiB, strict XML). AccessTier is limited to ARCHIVE_ACCESS / DEEP_ARCHIVE_ACCESS; unknown tier names are rejected. A scheduler really transitions `storage_class` from real access timestamps, and an archived object answers 403 InvalidObjectState until restored — so the tier label has an observable consequence. The Telegram chunks never move: this is an access gate in our catalog, explicitly not AWS Glacier. |
+| [DeleteBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketIntelligentTieringConfiguration.html) | ✅ Supported | Removes one configuration by id (204, idempotent). Objects already transitioned stay in their class until the next pass. |
+| [ListBucketIntelligentTieringConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketIntelligentTieringConfigurations.html) | ✅ Supported | Lists every stored configuration id (complete and sorted). |
 
 ### 3.2 Partial — by code (closeable gaps)
 
@@ -299,10 +303,6 @@ reporting workflows are wanted; lowest priority otherwise.
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [GetBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketIntelligentTieringConfiguration.html) | ❌ Unsupported | P3-G |
-| [PutBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketIntelligentTieringConfiguration.html) | ❌ Unsupported | P3-G |
-| [DeleteBucketIntelligentTieringConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketIntelligentTieringConfiguration.html) | ❌ Unsupported | P3-G |
-| [ListBucketIntelligentTieringConfigurations](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBucketIntelligentTieringConfigurations.html) | ❌ Unsupported | P3-G |
 
 ### P3-H — AWS-managed products, directory buckets, annotations and provider services
 

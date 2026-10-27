@@ -1001,6 +1001,29 @@ async def lifecycle_scheduler_loop() -> None:
         await asyncio.sleep(3600)
 
 
+async def tiering_scheduler_loop() -> None:
+    """Apply enabled Intelligent-Tiering configurations hourly, bounded.
+
+    The pass only updates this catalog's access gate; Telegram bytes are
+    never moved or deleted. Disabled configurations are ignored.
+    """
+    while True:
+        connection = None
+        try:
+            from teledrive.s3.tiering import TieringStore
+            connection = db_connect()
+            cat = BucketCatalog(ManifestStore(connection))
+            TieringStore(cat).apply_due(now_ns=time.time_ns(), limit=1000)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("tiering scheduler: " + type(exc).__name__, "scheduler")
+        finally:
+            if connection is not None:
+                connection.close()
+        await asyncio.sleep(3600)
+
+
 async def notification_scheduler_loop() -> None:
     """Deliver due S3 webhook events with bounded exponential backoff."""
     while True:
@@ -1093,6 +1116,7 @@ async def lifespan(_: FastAPI):
     global upload_job_scheduler_task, lifecycle_scheduler_task
     global notification_scheduler_task
     global folder_watch_task
+    global tiering_scheduler_task
     os.umask(0o077)
     # Settings first: ensure_config() mkdirs AUTH_DIR, which must already
     # reflect the config/env override (Docker only worked by accident
@@ -1170,11 +1194,14 @@ async def lifespan(_: FastAPI):
         # mutation transaction holds SQLite's write lock.
         from teledrive.s3.annotations import ensure_annotation_tables
         ensure_annotation_tables(conn.engine)
+        from teledrive.s3.tiering import ensure_tiering_tables
+        ensure_tiering_tables(conn.engine)
         conn.close()
     except Exception as exc:
         _log(_scrub_text(f"startup database warning: {exc}"), "startup")
     upload_job_scheduler_task = asyncio.create_task(upload_job_scheduler_loop())
     lifecycle_scheduler_task = asyncio.create_task(lifecycle_scheduler_loop())
+    tiering_scheduler_task = asyncio.create_task(tiering_scheduler_loop())
     notification_scheduler_task = asyncio.create_task(notification_scheduler_loop())
     folder_watch_task = asyncio.create_task(folder_watch_loop())
     session_health_task = asyncio.create_task(telegram_session_health_loop())
@@ -1185,6 +1212,9 @@ async def lifespan(_: FastAPI):
     if lifecycle_scheduler_task:
         lifecycle_scheduler_task.cancel()
         await asyncio.gather(lifecycle_scheduler_task, return_exceptions=True)
+    if tiering_scheduler_task:
+        tiering_scheduler_task.cancel()
+        await asyncio.gather(tiering_scheduler_task, return_exceptions=True)
     if notification_scheduler_task:
         notification_scheduler_task.cancel()
         await asyncio.gather(notification_scheduler_task, return_exceptions=True)

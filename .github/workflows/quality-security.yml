@@ -186,7 +186,8 @@ jobs:
             tests/s3/test_s3_report_runner.py \
             tests/s3/test_s3_rename.py \
             tests/s3/test_s3_select.py \
-            tests/s3/test_s3_restore.py
+            tests/s3/test_s3_restore.py \
+            tests/s3/test_s3_tiering.py
       - name: Publish CI run summary
         if: always()
         shell: bash

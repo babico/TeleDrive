@@ -100,6 +100,11 @@ PROMOTED_AHEAD_OF_MANIFEST = frozenset({
     "DeleteBucketInventoryConfiguration", "ListBucketInventoryConfigurations",
     "GetBucketMetricsConfiguration", "PutBucketMetricsConfiguration",
     "DeleteBucketMetricsConfiguration", "ListBucketMetricsConfigurations",
+    # Phase N5: Intelligent-Tiering configuration CRUD.
+    "GetBucketIntelligentTieringConfiguration",
+    "PutBucketIntelligentTieringConfiguration",
+    "DeleteBucketIntelligentTieringConfiguration",
+    "ListBucketIntelligentTieringConfigurations",
     # Phase L: policy engine, ownership controls, ABAC and PAB deletion.
     "PutBucketPolicy", "DeleteBucketPolicy",
     "PutBucketOwnershipControls", "DeleteBucketOwnershipControls",

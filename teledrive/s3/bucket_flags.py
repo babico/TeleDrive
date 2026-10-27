@@ -16,6 +16,10 @@ That makes the PUT operations honest "supported" operations: they correctly
 manage the only state that exists and refuse the state that would require
 absent infrastructure. They do not silently accept-and-ignore.
 
+The GET path is the *same canonical renderer* the PUT accepts: for both
+configurations, PUT-then-GET is byte-identical when the client uploads the
+document returned by GET. There is no separate fail-closed canned response.
+
 Both documents are strict, namespace-tolerant (bare or 2006-03-01) XML with a
 16 KiB bound and unknown fields rejected as MalformedXML.
 """

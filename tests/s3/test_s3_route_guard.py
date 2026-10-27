@@ -52,7 +52,8 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
     assert signed(service, "PUT", "/guard-bucket").status_code == 200
     before = service[2].uploads
     reply = signed(service, method, f"/guard-bucket?{selector}")
-    if method == "GET" and selector in ("analytics", "inventory", "metrics"):
+    if method == "GET" and selector in ("analytics", "inventory", "metrics",
+                                       "intelligent-tiering"):
         # Phase N: real configuration listing (empty list body), never CRUD.
         assert reply.status_code == 200, (method, selector, reply.text)
         assert b"ListBucketResult" not in reply.content
@@ -89,7 +90,7 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
         assert (b"MalformedXML" in reply.content
                 or b"MalformedPolicy" in reply.content)
     elif method in {"PUT", "DELETE"} and selector in (
-            "analytics", "inventory", "metrics",
+            "analytics", "inventory", "metrics", "intelligent-tiering",
     ):
         # Phase N: real report-configuration CRUD. PUT without an id is a
         # required-id failure (400); DELETE with no id likewise. Neither
@@ -203,7 +204,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":89, "partial":7, "unsupported":20,
+        "supported":93, "partial":7, "unsupported":16,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -218,8 +219,10 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
     assert Counter(manifest_gaps.values()) == {"by design": 7}
+    # P3-G (analytics/inventory/metrics/tiering) is fully implemented now,
+    # so it no longer appears as a remaining workstream label.
     assert set(item["workstream"] for item in data["operations"]) >= {
-        "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-G", "P3-H",
+        "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-H",
     }
     for item in data["operations"]:
         keys = set(item)

@@ -100,15 +100,16 @@ Index("ix_storage_published_versions_key",
 _BUCKET_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?\Z")
 
 
-_versioning_column_ensured = False
+_versioning_column_ensured: set[int] = set()
 
 
 def ensure_versioning_column(db) -> None:
-    """storage_buckets.versioning_state (Phase B) and the Phase C
-    object-lock columns on both tables may be missing in older
-    deployments; add them defensively. Cached per process."""
-    global _versioning_column_ensured
-    if _versioning_column_ensured:
+    """storage_buckets.versioning_state (Phase B), the Phase C object-lock
+    columns and the Phase N5 access/tiering columns may be missing in older
+    deployments; add them defensively. Cached per engine (not per process)
+    so a worker that opens a second, older database still migrates it."""
+    key = id(db.engine)
+    if key in _versioning_column_ensured:
         return
     from sqlalchemy import text as _text
     sqlite = db.engine.dialect.name == "sqlite"
@@ -190,7 +191,29 @@ def ensure_versioning_column(db) -> None:
             "ALTER TABLE storage_objects ADD COLUMN retention_mode "
             "VARCHAR(16)"))
         db.commit()
-    _versioning_column_ensured = True
+    if object_columns and "access_count" not in object_columns:
+        # DEFAULT 0 is valid for integer columns on every supported dialect.
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN access_count "
+            "BIGINT NOT NULL DEFAULT 0"))
+        db.commit()
+    if object_columns and "last_accessed_ns" not in object_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN last_accessed_ns "
+            "BIGINT"))
+        db.commit()
+    if object_columns and "storage_class" not in object_columns:
+        # VARCHAR, not TEXT: MySQL rejects a server default on TEXT.
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN storage_class "
+            "VARCHAR(32) NOT NULL DEFAULT 'STANDARD'"))
+        db.commit()
+    if object_columns and "restore_until_ns" not in object_columns:
+        db.connection.execute(_text(
+            "ALTER TABLE storage_objects ADD COLUMN restore_until_ns "
+            "BIGINT"))
+        db.commit()
+    _versioning_column_ensured.add(key)
 
 
 @dataclass(frozen=True)
@@ -318,6 +341,73 @@ class BucketCatalog:
         return (state["legal_hold"]
                 or (state["retain_until_ns"] is not None
                     and int(state["retain_until_ns"]) > now_ns))
+
+    # -- access tracking + Intelligent-Tiering gate (Phase N5) -----------
+    def object_read_state(self, object_id: str, *, now_ns: int | None = None) -> dict:
+        """Return the access gate for one immutable object version.
+
+        ``archived`` is true for ARCHIVE_ACCESS/DEEP_ARCHIVE_ACCESS unless a
+        RestoreObject window is still open. The Telegram chunks always exist;
+        this is a catalog-level read gate, never a different storage medium.
+        """
+        row = self.db.connection.execute(
+            select(objects.c.storage_class, objects.c.restore_until_ns,
+                   objects.c.access_count, objects.c.last_accessed_ns)
+            .where(objects.c.id == object_id)).first()
+        if row is None:
+            raise FileNotFoundError("Object does not exist")
+        now_ns = time.time_ns() if now_ns is None else int(now_ns)
+        storage_class = row[0] or "STANDARD"
+        restore_until = None if row[1] is None else int(row[1])
+        archived = storage_class in ("ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS")
+        return {
+            "storage_class": storage_class,
+            "restore_until_ns": restore_until,
+            "restored": bool(archived and restore_until is not None
+                             and restore_until > now_ns),
+            "archived": bool(archived and not (
+                restore_until is not None and restore_until > now_ns)),
+            "access_count": int(row[2] or 0),
+            "last_accessed_ns": (None if row[3] is None else int(row[3])),
+        }
+
+    def record_object_access(self, object_id: str, *,
+                             now_ns: int | None = None) -> None:
+        """Atomically count a successful GetObject/HeadObject.
+
+        One UPDATE computes both fields from the stored row, so concurrent
+        readers never lose a count or resurrect an older timestamp.
+        """
+        now_ns = time.time_ns() if now_ns is None else int(now_ns)
+        self.db.connection.execute(
+            update(objects).where(objects.c.id == object_id).values(
+                access_count=objects.c.access_count + 1,
+                last_accessed_ns=now_ns))
+        self.db.commit()
+
+    def object_access_stats(self, bucket: str, *, limit: int = 100,
+                            offset: int = 0) -> list[dict]:
+        """Small operator accessor for the Phase N5 counters."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("Invalid access statistics limit")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Invalid access statistics offset")
+        rows = self.db.connection.execute(
+            select(objects.c.id, objects.c.object_key, objects.c.storage_class,
+                   objects.c.access_count, objects.c.last_accessed_ns,
+                   objects.c.restore_until_ns)
+            .where(objects.c.bucket == bucket, objects.c.status == "ready")
+            .order_by(objects.c.object_key, objects.c.id)
+            .limit(limit).offset(offset)).mappings().all()
+        return [{
+            "object_id": row["id"], "key": row["object_key"],
+            "storage_class": row["storage_class"] or "STANDARD",
+            "access_count": int(row["access_count"] or 0),
+            "last_accessed_ns": (None if row["last_accessed_ns"] is None
+                                 else int(row["last_accessed_ns"])),
+            "restore_until_ns": (None if row["restore_until_ns"] is None
+                                 else int(row["restore_until_ns"])),
+        } for row in rows]
 
     def set_retention(self, object_id: str, *, mode: str,
                       until_ns: int) -> None:

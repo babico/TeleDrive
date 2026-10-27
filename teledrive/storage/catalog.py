@@ -250,6 +250,10 @@ class BucketCatalog:
             ensure_metadata_tables(self.db.engine)
         except Exception:  # noqa: BLE001 - journaling is optional bookkeeping
             pass
+        # Same REPEATABLE-READ snapshot issue as ManifestStore: the probes
+        # above must not pin this connection's view of the database.
+        if self.db.engine.url.get_backend_name() != "sqlite":
+            self.db.connection.commit()
 
     @staticmethod
     def validate_bucket(name: str) -> None:

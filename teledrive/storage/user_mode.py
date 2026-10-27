@@ -514,6 +514,7 @@ class UserSendJournal:
     def __init__(self, db):
         self.db = db
         _meta.create_all(db.engine)
+        db.release_setup_snapshot()
 
     def start(self, account: str, chat_id: int, object_id: str, ordinal: int,
               sha256: str, size: int) -> None:

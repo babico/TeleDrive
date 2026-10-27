@@ -231,6 +231,7 @@ class BucketCORSStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog, self.db = catalog, catalog.db
         catalog_metadata.create_all(self.db.engine, tables=[cors_config])
+        self.db.release_setup_snapshot()
 
     def _bucket_exists(self, name: str) -> None:
         if self.db.connection.execute(

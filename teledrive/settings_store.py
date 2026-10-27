@@ -53,6 +53,7 @@ class SettingsStore:
         self.db = db
         self.master_key = master_key
         _metadata.create_all(db.engine, tables=[settings_document])
+        db.release_setup_snapshot()
 
     def _cipher(self) -> Fernet:
         if not self.master_key:

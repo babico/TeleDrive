@@ -63,6 +63,7 @@ class MtprotoRateGuard:
     def __init__(self, database: Any):
         self.db = database
         _meta.create_all(database.engine)
+        database.release_setup_snapshot()
 
     def reserve_send_slot(self, account: str, chat_id: int,
                           interval_seconds: float, *,

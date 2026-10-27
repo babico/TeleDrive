@@ -300,6 +300,25 @@ class Database:
             if owns_engine:
                 engine.dispose()
 
+    def release_setup_snapshot(self) -> None:
+        """End a transaction opened by schema probing during construction.
+
+        Under MySQL's default REPEATABLE READ the FIRST statement on a
+        connection freezes its snapshot, so a row committed by another
+        worker afterwards stays invisible -- cross-connection reads then
+        silently miss it. Schema creation and column probing are not part
+        of any caller transaction, so they must not pin the snapshot.
+        """
+        if self.engine.url.get_backend_name() == "sqlite":
+            return
+        try:
+            self.connection.commit()
+        except Exception:  # noqa: BLE001 - best effort, never blocks setup
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+
     def commit(self) -> None:
         self.connection.commit()
 

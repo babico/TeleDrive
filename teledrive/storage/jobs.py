@@ -80,6 +80,7 @@ class StorageUploadJobs:
         self.catalog = catalog
         self.db = catalog.db
         _meta.create_all(self.db.engine)
+        self.db.release_setup_snapshot()
 
     @staticmethod
     def scan_id(bucket: str, key: str, path: Path, info: os.stat_result) -> str:

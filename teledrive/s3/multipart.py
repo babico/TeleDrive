@@ -109,6 +109,7 @@ class MultipartStore:
         _meta.create_all(self.db.engine)
         # Legacy deployments predate the SSE-C upload marker.
         ensure_encryption_column(self.db, "storage_multipart_uploads")
+        self.db.release_setup_snapshot()
 
     def initiate(self, bucket: str, key: str, owner: str, now: int | None = None,
                  *, http_metadata: dict[str, str] | None = None,

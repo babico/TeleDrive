@@ -231,6 +231,13 @@ class ManifestStore:
         # Dialect-aware FTS structures for content search (idempotent).
         from .content_index import ensure_content_search
         ensure_content_search(database)
+        # Schema probing issues SELECTs on this connection. Under MySQL's
+        # default REPEATABLE READ that opens a transaction and freezes the
+        # snapshot, so a write committed by ANOTHER worker afterwards stays
+        # invisible here -- cross-connection reads then silently miss the
+        # row. Setup is not part of any caller transaction, so close it.
+        if database.engine.url.get_backend_name() != "sqlite":
+            database.connection.commit()
 
     def begin(self, bucket: str, key: str, size: int, now: int, *,
               sse_key_md5: str | None = None) -> str:

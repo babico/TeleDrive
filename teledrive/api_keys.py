@@ -92,6 +92,7 @@ class ApiKeyStore:
     def __init__(self, db: Database):
         self.db = db
         _metadata.create_all(db.engine)
+        db.release_setup_snapshot()
 
     @staticmethod
     def _check_scopes(scopes: list[str],

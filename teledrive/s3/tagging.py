@@ -145,6 +145,7 @@ class ObjectTagStore:
         self.catalog = catalog
         self.db = catalog.db
         _meta.create_all(self.db.engine, tables=[object_tags, pending_tags])
+        self.db.release_setup_snapshot()
 
     def get(self, object_id: str) -> list[tuple[str, str]]:
         return list(self.db.connection.execute(
@@ -331,6 +332,7 @@ class BucketTagStore:
         self.catalog = catalog
         self.db = catalog.db
         catalog_metadata.create_all(self.db.engine, tables=[bucket_tags])
+        self.db.release_setup_snapshot()
 
     def _ensure_bucket(self, bucket: str) -> None:
         from teledrive.storage.catalog import buckets

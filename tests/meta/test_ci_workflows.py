@@ -1136,3 +1136,32 @@ def test_merged_branch_cleanup_requires_exact_pr_merge_and_nonprotected_ref():
     ):
         assert required in script
     assert "branch -D" not in script and "git push --delete" not in script
+
+
+def test_pyproject_declares_every_runtime_import_used_at_module_load():
+    """The live workflows install with `pip install -e .` only.
+
+    pyproject's dependency list is what those workflows get, so a runtime
+    import missing there turns into a COLLECTION error (pytest exit 2) with
+    no test ever running -- which is exactly how SSE-C broke both live
+    workflows: teledrive/storage/engine.py imports .sse, which imports
+    cryptography, which was only listed in requirements.txt.
+
+    Any package imported at module load by the storage/web layers must be a
+    declared dependency here.
+    """
+    import tomllib
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
+    declared = " ".join(pyproject["project"]["dependencies"]).lower()
+    # Imports that must resolve from `pip install -e .` alone.
+    for package, marker in (
+        ("cryptography", "cryptography"),
+        ("defusedxml", "defusedxml"),
+        ("sqlalchemy", "sqlalchemy"),
+        ("yaml", "pyyaml"),
+        ("telethon", "telethon"),
+    ):
+        assert marker in declared, (
+            f"{package} is imported at module load but not declared in "
+            f"pyproject dependencies"
+        )

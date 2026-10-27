@@ -11,6 +11,12 @@ dependencies = [
   "Telethon>=1.36,<2",
   "PyYAML>=6.0,<7",
   "SQLAlchemy>=2.0,<3",
+  # Runtime, not optional: credential secrets are Fernet-encrypted and
+  # SSE-C chunks are AES-256-GCM.  Omitting it here broke the live
+  # workflows, which install with `pip install -e .` and never read
+  # requirements.txt.
+  "cryptography>=50,<51",
+  "defusedxml==0.7.1",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,0 +1,5 @@
+Telethon<2,>=1.36
+PyYAML<7,>=6.0
+SQLAlchemy<3,>=2.0
+cryptography<51,>=50
+defusedxml==0.7.1

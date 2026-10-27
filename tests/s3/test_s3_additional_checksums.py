@@ -194,3 +194,33 @@ def test_crc64nvme_declared_on_metadata_xml_cannot_bypass_validation(service):
                       b"<Tagging><TagSet/></Tagging>", extra_headers=wrong)
     assert bad_tags.status_code == 400 and b"BadDigest" in bad_tags.content
     assert service[2].uploads == before
+
+
+def test_ranged_get_never_advertises_the_full_object_checksum(service):
+    """A 206 must not carry x-amz-checksum-*.
+
+    The stored digest covers the WHOLE object, so returning it next to a
+    byte slice makes strict clients (boto3, aws-cli) reject the response
+    as a checksum mismatch. AWS omits the checksum headers on a ranged
+    read; this pins that behaviour.
+    """
+    assert signed(service, "PUT", "/checksum-bucket").status_code == 200
+    body = b"s" * 4096
+    assert signed(service, "PUT", "/checksum-bucket/ranged.bin",
+                  body).status_code == 200
+    headers = {"x-amz-checksum-mode": "ENABLED"}
+
+    full = signed(service, "GET", "/checksum-bucket/ranged.bin",
+                  extra_headers=headers)
+    assert full.status_code == 200
+    # The complete response still carries the real full-object digest.
+    assert "x-amz-checksum-sha256" in full.headers
+    assert full.content == body
+
+    partial = signed(service, "GET", "/checksum-bucket/ranged.bin",
+                     extra_headers={**headers, "Range": "bytes=100-199"})
+    assert partial.status_code == 206
+    assert partial.content == b"s" * 100
+    assert "x-amz-checksum-sha256" not in partial.headers
+    assert "x-amz-checksum-type" not in partial.headers
+    assert partial.headers["content-range"] == "bytes 100-199/4096"

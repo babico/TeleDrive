@@ -3514,8 +3514,12 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
             db.close()
 
     ctx.retain = True
+    # AWS does NOT return x-amz-checksum-* on a 206: the checksum covers the
+    # WHOLE object, so advertising it beside a byte slice makes every strict
+    # client (boto3, aws-cli) reject the response as a checksum mismatch.
     headers = _headers(item, item_etag, http_properties,
-                       checksum_mode=(checksum_mode == "ENABLED"))
+                       checksum_mode=(checksum_mode == "ENABLED"
+                                      and not partial))
     headers["Content-Length"] = str(end - start)
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"

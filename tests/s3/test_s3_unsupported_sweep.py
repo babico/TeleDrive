@@ -29,9 +29,9 @@ REQUESTS = {
     "DeleteBucketOwnershipControls": ("DELETE", "/sweep-bucket?ownershipControls"),
     "PutBucketPolicy": ("PUT", "/sweep-bucket?policy"),
     "DeleteBucketPolicy": ("DELETE", "/sweep-bucket?policy"),
-    # P2-B — encryption and retention writes
-    "PutBucketEncryption": ("PUT", "/sweep-bucket?encryption"),
-    "DeleteBucketEncryption": ("DELETE", "/sweep-bucket?encryption"),
+    # P2-B — retention writes. PutBucketEncryption/DeleteBucketEncryption
+    # and UpdateObjectEncryption are REAL SSE-C operations now — covered by
+    # tests/s3/test_s3_sse_c.py.
     # P2-D — replication and restore. RestoreObject is now a real operation
     # (honest 403 InvalidObjectState) ahead of the central inventory sync.
     # P2-F — website, notifications, logging writes
@@ -77,7 +77,6 @@ REQUESTS = {
     "ListDirectoryBuckets": ("GET", "/?list-type=directory"),
     "RenameObject": ("PUT", "/sweep-bucket/asset.bin?rename"),
     "SelectObjectContent": ("POST", "/sweep-bucket/asset.bin?select&select-type=2"),
-    "UpdateObjectEncryption": ("PUT", "/sweep-bucket/asset.bin?encryption"),
     "WriteGetObjectResponse": ("POST", "/WriteGetObjectResponse"),
 }
 

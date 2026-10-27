@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -25,7 +26,8 @@ from sqlalchemy.exc import IntegrityError
 from teledrive.storage.catalog import BucketCatalog, buckets, heads
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.s3.object_metadata import ObjectMetadataStore
-from teledrive.storage.manifest import chunks, objects
+from teledrive.storage.manifest import (chunks, ensure_encryption_column,
+                                        object_encryption, objects)
 
 MIN_PART_SIZE = 5 * 1024 * 1024
 MAX_PARTS = 10000
@@ -40,6 +42,8 @@ uploads = Table(
     Column("created_at", BigInteger, nullable=False),
     Column("completed_object_id", String(36)),
     Column("completed_etag", String(128)),
+    # SSE-C marker: {"mode":"SSE-C","key_md5":...}.  NULL = plaintext.
+    Column("encryption", Text),
 )
 parts = Table(
     "storage_multipart_parts", _meta,
@@ -103,19 +107,29 @@ class MultipartStore:
         self.db = catalog.db
         self.manifests = catalog.manifests
         _meta.create_all(self.db.engine)
+        # Legacy deployments predate the SSE-C upload marker.
+        ensure_encryption_column(self.db, "storage_multipart_uploads")
 
     def initiate(self, bucket: str, key: str, owner: str, now: int | None = None,
-                 *, http_metadata: dict[str, str] | None = None) -> str:
+                 *, http_metadata: dict[str, str] | None = None,
+                 sse_key_md5: str | None = None) -> str:
         if bucket not in self.catalog.list_buckets():
             raise FileNotFoundError("Bucket does not exist")
         self.catalog._keyhash(key)
         if not owner:
             raise ValueError("Missing multipart owner")
         identifier = str(uuid4())
+        marker = None
+        if sse_key_md5 is not None:
+            if not isinstance(sse_key_md5, str) or len(sse_key_md5) != 24:
+                raise ValueError("Invalid SSE-C key fingerprint")
+            marker = json.dumps({"mode": "SSE-C", "key_md5": sse_key_md5},
+                                sort_keys=True, separators=(",", ":"))
         self.db.connection.execute(insert(uploads).values(
             id=identifier, bucket=bucket, object_key=key, owner_access_key=owner,
             state="active", created_at=now or int(time.time()),
             completed_object_id=None, completed_etag=None,
+            encryption=marker,
         ))
         if http_metadata:
             ObjectMetadataStore(self.catalog).stage_upload_uncommitted(
@@ -135,6 +149,22 @@ class MultipartStore:
         if not row or row["state"] not in (("active", "completed") if allow_completed else ("active",)):
             raise MultipartError("NoSuchUpload", "Multipart upload not found or inactive", 404)
         return row
+
+    def encryption_marker(self, identifier: str, bucket: str, key: str,
+                          owner: str, *, allow_completed: bool = False
+                          ) -> dict | None:
+        """SSE-C marker established at CreateMultipartUpload, if any."""
+        row = self.require(identifier, bucket, key, owner,
+                           allow_completed=allow_completed)
+        raw = row.get("encryption") if hasattr(row, "get") else row["encryption"]
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise MultipartError("InvalidPart",
+                                 "Corrupt multipart encryption marker") from exc
+        return parsed if isinstance(parsed, dict) else None
 
     def list_uploads(self, bucket: str, owner: str, *,
                      prefix: str = "", after_key: str = "",
@@ -266,7 +296,8 @@ class MultipartStore:
 
     def record_part(self, identifier: str, bucket: str, key: str, owner: str,
                     *, number: int, object_id: str, etag: str) -> None:
-        if number < 1 or number > MAX_PARTS or not re.fullmatch(r"[0-9a-f]{32}", etag):
+        if number < 1 or number > MAX_PARTS or not re.fullmatch(
+                r"[0-9a-f]{32}|[0-9a-f]{64}", etag):
             raise MultipartError("InvalidArgument", "Invalid part number or MD5 digest")
         obj = self.manifests.get(object_id)
         if obj.bucket != bucket or obj.key != key:
@@ -483,7 +514,8 @@ class MultipartStore:
         for number, etag in selected:
             if number <= previous:
                 raise MultipartError("InvalidPartOrder", "Parts must be strictly increasing")
-            if number < 1 or number > MAX_PARTS or not re.fullmatch(r"[0-9a-f]{32}", etag):
+            if number < 1 or number > MAX_PARTS or not re.fullmatch(
+                    r"[0-9a-f]{32}|[0-9a-f]{64}", etag):
                 raise MultipartError("InvalidPart", "Invalid part number or ETag")
             previous = number
 
@@ -518,11 +550,21 @@ class MultipartStore:
             available = {int(p.number): p for p in self.db.connection.execute(
                 select(parts).where(parts.c.upload_id == identifier)
             ).all()}
+            raw_marker = row.get("encryption")
+            try:
+                upload_encryption = (json.loads(raw_marker)
+                                     if raw_marker is not None else None)
+            except (TypeError, ValueError) as exc:
+                raise MultipartError(
+                    "InvalidPart", "Corrupt multipart encryption marker") from exc
+            encrypted = isinstance(upload_encryption, dict)
             chosen = []
             chosen_hashes: list[str] = []
             total_size = 0
             full_sha = hashlib.sha256()
+            full_cipher = hashlib.sha256()
             etag_md5 = hashlib.md5(usedforsecurity=False)
+            part_etags: list[bytes] = []
             for index, (number, etag) in enumerate(selected):
                 part = available.get(number)
                 if part is None or part.etag != etag:
@@ -532,17 +574,51 @@ class MultipartStore:
                 # Read real Telegram bytes, checking each immutable part digest
                 # as well as the final concatenated plaintext SHA-256.
                 source_manifest = self.manifests.get(part.object_id)
-                measured = 0
-                part_sha = hashlib.sha256()
-                async for block in engine.iter_bytes(part.object_id):
-                    measured += len(block)
-                    part_sha.update(block)
-                    full_sha.update(block)
-                if (measured != part.size or source_manifest.size != part.size
-                        or part_sha.hexdigest() != source_manifest.sha256):
-                    raise MultipartError("InvalidPart", "Part size or SHA-256 changed")
+                part_info = self.manifests.encryption_info(part.object_id)
+                if encrypted:
+                    if (part_info is None
+                            or part_info.get("key_md5")
+                            != upload_encryption.get("key_md5")):
+                        raise MultipartError(
+                            "InvalidPart",
+                            "Every part must use the SSE-C key from "
+                            "CreateMultipartUpload")
+                    # The key is not retained at completion: verify the
+                    # CIPHERTEXT digest instead of decrypting.  Per-part
+                    # plaintext SHA-256 is trusted from the verified upload.
+                    measured = 0
+                    part_cipher = hashlib.sha256()
+                    async for block in engine.iter_ciphertext(part.object_id):
+                        measured += len(block)
+                        part_cipher.update(block)
+                        full_cipher.update(block)
+                    expected_cipher_size = sum(
+                        ref.ciphertext_size
+                        for ref in self.manifests.parts(part.object_id))
+                    if (measured != expected_cipher_size
+                            or part_cipher.hexdigest()
+                            != (part_info or {}).get("etag")):
+                        raise MultipartError(
+                            "InvalidPart", "Part ciphertext digest changed")
+                    part_etags.append(part_cipher.digest())
+                else:
+                    if part_info is not None:
+                        raise MultipartError(
+                            "InvalidPart",
+                            "Encrypted and plaintext parts cannot be mixed")
+                    measured = 0
+                    part_sha = hashlib.sha256()
+                    async for block in engine.iter_bytes(part.object_id):
+                        measured += len(block)
+                        part_sha.update(block)
+                        full_sha.update(block)
+                    if (measured != part.size
+                            or source_manifest.size != part.size
+                            or part_sha.hexdigest() != source_manifest.sha256):
+                        raise MultipartError(
+                            "InvalidPart", "Part size or SHA-256 changed")
+                    etag_md5.update(bytes.fromhex(etag))
                 total_size += part.size
-                etag_md5.update(bytes.fromhex(etag))
                 chosen.append(part)
                 chosen_hashes.append(source_manifest.sha256)
             # Stop background DB writes before the publication transaction.
@@ -550,9 +626,17 @@ class MultipartStore:
             await renewal
             if lost.is_set():
                 raise MultipartError("OperationAborted", "Completion writer lease lost", 409)
-            final_etag = f"{etag_md5.hexdigest()}-{len(selected)}"
+            if encrypted:
+                # Not an MD5 of the plaintext parts: the S3 ETag of an
+                # SSE-C object is the full ciphertext SHA-256.
+                digest = full_cipher.hexdigest()
+                final_etag = digest
+                layout_etag = f"{hashlib.sha256(b''.join(part_etags)).hexdigest()[:32]}-{len(selected)}"
+            else:
+                digest = full_sha.hexdigest()
+                final_etag = f"{etag_md5.hexdigest()}-{len(selected)}"
+                layout_etag = final_etag
             object_id = str(uuid4())
-            digest = full_sha.hexdigest()
             now = int(time.time())
 
             # One SQL transaction: existing Telegram chunk messages move from
@@ -598,6 +682,18 @@ class MultipartStore:
                 self.db.connection.execute(update(objects).where(
                     objects.c.id == object_id, objects.c.status == "pending"
                 ).values(status="ready", sha256=digest))
+                if encrypted:
+                    # The assembled object's manifest digest is the
+                    # ciphertext digest: completion has no customer key and
+                    # must not claim a full-plaintext digest it cannot
+                    # compute.  Per-part plaintext SHA-256 values remain in
+                    # the multipart layout table.
+                    self.db.connection.execute(insert(object_encryption).values(
+                        object_id=object_id, mode="SSE-C",
+                        key_md5=upload_encryption["key_md5"],
+                        etag=final_etag, digest_kind="ciphertext",
+                        created_at=now,
+                    ))
                 self.db.connection.execute(insert(multipart_etags).values(
                     object_id=object_id, etag=final_etag,
                 ))

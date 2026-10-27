@@ -103,8 +103,8 @@ def test_object_lock_reads_return_not_configured(service, bucket):
 @pytest.mark.parametrize("method,path", [
     ("DELETE", "/compat-bucket?acl"),
 
-    ("PUT", "/compat-bucket?encryption"),
-    ("DELETE", "/compat-bucket?encryption"),
+    # PUT/DELETE ?encryption are REAL SSE-C bucket-configuration controls
+    # now — covered by tests/s3/test_s3_sse_c.py.
     # PUT/DELETE ?policy, ?ownershipControls, ?abac and DELETE
     # ?publicAccessBlock are REAL Phase L controls — covered by
     # tests/s3/test_s3_policy_engine.py and test_s3_ownership_abac.py.

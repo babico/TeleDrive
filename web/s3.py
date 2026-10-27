@@ -139,6 +139,14 @@ from teledrive.storage.catalog import BucketCatalog, published_versions
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.manifest import ManifestStore, objects
+from teledrive.storage.sse import (
+    CUSTOMER_ALGORITHM, CUSTOMER_KEY_MD5, CUSTOMER_HEADERS, SOURCE_PREFIX,
+    SSECError, parse_ssec_headers, verify_chunk_layout, verify_key_md5,
+)
+from teledrive.s3.bucket_encryption import (
+    MAX_ENCRYPTION_XML_BYTES, BucketEncryptionError, BucketEncryptionStore,
+    encryption_xml, parse_encryption_xml,
+)
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 import web.app as _webapp
 from web.app import (db_connect, storage_transport, _secure_mkdir,
@@ -211,6 +219,25 @@ def _headers(item, etag: str | None = None,
     return headers
 
 
+def _ssec_response_headers(key) -> dict[str, str]:
+    """AWS SSE-C response headers.  Never include the key itself."""
+    return {
+        CUSTOMER_ALGORITHM: "AES256",
+        CUSTOMER_KEY_MD5: key.key_md5_b64,
+    }
+
+
+def _effective_object_etag(catalog: BucketCatalog, item) -> str:
+    """S3 ETag: the ciphertext digest for SSE-C, else the layout/plaintext one.
+
+    SSE-C objects must not advertise a plaintext MD5/ETag (AWS never does).
+    """
+    info = catalog.manifests.encryption_info(item.id)
+    if info is not None and info.get("etag"):
+        return str(info["etag"])
+    return MultipartStore(catalog).object_etag(item.id, item.sha256)
+
+
 def _reject_unimplemented_write_options(request: Request) -> None:
     """Fail closed for dangerous S3 semantics we cannot yet guarantee.
 
@@ -225,9 +252,8 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         "x-amz-server-side-encryption",
         "x-amz-server-side-encryption-aws-kms-key-id",
         "x-amz-server-side-encryption-context",
-        "x-amz-server-side-encryption-customer-algorithm",
-        "x-amz-server-side-encryption-customer-key",
-        "x-amz-server-side-encryption-customer-key-md5",
+        # SSE-C customer-key headers are handled by dedicated routes below;
+        # every operation that cannot honour them rejects them explicitly.
         "x-amz-bucket-key-enabled",
         "x-amz-website-redirect-location", "x-amz-object-lock-mode",
         "x-amz-object-lock-retain-until-date", "x-amz-object-lock-legal-hold",
@@ -677,7 +703,6 @@ _COMPAT_BUCKET_READS: dict[str, str] = {
     "notificationConfiguration": "s3:GetBucketNotification",
     "requestPayment": "s3:GetBucketRequestPayment",
     "accelerate": "s3:GetAccelerateConfiguration",
-    "encryption": "s3:GetEncryptionConfiguration",
     "object-lock": "s3:GetBucketObjectLockConfiguration",
 }
 
@@ -809,6 +834,8 @@ class _S3RequestContext:
     is_bucket_website: bool = False
     is_bucket_notification: bool = False
     is_bucket_logging: bool = False
+    is_bucket_encryption: bool = False
+    is_object_encryption: bool = False
     report_kind: str | None = None
     is_bucket_tiering: bool = False
     metadata_selector: str | None = None
@@ -820,6 +847,12 @@ async def _handle_form_upload(ctx: _S3RequestContext) -> Response:
     if request.headers.get("authorization"):
         raise SigV4Error("AccessDenied", "Ambiguous form and header authentication")
     _reject_unimplemented_write_options(request)
+    if any(name in request.headers for name in CUSTOMER_HEADERS):
+        # Browser POST policies have no SSE-C contract; accepting the headers
+        # would silently store plaintext the client believes is encrypted.
+        return _error(
+            "NotImplemented",
+            "SSE-C customer keys are not accepted on form uploads", 501)
     max_upload = _webapp.REST_MAX_UPLOAD_BYTES
     form_limit = min(FORM_LIMIT, max_upload)
     if form_limit < 1:
@@ -1172,6 +1205,45 @@ async def _handle_bucket_metadata_configuration(
         return Response(status_code=200)
 
     return _error("NotImplemented", "Unsupported metadata operation", 501)
+async def _handle_bucket_encryption(ctx: _S3RequestContext) -> Response:
+    """Bucket encryption configuration (SSE-C only).
+
+    There is no bucket-level default key: SSE-C keys are supplied per
+    request and never retained.  GET returns the honest stored (empty) rule
+    set or a 404; PUT accepts only an empty ServerSideEncryptionConfiguration;
+    any AES256 (SSE-S3) or aws:kms default is rejected 501 because no
+    server-side key exists for data the client did not encrypt.
+    """
+    request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
+    if bucket not in catalog.list_buckets():
+        return _error("NoSuchBucket", "Bucket does not exist", 404)
+    store = BucketEncryptionStore(ctx.db)
+    if request.method == "GET":
+        rules = store.get(bucket)
+        if rules is None:
+            return _error(
+                "ServerSideEncryptionConfigurationNotFoundError",
+                "The server side encryption configuration was not found", 404)
+        return Response(encryption_xml(rules), media_type="application/xml")
+    if request.method == "PUT":
+        payload = bytearray()
+        async for block in request.stream():
+            payload.extend(block)
+            if len(payload) > MAX_ENCRYPTION_XML_BYTES:
+                raise BucketEncryptionError(
+                    "MalformedXML", "Encryption XML exceeds 16 KiB")
+        _verify_bucket_control_payload(request, bytes(payload))
+        store.replace(bucket, parse_encryption_xml(bytes(payload)), ctx.owner)
+        return Response(status_code=200)
+    if request.method == "DELETE":
+        async for block in request.stream():
+            if block:
+                raise BucketEncryptionError(
+                    "InvalidRequest",
+                    "DeleteBucketEncryption cannot have a body")
+        store.delete(bucket)
+        return Response(status_code=204)
+    return _error("NotImplemented", "Unsupported bucket encryption method", 501)
 
 
 async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
@@ -1183,6 +1255,8 @@ async def _handle_bucket_controls(ctx: _S3RequestContext) -> Response | None:
     catalog = ctx.catalog
     if ctx.metadata_selector is not None:
         return await _handle_bucket_metadata_configuration(ctx)
+    if ctx.is_bucket_encryption:
+        return await _handle_bucket_encryption(ctx)
     if ctx.is_bucket_policy:
         if bucket not in catalog.list_buckets():
             return _error("NoSuchBucket", "Bucket does not exist", 404)
@@ -1951,6 +2025,24 @@ async def _handle_multipart(ctx: _S3RequestContext) -> Response:
     if not upload_id:
         raise MultipartError("NoSuchUpload", "Missing UploadId", 404)
     if ctx.mpu_abort:
+        # AWS requires the SSE-C key on AbortMultipartUpload too; verifying it
+        # here keeps the upload's key binding meaningful on every verb.
+        marker = mpu.encryption_marker(upload_id, ctx.bucket, ctx.key,
+                                       ctx.owner)
+        sse_key = parse_ssec_headers(ctx.request.headers,
+                                     signed_header_names(ctx.request))
+        if marker is not None:
+            if sse_key is None or not hmac.compare_digest(
+                    str(marker.get("key_md5", "")), sse_key.key_md5_b64):
+                raise SSECError(
+                    "InvalidRequest",
+                    "AbortMultipartUpload requires the SSE-C key used to "
+                    "create the upload")
+        elif sse_key is not None:
+            raise SSECError(
+                "InvalidRequest",
+                "The upload was not created with SSE-C; remove the customer "
+                "key headers")
         # GC-integrated abort: with GC enabled, the staged part media is
         # queued for physical collection; disabled GC keeps the
         # journal-retention behavior (orphan protection pending GC).
@@ -1994,12 +2086,15 @@ async def _mpu_initiate(ctx: _S3RequestContext, mpu: MultipartStore) -> Response
     http_properties = parse_object_metadata(
         request.headers, signed_header_names(request),
     )
+    sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
     upload_id = mpu.initiate(
         bucket, key, owner, http_metadata=http_properties,
+        sse_key_md5=(sse_key.key_md5_b64 if sse_key is not None else None),
     )
+    headers = _ssec_response_headers(sse_key) if sse_key is not None else {}
     return Response(_xml("InitiateMultipartUploadResult", [
         ("Bucket", bucket), ("Key", key), ("UploadId", upload_id),
-    ]), media_type="application/xml", status_code=200)
+    ]), media_type="application/xml", status_code=200, headers=headers)
 
 
 async def _mpu_list_parts(ctx: _S3RequestContext, mpu: MultipartStore,
@@ -2009,6 +2104,19 @@ async def _mpu_list_parts(ctx: _S3RequestContext, mpu: MultipartStore,
     bucket = ctx.bucket
     key = ctx.key
     owner = ctx.owner
+    upload_encryption = mpu.encryption_marker(upload_id, bucket, key, owner)
+    sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
+    if upload_encryption is not None:
+        if sse_key is None or not hmac.compare_digest(
+                str(upload_encryption.get("key_md5", "")), sse_key.key_md5_b64):
+            raise SSECError(
+                "InvalidRequest",
+                "ListParts requires the SSE-C key used to create the upload")
+    elif sse_key is not None:
+        raise SSECError(
+            "InvalidRequest",
+            "The upload was not created with SSE-C; remove the customer key "
+            "headers")
     try:
         raw_marker = request.query_params.get("part-number-marker", "0")
         raw_limit = request.query_params.get("max-parts", "1000")
@@ -2043,7 +2151,9 @@ async def _mpu_list_parts(ctx: _S3RequestContext, mpu: MultipartStore,
         )
         ET.SubElement(row, "Size").text = str(part.size)
     return Response(ET.tostring(result, encoding="utf-8", xml_declaration=True),
-                    media_type="application/xml")
+                    media_type="application/xml",
+                    headers=(_ssec_response_headers(sse_key)
+                             if sse_key is not None else None))
 
 
 async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
@@ -2056,6 +2166,21 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
     catalog = ctx.catalog
     db = ctx.db
     mpu.require(upload_id, bucket, key, owner, allow_completed=True)
+    upload_encryption = mpu.encryption_marker(
+        upload_id, bucket, key, owner, allow_completed=True)
+    sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
+    if upload_encryption is not None:
+        if sse_key is None or not hmac.compare_digest(
+                str(upload_encryption.get("key_md5", "")), sse_key.key_md5_b64):
+            raise SSECError(
+                "InvalidRequest",
+                "CompleteMultipartUpload requires the SSE-C key used to "
+                "create the upload")
+    elif sse_key is not None:
+        raise SSECError(
+            "InvalidRequest",
+            "The upload was not created with SSE-C; remove the customer key "
+            "headers")
     expected_completion_head = check_write_precondition(
         request, catalog, bucket, key,
     )
@@ -2194,7 +2319,8 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
                         _parts_table.c.number == number)
                 ).scalar_one()
                 part_crc32_state = part_crc32c_state = part_crc64_state = 0
-                async for piece in engine.iter_bytes(part_object):
+                async for piece in engine.iter_bytes(
+                        part_object, sse_key=sse_key):
                     full["sha256"].update(piece)
                     full["sha1"].update(piece)
                     crc32_state = zlib.crc32(piece, crc32_state)
@@ -2261,7 +2387,9 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
     if composite_checksum is not None:
         result_fields.append(("ChecksumSHA256", composite_checksum))
     return Response(_xml("CompleteMultipartUploadResult", result_fields),
-                    status_code=200, media_type="application/xml")
+                    status_code=200, media_type="application/xml",
+                    headers=(_ssec_response_headers(sse_key)
+                             if sse_key is not None else None))
 
 
 async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
@@ -2276,7 +2404,19 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
     catalog = ctx.catalog
     db = ctx.db
     # UploadPart: checksum is verified before any Telegram send.
-    mpu.require(upload_id, bucket, key, owner)
+    upload_encryption = mpu.encryption_marker(upload_id, bucket, key, owner)
+    sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
+    if upload_encryption is not None:
+        if sse_key is None or not hmac.compare_digest(
+                str(upload_encryption.get("key_md5", "")), sse_key.key_md5_b64):
+            raise SSECError(
+                "InvalidRequest",
+                "UploadPart requires the SSE-C key used to create the upload")
+    elif sse_key is not None:
+        raise SSECError(
+            "InvalidRequest",
+            "The upload was not created with SSE-C; remove the customer key "
+            "headers")
     try:
         number = int(request.query_params.get("partNumber", ""))
     except ValueError:
@@ -2341,11 +2481,24 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
             catalog.manifests, transport,
             chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
         )
-        staged = await engine.put_file(bucket, key, stage, dedup=False)
-        tag = md5.hexdigest()
+        staged = await engine.put_file(bucket, key, stage, dedup=False,
+                                       sse_key=sse_key)
+        if sse_key is not None:
+            # Never return a plaintext MD5 for an SSE-C part: the part ETag
+            # is the ciphertext digest the completion path verifies.
+            part_info = catalog.manifests.encryption_info(staged.id) or {}
+            tag = str(part_info.get("etag") or "")
+            if len(tag) != 64:
+                raise MultipartError(
+                    "InternalError", "Staged SSE-C part has no digest")
+        else:
+            tag = md5.hexdigest()
         mpu.record_part(upload_id, bucket, key, owner,
                         number=number, object_id=staged.id, etag=tag)
-        return Response(status_code=200, headers={"ETag": '"' + tag + '"'})
+        headers = {"ETag": '"' + tag + '"'}
+        if sse_key is not None:
+            headers.update(_ssec_response_headers(sse_key))
+        return Response(status_code=200, headers=headers)
     finally:
         stage.unlink(missing_ok=True)
 
@@ -3432,6 +3585,48 @@ async def _handle_object_delete(ctx: _S3RequestContext,
     })
 
 
+async def _handle_object_encryption(ctx: _S3RequestContext) -> Response:
+    """PUT ?encryption: UpdateObjectEncryption (SSE-C key rotation).
+
+    The new key arrives in ``x-amz-server-side-encryption-customer-*`` and the
+    current key (required only when the object is already SSE-C) in the
+    ``x-amz-copy-source-`` prefixed family.  The object is re-encrypted chunk
+    by chunk; the key is never stored.
+    """
+    request, bucket, key, catalog = ctx.request, ctx.bucket, ctx.key, ctx.catalog
+    if request.method != "PUT":
+        return _error("NotImplemented",
+                      "UpdateObjectEncryption requires PUT", 501)
+    try:
+        item = catalog.get(bucket, key).item
+    except FileNotFoundError:
+        return _error("NoSuchKey", "The specified key does not exist", 404)
+    async for block in request.stream():
+        if block:
+            raise SSECError("InvalidRequest",
+                            "UpdateObjectEncryption requires an empty body")
+    signed = signed_header_names(request)
+    new_key = parse_ssec_headers(request.headers, signed)
+    if new_key is None:
+        raise SSECError(
+            "InvalidArgument",
+            "UpdateObjectEncryption requires the new SSE-C key headers")
+    old_key = parse_ssec_headers(request.headers, signed, prefix=SOURCE_PREFIX)
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    transport = storage_transport(ctx.db)
+    await transport.verify_target()
+    engine = TelegramObjectStorage(
+        catalog.manifests, transport,
+        chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+    )
+    digest = await engine.reencrypt(item.id, old_key, new_key)
+    headers = _ssec_response_headers(new_key)
+    headers["x-amz-version-id"] = item.id
+    headers["ETag"] = '"' + digest + '"'
+    return Response(status_code=200, headers=headers)
+
+
 async def _handle_object_put(ctx: _S3RequestContext,
                              expected_head: ExpectedHead | None) -> Response:
     """PUT object key: staged upload with checksums, metadata and tags."""
@@ -3441,6 +3636,9 @@ async def _handle_object_put(ctx: _S3RequestContext,
     db = ctx.db
     catalog = ctx.catalog
     inline_tags = ctx.inline_tags
+    # Parse SSE-C before staging any byte: a malformed or unsigned family
+    # must fail closed without touching scratch space or Telegram.
+    sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
     root = Path(_webapp.STORAGE_SCRATCH_DIR)
     _secure_mkdir(root)
     max_bytes = _webapp.REST_MAX_UPLOAD_BYTES
@@ -3513,7 +3711,7 @@ async def _handle_object_put(ctx: _S3RequestContext,
         )
         http_store = ObjectMetadataStore(catalog)
         tag_store = ObjectTagStore(catalog) if inline_tags is not None else None
-        item = await engine.put_file(bucket, key, stage)
+        item = await engine.put_file(bucket, key, stage, sse_key=sse_key)
         http_store.attach_uncommitted(item.id, http_properties)
         if tag_store is not None:
             tag_store.attach_uncommitted(item.id, inline_tags)
@@ -3530,10 +3728,13 @@ async def _handle_object_put(ctx: _S3RequestContext,
                 ) from exc
             raise
         _apply_bucket_owner_preferred(catalog, bucket, key, ctx.owner, request)
-        return Response(status_code=200, headers={
-            "ETag": '"' + item.sha256 + '"',
+        response_headers = {
+            "ETag": '"' + _effective_object_etag(catalog, item) + '"',
             "x-amz-version-id": item.id,
-        })
+        }
+        if sse_key is not None:
+            response_headers.update(_ssec_response_headers(sse_key))
+        return Response(status_code=200, headers=response_headers)
     finally:
         stage.unlink(missing_ok=True)
 
@@ -3673,7 +3874,28 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
                 result.headers["x-amz-version-id"] = marker
                 return result
             return _error("NoSuchKey", "The specified key does not exist", 404)
-    item_etag = MultipartStore(catalog).object_etag(item.id, item.sha256)
+    item_etag = _effective_object_etag(catalog, item)
+    encryption_info = catalog.manifests.encryption_info(item.id)
+    sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
+    if encryption_info is not None:
+        if sse_key is None:
+            return _error(
+                "InvalidRequest",
+                "The object was stored with SSE-C; supply the customer key "
+                "headers", 400)
+        verify_key_md5(encryption_info, sse_key)
+    elif sse_key is not None:
+        return _error(
+            "InvalidRequest",
+            "The object was not stored with SSE-C; remove the customer key "
+            "headers", 400)
+    if encryption_info is not None:
+        # Validate the authenticated chunk layout before any response byte
+        # can be sent: a spliced/reordered journal must be a clean 400, not
+        # a truncated 200 stream.
+        verify_chunk_layout(
+            catalog.manifests.parts(item.id),
+            catalog.manifests.resolve_content_id(item.id))
     read_now_ns = time.time_ns()
     read_state = catalog.object_read_state(item.id, now_ns=read_now_ns)
     if read_state["archived"]:
@@ -3703,8 +3925,11 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     if request.method == "HEAD":
         headers = _headers(
             item, item_etag, http_properties,
-            checksum_mode=(checksum_mode == "ENABLED"),
+            checksum_mode=(checksum_mode == "ENABLED"
+                           and encryption_info is None),
         )
+        if sse_key is not None:
+            headers.update(_ssec_response_headers(sse_key))
         restore_state = _restore_header(item, now_ns=read_now_ns)
         if restore_state is not None:
             headers["x-amz-restore"] = restore_state
@@ -3720,7 +3945,8 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
 
     async def stream():
         try:
-            async for piece in engine.iter_bytes(item.id, start=start, end=end):
+            async for piece in engine.iter_bytes(
+                    item.id, start=start, end=end, sse_key=sse_key):
                 yield piece
         finally:
             db.close()
@@ -3729,9 +3955,14 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     # AWS does NOT return x-amz-checksum-* on a 206: the checksum covers the
     # WHOLE object, so advertising it beside a byte slice makes every strict
     # client (boto3, aws-cli) reject the response as a checksum mismatch.
+    # SSE-C objects also never advertise a plaintext checksum: the stored
+    # manifest digest can be the ciphertext digest for multipart uploads.
     headers = _headers(item, item_etag, http_properties,
                        checksum_mode=(checksum_mode == "ENABLED"
-                                      and not partial))
+                                      and not partial
+                                      and encryption_info is None))
+    if sse_key is not None:
+        headers.update(_ssec_response_headers(sse_key))
     restore_state = _restore_header(item, now_ns=read_now_ns)
     if restore_state is not None:
         headers["x-amz-restore"] = restore_state
@@ -4077,6 +4308,10 @@ async def _handle(request: Request):
                  or "notificationConfiguration" in request.query_params))
         is_bucket_logging = bool(
             bucket and not separator and "logging" in request.query_params)
+        is_bucket_encryption = bool(
+            bucket and not separator and "encryption" in request.query_params)
+        is_object_encryption = bool(
+            separator and "encryption" in request.query_params)
         report_kind = next(
             (name for name in REPORT_KINDS
              if bucket and not separator and name in request.query_params),
@@ -4193,7 +4428,18 @@ async def _handle(request: Request):
                     or request.query_params.get(metadata_selector) != ""):
                 return _error("InvalidArgument",
                               "Invalid metadata configuration selector", 400)
-        if is_bucket_notification:
+        if is_bucket_encryption:
+            action = {
+                "GET": "s3:GetBucketEncryption",
+                "PUT": "s3:PutBucketEncryption",
+                "DELETE": "s3:DeleteBucketEncryption",
+            }.get(request.method)
+        elif is_object_encryption:
+            # UpdateObjectEncryption rotates an existing object to a new
+            # customer key (SSE-C only). Reads are not a separate API.
+            action = ("s3:PutObjectEncryption"
+                      if request.method == "PUT" else None)
+        elif is_bucket_notification:
             action = {"GET": "s3:GetBucketNotification",
                       "PUT": "s3:PutBucketNotification"}.get(request.method)
         elif is_bucket_policy:
@@ -4392,6 +4638,8 @@ async def _handle(request: Request):
             "encryption", "object-lock", "versionId",
         }
         active_compat = compat_bucket_read or compat_object_read
+        if is_bucket_encryption or is_object_encryption:
+            active_compat = "encryption"
         if is_bucket_policy:
             active_compat = "policy"
         elif is_bucket_ownership:
@@ -4423,6 +4671,40 @@ async def _handle(request: Request):
         ) for parameter in unsupported):
             return _error("NotImplemented", "This S3 extension is not implemented", 501)
 
+        # SSE-C keys may only reach routes that actually consume them.
+        # Every other operation fails closed instead of silently ignoring a
+        # key the client believes is protecting the data.
+        ssec_requested = any(name in request.headers for name in CUSTOMER_HEADERS)
+        copy_source_ssec = any(
+            name.startswith(SOURCE_PREFIX + "server-side-encryption-customer")
+            for name in request.headers)
+        ssec_read = request.method in ("GET", "HEAD") and not (
+            is_object_attributes or is_object_tagging or is_object_annotation
+            or is_object_restore or is_object_select or is_object_rename
+            or is_object_encryption
+            or "acl" in request.query_params
+            or "retention" in request.query_params
+            or "legal-hold" in request.query_params)
+        ssec_write = request.method == "PUT" and not (
+            is_object_tagging or is_object_annotation or is_object_rename
+            or "acl" in request.query_params
+            or "retention" in request.query_params
+            or "legal-hold" in request.query_params
+            or request.headers.get("x-amz-copy-source") is not None)
+        ssec_mpu = request.method == "POST" and (mpu_start or mpu_complete)
+        ssec_abort = request.method == "DELETE" and mpu_abort
+        if copy_source_ssec and not is_object_encryption:
+            return _error(
+                "NotImplemented",
+                "SSE-C copy-source keys are not supported on this operation",
+                501)
+        if ssec_requested and not (
+                separator and (ssec_read or ssec_write or ssec_mpu
+                               or ssec_abort)):
+            return _error(
+                "NotImplemented",
+                "SSE-C customer keys are not accepted on this operation", 501)
+
         master = load_master_key()
         db = db_connect()
         store = S3CredentialStore(db, master)
@@ -4444,6 +4726,8 @@ async def _handle(request: Request):
             is_bucket_lifecycle=is_bucket_lifecycle,
             is_bucket_notification=is_bucket_notification,
             is_bucket_logging=is_bucket_logging,
+            is_bucket_encryption=is_bucket_encryption,
+            is_object_encryption=is_object_encryption,
             report_kind=report_kind,
             is_bucket_tiering=is_bucket_tiering,
             metadata_selector=metadata_selector,
@@ -4529,6 +4813,8 @@ async def _handle(request: Request):
 
         if is_object_rename:
             return await _handle_object_rename(ctx)
+        if is_object_encryption:
+            return await _handle_object_encryption(ctx)
         if is_object_select:
             return await _handle_select_object_content(ctx)
         if is_object_restore:
@@ -4614,6 +4900,10 @@ async def _handle(request: Request):
     except AnnotationError as exc:
         return _error(exc.code, str(exc), exc.status)
     except BucketFlagError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except BucketEncryptionError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except SSECError as exc:
         return _error(exc.code, str(exc), exc.status)
     except TaggingError as exc:
         return _error(exc.code, str(exc), exc.status)

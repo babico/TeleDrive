@@ -85,13 +85,16 @@ def test_unknown_bucket_control_never_falls_back_to_bucket_crud(
         assert reply.status_code == 204, (method, selector, reply.text)
     elif method == "PUT" and selector in ("object-lock", "acl",
                                           "policy", "ownershipControls",
-                                          "abac"):
-        # Phase C/D/L: real lock, ACL, policy, ownership and ABAC
-        # controls. An empty body is MalformedXML/MalformedPolicy —
-        # never a fallback to bucket CRUD.
+                                          "abac", "encryption"):
+        # Phase C/D/L + SSE-C: real lock, ACL, policy, ownership, ABAC and
+        # bucket-encryption controls. An empty body is MalformedXML /
+        # MalformedPolicy — never a fallback to bucket CRUD.
         assert reply.status_code == 400, (method, selector, reply.text)
         assert (b"MalformedXML" in reply.content
                 or b"MalformedPolicy" in reply.content)
+    elif method == "DELETE" and selector == "encryption":
+        # Deleting an absent encryption configuration is idempotent.
+        assert reply.status_code == 204, (method, selector, reply.text)
     elif method in {"PUT", "DELETE"} and selector in (
             "analytics", "inventory", "metrics", "intelligent-tiering",
     ):
@@ -154,6 +157,14 @@ def test_unknown_object_control_never_falls_back_to_data_or_delete(
         # MalformedXML; the object bytes are never touched either way.
         assert reply.status_code == 400, (method, selector, reply.text)
         assert b"MalformedXML" in reply.content
+    elif method == "PUT" and selector == "encryption":
+        # SSE-C UpdateObjectEncryption: a non-empty body and/or missing
+        # key headers is InvalidRequest. The object bytes are untouched.
+        assert reply.status_code == 400, (method, selector, reply.text)
+        assert b"InvalidRequest" in reply.content
+    elif method == "GET" and selector == "encryption":
+        # There is no GetObjectEncryption API; the selector stays 501.
+        assert reply.status_code == 501, (method, selector, reply.text)
     else:
         assert reply.status_code == 501, (method, selector, reply.text)
     assert signed(service, "GET", "/guard-bucket/asset.bin").content == b"old-data"
@@ -230,7 +241,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
     assert Counter(actual.values()) == {
-        "supported":102, "partial":7, "unsupported":7,
+        "supported":110, "partial":2, "unsupported":4,
     }
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -244,13 +255,14 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      for item in data["operations"]
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
-    assert Counter(manifest_gaps.values()) == {"by design": 7}
-    # P3-G (analytics/inventory/metrics/tiering) is fully implemented now,
-    # so it no longer appears as a remaining workstream label. P3-H stays
-    # required: metadata configuration moved to "implemented", but five
-    # AWS-managed/directory-bucket operations remain genuinely unsupported.
+    assert Counter(manifest_gaps.values()) == {"by design": 2}
+    # The remaining two partials are RequestPayment/Accelerate GETs, both
+    # "by design": each reports the single state that exists here and the
+    # write side rejects the state needing absent infrastructure. P2-B
+    # closed with SSE-C, P3-G with tiering/reports and P3-H with the
+    # metadata journal, so those workstream labels are gone.
     assert set(item["workstream"] for item in data["operations"]) >= {
-        "implemented", "P2-C", "P2-B", "P2-D", "P2-F", "P3-H",
+        "implemented", "P3-H",
     }
     for item in data["operations"]:
         keys = set(item)
@@ -277,7 +289,6 @@ def test_unknown_parameter_is_rejected_before_object_transport():
     ("DELETE", {"x-amz-copy-source": "/guard-bucket/asset.bin"}),
     ("DELETE", {"x-amz-tagging": "class=archive"}),
     ("HEAD", {"x-amz-request-payer": "requester"}),
-    ("GET", {"x-amz-server-side-encryption-customer-algorithm": "AES256"}),
 ])
 def test_unsupported_header_contract_does_not_change_or_expose_object(
     service, method, headers,
@@ -292,6 +303,30 @@ def test_unsupported_header_contract_does_not_change_or_expose_object(
     )
     assert forbidden.status_code == 501, (method, headers, forbidden.text)
     assert signed(service, "GET", "/guard-bucket/asset.bin").content == b"protected-content"
+    assert service[2].uploads == before
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "PUT"])
+def test_partial_ssec_header_family_is_rejected_without_touching_bytes(
+    service, method,
+):
+    """SSE-C is supported now, but an incomplete family is still a 400.
+
+    It must never be treated as "no key" (which would silently return the
+    plaintext) nor as a supported key on a plaintext object.
+    """
+    assert signed(service, "PUT", "/guard-bucket").status_code == 200
+    assert signed(service, "PUT", "/guard-bucket/asset.bin",
+                  b"protected-content").status_code == 200
+    before = service[2].uploads
+    reply = signed(
+        service, method, "/guard-bucket/asset.bin",
+        extra_headers={"x-amz-server-side-encryption-customer-algorithm": "AES256"},
+    )
+    assert reply.status_code == 400, (method, reply.text)
+    if method != "HEAD":
+        assert b"InvalidArgument" in reply.content
+    assert b"protected-content" not in reply.content
     assert service[2].uploads == before
 
 

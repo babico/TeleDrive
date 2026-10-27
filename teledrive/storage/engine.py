@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import secrets
 import os
@@ -21,9 +22,13 @@ from pathlib import Path
 from typing import AsyncIterator, Protocol
 from uuid import uuid4
 
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select, update
 
-from .manifest import ChunkReference, ManifestStore, StoredObject, ManifestError, object_aliases, objects
+from .manifest import (ChunkReference, ManifestStore, StoredObject,
+                       ManifestError, chunks, content_index, object_encryption,
+                       object_aliases, objects, replica_chunks)
+from .sse import (SSECError, SSECKey, decrypt_chunk, encrypt_chunk,
+                  verify_chunk_layout, verify_key_md5)
 
 _engine_logger = logging.getLogger(__name__)
 
@@ -98,7 +103,13 @@ class TelegramObjectStorage:
                 return
 
     async def put_file(self, bucket: str, key: str, source: Path, *,
-                       on_begin=None, dedup: bool = True) -> StoredObject:
+                       on_begin=None, dedup: bool = True,
+                       sse_key: SSECKey | None = None) -> StoredObject:
+        if sse_key is not None:
+            # SSE-C content is deliberately not content-addressed: the same
+            # plaintext under another key (or unencrypted) must never share
+            # Telegram ciphertext.  AWS has the same property.
+            dedup = False
         from teledrive.storage.placement import (
             reset_upload_bucket, set_upload_bucket)
         # Publish the bucket for the transport's placement decisions
@@ -116,7 +127,8 @@ class TelegramObjectStorage:
                 if deduped is not None:
                     return deduped
             return await self._put_file_inner(
-                bucket, key, source, on_begin=on_begin, replicate=dedup)
+                bucket, key, source, on_begin=on_begin, replicate=dedup,
+                sse_key=sse_key)
         finally:
             reset_upload_bucket(placement_token)
 
@@ -143,9 +155,17 @@ class TelegramObjectStorage:
             from sqlalchemy import text as _text
             from teledrive.storage.manifest import object_aliases, objects
             db = self.manifests.db
+            # Encrypted objects store a plaintext SHA-256 in the manifest
+            # for per-chunk integrity, but their Telegram bytes are
+            # ciphertext.  Plaintext uploads must never alias them, and
+            # uploads under different customer keys must never alias each
+            # other, so every SSE-C object is excluded from dedup.
             base = db.connection.execute(_text(
                 "SELECT id FROM storage_objects WHERE sha256 = :sha "
-                "AND status = 'ready' LIMIT 1"
+                "AND status = 'ready' AND NOT EXISTS ("
+                "SELECT 1 FROM storage_object_encryption e "
+                "WHERE e.object_id = storage_objects.id"
+                ") LIMIT 1"
             ), {"sha": digest.hexdigest()}).scalar_one_or_none()
             if base is None:
                 return None
@@ -275,7 +295,7 @@ class TelegramObjectStorage:
                 target = root / f"part-{part.ordinal:08d}"
                 await self.transport.download(part, target)
                 size, sha = _digest_file(target)
-                if size != part.size or sha != part.sha256:
+                if size != part.ciphertext_size or sha != part.sha256:
                     raise IntegrityError(
                         "Primary chunk failed verification; refusing to "
                         "replicate corrupt bytes")
@@ -290,18 +310,23 @@ class TelegramObjectStorage:
         return repaired
 
     async def _put_file_inner(self, bucket: str, key: str, source: Path, *,
-                              on_begin=None, replicate: bool = False
+                              on_begin=None, replicate: bool = False,
+                              sse_key: SSECKey | None = None
                               ) -> StoredObject:
         source = Path(source)
         with _regular_source(source) as handle:
             before = os.fstat(handle.fileno())
-            identifier = self.manifests.begin(bucket, key, before.st_size, int(time.time()))
+            identifier = self.manifests.begin(
+                bucket, key, before.st_size, int(time.time()),
+                sse_key_md5=(sse_key.key_md5_b64 if sse_key else None),
+            )
             token = secrets.token_hex(24)
             self.manifests.start_writer(identifier, token, int(time.time()), self.writer_ttl_seconds)
             stop = asyncio.Event()
             lost = asyncio.Event()
             renewal = asyncio.create_task(self._keep_writer_alive(identifier, token, stop, lost))
             full_sha = hashlib.sha256()
+            cipher_sha = hashlib.sha256() if sse_key is not None else None
             offset = 0
             ordinal = 0
             # Resolve the replica decision once per object: a stored
@@ -318,16 +343,25 @@ class TelegramObjectStorage:
                     prefix="teledrive-chunks-", dir=self.scratch_directory
                 ) as scratch:
                     root = Path(scratch)
-                    staged: list[tuple[int, int, int, str, Path]] = []
+                    staged: list[tuple[int, int, int, str, Path, dict | None]] = []
                     while data := handle.read(self.chunk_size):
                         full_sha.update(data)
-                        digest = hashlib.sha256(data).hexdigest()
+                        metadata = None
+                        if sse_key is not None:
+                            payload, metadata = encrypt_chunk(
+                                sse_key, identifier, ordinal, data)
+                            cipher_sha.update(payload)
+                        else:
+                            payload = data
+                        # The stored/Telegram digest is always the digest of
+                        # the bytes Telegram holds: ciphertext for SSE-C.
+                        digest = hashlib.sha256(payload).hexdigest()
                         part = root / f"part-{ordinal:08d}"
                         with part.open("xb") as f:
-                            f.write(data)
+                            f.write(payload)
                         part.chmod(0o600)
                         staged.append(
-                            (ordinal, offset, len(data), digest, part)
+                            (ordinal, offset, len(data), digest, part, metadata)
                         )
                         offset += len(data)
                         ordinal += 1
@@ -342,10 +376,11 @@ class TelegramObjectStorage:
                                 ordinal=ordinal_number, checksum=digest,
                             )
                             for (ordinal_number, _, _, digest,
-                                 part_path) in batch
+                                 part_path, _metadata) in batch
                         ])
                         for (ordinal_number, part_offset, part_size, digest,
-                             part_path), (account, chat_id, message_id) in zip(
+                             part_path, metadata), (account, chat_id,
+                                                    message_id) in zip(
                                 batch, results):
                             # The remote message may already exist if our SQL
                             # lease expired: reject publication and leave the
@@ -362,6 +397,7 @@ class TelegramObjectStorage:
                                 size=part_size, sha256=digest,
                                 account=account, chat_id=int(chat_id),
                                 message_id=int(message_id),
+                                encryption=metadata,
                             ), int(time.time()), writer_token=token)
                             if replicate:
                                 await self._replicate_chunk(
@@ -379,16 +415,21 @@ class TelegramObjectStorage:
                 ):
                     raise ManifestError("Writer ownership lost before publication")
                 result = self.manifests.finish(
-                    identifier, full_sha.hexdigest(), int(time.time()), writer_token=token
+                    identifier, full_sha.hexdigest(), int(time.time()),
+                    writer_token=token,
+                    encryption_etag=(cipher_sha.hexdigest()
+                                     if cipher_sha is not None else None),
                 )
-                # Content search: index text-extractable uploads from the
-                # still-local source (no Telegram round-trip). Best effort.
-                try:
-                    from .content_index import index_object_content
-                    index_object_content(
-                        self.manifests.db, result.id, source, key)
-                except Exception:
-                    pass
+                # Content search indexes PLAINTEXT.  SSE-C objects are
+                # excluded by design: the server never retains the key and
+                # must not leak plaintext into a searchable index.
+                if sse_key is None:
+                    try:
+                        from .content_index import index_object_content
+                        index_object_content(
+                            self.manifests.db, result.id, source, key)
+                    except Exception:
+                        pass
                 return result
             except BaseException as exc:
                 # Do not delete recorded Telegram chunks here. They form a
@@ -415,6 +456,14 @@ class TelegramObjectStorage:
         No Telegram message is ever deleted by resume.
         """
         source = Path(source)
+        if self.manifests.raw_encryption_info(identifier) is not None:
+            # The client key is intentionally not stored, so an interrupted
+            # SSE-C upload cannot be resumed without it.  Fail closed rather
+            # than publishing or adopting unauthenticated bytes.
+            raise SSECError(
+                "InvalidRequest",
+                "Interrupted SSE-C uploads cannot be resumed: the customer "
+                "key is not retained")
         with _regular_source(source) as handle:
             before = os.fstat(handle.fileno())
             row = self.manifests.db.connection.execute(
@@ -553,7 +602,7 @@ class TelegramObjectStorage:
             if not target.is_file() or target.is_symlink():
                 raise IntegrityError("Telegram chunk missing or unsafe")
             size, sha = _digest_file(target)
-            if size == part.size and sha == part.sha256:
+            if size == part.ciphertext_size and sha == part.sha256:
                 return
             target.unlink(missing_ok=True)
             if attempt == 2:
@@ -562,8 +611,15 @@ class TelegramObjectStorage:
 
     async def iter_bytes(self, identifier: str, *,
                          start: int = 0, end: int | None = None,
-                         block_size: int = 1024 * 1024) -> AsyncIterator[bytes]:
-        """Stream a half-open [start,end) range, verifying each downloaded chunk."""
+                         block_size: int = 1024 * 1024,
+                         sse_key: SSECKey | None = None) -> AsyncIterator[bytes]:
+        """Stream a half-open [start,end) range, verifying each downloaded chunk.
+
+        For an SSE-C object only the chunks overlapping the requested range
+        are fetched and decrypted (GCM authenticates the whole chunk, then
+        the plaintext is sliced), so a 1-byte range never decrypts the
+        whole object.
+        """
         obj = self.manifests.get(identifier)
         if end is None:
             end = obj.size
@@ -572,6 +628,18 @@ class TelegramObjectStorage:
         if start == end:
             return
         parts = self.manifests.parts(identifier)
+        info = self.manifests.encryption_info(identifier)
+        if info is not None:
+            if sse_key is None:
+                raise SSECError(
+                    "InvalidRequest",
+                    "The object was stored with SSE-C; supply the customer key")
+            verify_key_md5(info, sse_key)
+            verify_chunk_layout(parts, self.manifests.resolve_content_id(identifier))
+        elif sse_key is not None:
+            raise SSECError(
+                "InvalidRequest",
+                "The object was not stored with SSE-C; remove the customer key")
         expected = 0
         with tempfile.TemporaryDirectory(
             prefix="teledrive-read-", dir=self.scratch_directory
@@ -603,23 +671,212 @@ class TelegramObjectStorage:
                     await self._verified_fetch(replica_ref, target)
                 local_start = max(0, start - part.offset)
                 local_end = min(part.size, end - part.offset)
-                with _regular_source(target) as file:
-                    file.seek(local_start)
-                    remaining = local_end - local_start
-                    while remaining:
-                        block = file.read(min(remaining, block_size))
+                if info is not None:
+                    # Authenticate and decrypt exactly one overlapping chunk.
+                    ciphertext = target.read_bytes()
+                    plaintext = decrypt_chunk(
+                        sse_key, ciphertext, part.encryption or {})
+                    if len(plaintext) != part.size:
+                        raise IntegrityError(
+                            "Decrypted chunk length disagrees with the manifest")
+                    position = local_start
+                    while position < local_end:
+                        block = plaintext[position:
+                                          min(local_end, position + block_size)]
                         if not block:
-                            raise IntegrityError("Telegram chunk truncated while streaming")
-                        remaining -= len(block)
+                            raise IntegrityError(
+                                "Telegram chunk truncated while streaming")
+                        position += len(block)
                         yield block
+                else:
+                    with _regular_source(target) as file:
+                        file.seek(local_start)
+                        remaining = local_end - local_start
+                        while remaining:
+                            block = file.read(min(remaining, block_size))
+                            if not block:
+                                raise IntegrityError("Telegram chunk truncated while streaming")
+                            remaining -= len(block)
+                            yield block
                 target.unlink()
             # Reaching end is only valid if manifests cover all requested bytes.
             if expected < end:
                 raise IntegrityError("Missing part of requested range")
 
-    async def download_to_path(self, identifier: str, destination: Path) -> StoredObject:
+    async def iter_ciphertext(self, identifier: str, *,
+                              block_size: int = 1024 * 1024) -> AsyncIterator[bytes]:
+        """Stream the stored bytes (ciphertext for SSE-C) without a key.
+
+        Used by multipart completion and rotation, which must verify and
+        hash what Telegram holds but never decrypt with a key they do not
+        have.  Every chunk is checked against its journaled ciphertext
+        digest before any byte is yielded.
+        """
+        obj = self.manifests.get(identifier)
+        total = 0
+        with tempfile.TemporaryDirectory(
+            prefix="teledrive-cipher-", dir=self.scratch_directory
+        ) as scratch:
+            root = Path(scratch)
+            for part in self.manifests.parts(identifier):
+                target = root / f"cipher-{part.ordinal:08d}"
+                try:
+                    await self._verified_fetch(part, target)
+                except Exception:
+                    replica_ref = self._replica_ref(identifier, part)
+                    if replica_ref is None:
+                        raise
+                    await self._verified_fetch(replica_ref, target)
+                total += part.size
+                with _regular_source(target) as file:
+                    while block := file.read(block_size):
+                        yield block
+                target.unlink()
+        if total != obj.size:
+            raise IntegrityError("Missing part of requested object")
+
+    async def reencrypt(self, identifier: str, old_key: SSECKey | None,
+                        new_key: SSECKey) -> str:
+        """Rotate an object to ``new_key`` by re-encrypting every chunk.
+
+        Bounded streaming: at most one plaintext chunk (the engine chunk
+        size) is held in memory.  Chunks are re-uploaded to Telegram before
+        a single SQL transaction swaps every chunk reference, the SSE-C
+        marker and the ciphertext ETag.  A failure leaves the old manifest
+        intact; the newly sent messages become ordinary GC candidates.
+        """
+        content_id = self.manifests.resolve_content_id(identifier)
+        if content_id != identifier:
+            raise SSECError(
+                "NotImplemented",
+                "Cannot rotate encryption on an aliased object; rotate the "
+                "content object instead", 501)
+        info = self.manifests.encryption_info(identifier)
+        if info is not None:
+            if old_key is None:
+                raise SSECError(
+                    "InvalidRequest",
+                    "The object is SSE-C encrypted; supply the old customer key")
+            verify_key_md5(info, old_key)
+        elif old_key is not None:
+            raise SSECError(
+                "InvalidRequest",
+                "The object is not SSE-C encrypted; remove the old key headers")
+        parts = self.manifests.parts(identifier)
+        if info is not None:
+            verify_chunk_layout(parts, content_id)
+        cipher_sha = hashlib.sha256()
+        replacements: list[tuple[int, str, dict, str, str, int, int]] = []
+        with tempfile.TemporaryDirectory(
+            prefix="teledrive-rotate-", dir=self.scratch_directory
+        ) as scratch:
+            root = Path(scratch)
+            for part in parts:
+                current = root / f"old-{part.ordinal:08d}"
+                try:
+                    await self._verified_fetch(part, current)
+                except Exception:
+                    replica_ref = self._replica_ref(identifier, part)
+                    if replica_ref is None:
+                        raise
+                    await self._verified_fetch(replica_ref, current)
+                stored = current.read_bytes()
+                if info is not None:
+                    plaintext = decrypt_chunk(
+                        old_key, stored, part.encryption or {})
+                    if len(plaintext) != part.size:
+                        raise IntegrityError(
+                            "Decrypted chunk length disagrees with the manifest")
+                else:
+                    plaintext = stored
+                # Re-encrypt under the DESTINATION object's identity so the
+                # rotated chunks are bound to content_id and their final
+                # manifest ordinals.
+                payload, metadata = encrypt_chunk(
+                    new_key, content_id, part.ordinal, plaintext)
+                cipher_sha.update(payload)
+                checksum = hashlib.sha256(payload).hexdigest()
+                fresh = root / f"new-{part.ordinal:08d}"
+                with fresh.open("xb") as handle:
+                    handle.write(payload)
+                fresh.chmod(0o600)
+                account, chat_id, message_id = await self.transport.upload(
+                    fresh, object_id=content_id, ordinal=part.ordinal,
+                    checksum=checksum,
+                )
+                replacements.append((
+                    part.ordinal, checksum, metadata, account,
+                    int(chat_id), int(message_id), len(plaintext),
+                ))
+                current.unlink(missing_ok=True)
+                fresh.unlink(missing_ok=True)
+        digest = cipher_sha.hexdigest()
+        now = int(time.time())
+        try:
+            row = self.db_ready_status(content_id)
+            if row is None:
+                raise SSECError("NoSuchKey", "Object is no longer readable", 404)
+            for (ordinal, checksum, metadata, account, chat_id,
+                 message_id, _size) in replacements:
+                changed = self.manifests.db.connection.execute(
+                    update(chunks).where(
+                        chunks.c.object_id == content_id,
+                        chunks.c.ordinal == ordinal,
+                    ).values(
+                        sha256=checksum, account=account, chat_id=chat_id,
+                        message_id=message_id,
+                        encryption=json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")),
+                    ))
+                if changed.rowcount != 1:
+                    raise ManifestError("Chunk journal changed during rotation")
+            values = {
+                "key_md5": new_key.key_md5_b64, "etag": digest,
+                "digest_kind": ("ciphertext"
+                                if info is not None
+                                and info.get("digest_kind") == "ciphertext"
+                                else "plaintext"),
+            }
+            if info is None:
+                self.manifests.db.connection.execute(insert(object_encryption).values(
+                    object_id=content_id, mode="SSE-C",
+                    key_md5=values["key_md5"], etag=digest,
+                    digest_kind=values["digest_kind"], created_at=now,
+                ))
+            else:
+                self.manifests.db.connection.execute(
+                    update(object_encryption).where(
+                        object_encryption.c.object_id == content_id,
+                    ).values(**values))
+            if values["digest_kind"] == "ciphertext":
+                self.manifests.db.connection.execute(update(objects).where(
+                    objects.c.id == content_id).values(sha256=digest,
+                                                       updated_at=now))
+            # The old plaintext index is no longer truthful, and replica
+            # rows point at the previous ciphertext (old messages stay for
+            # GC; the normal repair sweep re-replicates the new bytes).
+            self.manifests.db.connection.execute(delete(content_index).where(
+                content_index.c.object_id == content_id))
+            self.manifests.db.connection.execute(delete(replica_chunks).where(
+                replica_chunks.c.object_id == content_id))
+            self.manifests.db.commit()
+        except BaseException:
+            self.manifests.db.connection.rollback()
+            raise
+        return digest
+
+    def db_ready_status(self, identifier: str):
+        """Row exists and is READY (rotation must not revive a dead object)."""
+        return self.manifests.db.connection.execute(
+            select(objects.c.id).where(
+                objects.c.id == identifier, objects.c.status == "ready")
+        ).scalar_one_or_none()
+
+    async def download_to_path(self, identifier: str, destination: Path,
+                               *, sse_key: SSECKey | None = None) -> StoredObject:
         """Atomically publish a verified full object; never leave a partial file."""
         obj = self.manifests.get(identifier)
+        info = self.manifests.encryption_info(identifier)
         destination = Path(destination)
         if destination.is_symlink():
             raise ValueError("Destination must not be a symlink")
@@ -630,13 +887,15 @@ class TelegramObjectStorage:
         sha = hashlib.sha256()
         try:
             with os.fdopen(fd, "wb") as output:
-                async for block in self.iter_bytes(identifier):
+                async for block in self.iter_bytes(identifier, sse_key=sse_key):
                     output.write(block)
                     sha.update(block)
                     total += len(block)
                 output.flush()
                 os.fsync(output.fileno())
-            if total != obj.size or sha.hexdigest() != obj.sha256:
+            plaintext_digest = info is None or info.get("digest_kind") == "plaintext"
+            if total != obj.size or (plaintext_digest
+                                     and sha.hexdigest() != obj.sha256):
                 raise IntegrityError("Object checksum mismatch")
             os.chmod(temp, 0o600)
             os.replace(temp, destination)

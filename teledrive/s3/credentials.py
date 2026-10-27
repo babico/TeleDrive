@@ -59,6 +59,10 @@ PERMISSIONS = frozenset({
     # Phase O6: the single real state is writable (BucketOwner / Suspended).
     "s3:PutBucketRequestPayment", "s3:PutBucketAccelerateConfiguration",
     "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration",
+    # SSE-C (client-supplied keys). There is deliberately no SSE-S3/KMS
+    # scope: no server-side key exists to grant access to.
+    "s3:GetBucketEncryption", "s3:PutBucketEncryption",
+    "s3:DeleteBucketEncryption", "s3:PutObjectEncryption",
     "s3:GetObjectRetention", "s3:GetObjectLegalHold",
     # Object Lock configuration (Phase C of the metadata parity plan).
     "s3:PutBucketObjectLockConfiguration", "s3:PutObjectRetention",

@@ -6,6 +6,7 @@ No file payload bytes are persisted in the SQL database.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -57,8 +58,27 @@ chunks = Table(
     Column("account", String(255), nullable=False),
     Column("chat_id", BigInteger, nullable=False),
     Column("message_id", BigInteger, nullable=False),
+    # SSE-C per-chunk metadata as a small JSON document:
+    # {"v":1,"n":<b64 nonce>,"t":<b64 tag>,"cs":<ciphertext bytes>,"a":<aad object id>}.
+    # NULL means plaintext.  The client key is NEVER stored here.
+    Column("encryption", Text),
     UniqueConstraint("account", "chat_id", "message_id", name="uq_storage_chunk_message"),
     CheckConstraint("size > 0", name="ck_storage_chunk_size"),
+)
+# SSE-C object-level marker.  ``key_md5`` is the AWS-published fingerprint of
+# the customer key, not the key: it lets HEAD reject a wrong key without
+# reading any ciphertext.  ``etag`` is the full CIPHERTEXT SHA-256 used as the
+# S3 ETag for encrypted objects (AWS never returns a plaintext MD5 here).
+object_encryption = Table(
+    "storage_object_encryption", metadata,
+    Column("object_id", String(36), ForeignKey("storage_objects.id"),
+           primary_key=True),
+    Column("mode", String(16), nullable=False),
+    Column("key_md5", String(24), nullable=False),
+    Column("etag", String(64)),
+    Column("digest_kind", String(16), nullable=False,
+           server_default="plaintext"),
+    Column("created_at", BigInteger, nullable=False),
 )
 # Immutable server-side copies reference the original Telegram chunk journal.
 # No duplicate (account, chat_id, message_id) rows are created. Physical GC
@@ -106,6 +126,58 @@ Index("ix_storage_objects_bucket", objects.c.bucket)
 Index("ix_storage_objects_status", objects.c.status)
 
 
+def _decode_encryption(value) -> dict | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError) as exc:
+        raise ManifestError("Invalid SSE-C chunk metadata") from exc
+    if not isinstance(parsed, dict):
+        raise ManifestError("Invalid SSE-C chunk metadata")
+    return parsed
+
+
+def _column_names(db, table: str) -> set[str]:
+    from sqlalchemy import text as _text
+    if db.engine.dialect.name == "sqlite":
+        return {row[1] for row in db.connection.execute(
+            _text(f"PRAGMA table_info({table})"))}
+    # Filter by the CURRENT schema: an unfiltered information_schema lookup
+    # sees same-named tables in other databases and can skip a needed ALTER.
+    if db.engine.dialect.name == "mysql":
+        schema = "DATABASE()"
+    else:
+        schema = "current_schema()"
+    return {row[0] for row in db.connection.execute(_text(
+        "SELECT column_name FROM information_schema.columns "
+        # nosec B608 — table is a hardcoded internal identifier.
+        f"WHERE table_name = '{table}' AND table_schema = {schema}"))}
+
+
+def ensure_encryption_column(db, table: str) -> None:
+    """Add a nullable TEXT ``encryption`` column to a legacy table.
+
+    MySQL rejects a DEFAULT on TEXT, so the column is nullable with no
+    server default; NULL means plaintext.  The table name is a hardcoded
+    internal identifier, never request input.
+    """
+    columns = _column_names(db, table)
+    if columns and "encryption" not in columns:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            f"ALTER TABLE {table} ADD COLUMN encryption TEXT"))
+        db.commit()
+
+
+def ensure_encryption_schema(db) -> None:
+    ensure_encryption_column(db, "storage_chunks")
+    # Multipart uploads may not exist yet on a fresh database; create_all
+    # in MultipartStore adds the column, while old deployments need ALTER.
+    if _column_names(db, "storage_multipart_uploads"):
+        ensure_encryption_column(db, "storage_multipart_uploads")
+
+
 @dataclass(frozen=True)
 class ChunkReference:
     ordinal: int
@@ -115,6 +187,14 @@ class ChunkReference:
     account: str
     chat_id: int
     message_id: int
+    encryption: dict | None = None
+
+    @property
+    def ciphertext_size(self) -> int:
+        """Bytes Telegram holds for this chunk (plaintext size + GCM tag)."""
+        if self.encryption is None:
+            return self.size
+        return int(self.encryption["cs"])
 
 
 @dataclass(frozen=True)
@@ -146,20 +226,51 @@ class ManifestStore:
     def __init__(self, database: Database):
         self.db = database
         metadata.create_all(database.engine)
+        # Legacy deployments predate the SSE-C columns.
+        ensure_encryption_schema(database)
         # Dialect-aware FTS structures for content search (idempotent).
         from .content_index import ensure_content_search
         ensure_content_search(database)
 
-    def begin(self, bucket: str, key: str, size: int, now: int) -> str:
+    def begin(self, bucket: str, key: str, size: int, now: int, *,
+              sse_key_md5: str | None = None) -> str:
         if not bucket or len(bucket) > 63 or not key or size < 0:
             raise ValueError("Invalid bucket/key/size")
+        if sse_key_md5 is not None and (
+                not isinstance(sse_key_md5, str) or len(sse_key_md5) != 24):
+            raise ValueError("Invalid SSE-C key fingerprint")
         identifier = str(uuid4())
         self.db.connection.execute(insert(objects).values(
             id=identifier, bucket=bucket, object_key=key, status="pending",
             size=size, sha256=None, created_at=now, updated_at=now,
         ))
+        if sse_key_md5 is not None:
+            # Inserted in the SAME transaction as the pending object: a
+            # crash can never publish an object whose ciphertext would be
+            # mistaken for plaintext.
+            self.db.connection.execute(insert(object_encryption).values(
+                object_id=identifier, mode="SSE-C", key_md5=sse_key_md5,
+                etag=None, digest_kind="plaintext", created_at=now,
+            ))
         self.db.commit()
         return identifier
+
+    def raw_encryption_info(self, identifier: str) -> dict | None:
+        """SSE-C marker for any object id, including a pending journal."""
+        row = self.db.connection.execute(select(
+            object_encryption.c.mode, object_encryption.c.key_md5,
+            object_encryption.c.etag, object_encryption.c.digest_kind,
+        ).where(object_encryption.c.object_id == identifier)).mappings().first()
+        return dict(row) if row is not None else None
+
+    def encryption_info(self, identifier: str) -> dict | None:
+        """SSE-C marker plus response headers data, or None for plaintext."""
+        current = self.resolve_content_id(identifier)
+        row = self.db.connection.execute(select(
+            object_encryption.c.mode, object_encryption.c.key_md5,
+            object_encryption.c.etag, object_encryption.c.digest_kind,
+        ).where(object_encryption.c.object_id == current)).mappings().first()
+        return dict(row) if row is not None else None
 
     def start_writer(self, identifier: str, token: str, now: int, ttl: int = 120) -> None:
         """Bind an unguessable owner to a pending object before Telegram I/O."""
@@ -327,6 +438,27 @@ class ManifestStore:
             raise ManifestError("Invalid SHA-256 digest")
         if not part.account or part.message_id <= 0 or part.chat_id == 0:
             raise ManifestError("Invalid Telegram chunk reference")
+        encoded_encryption = None
+        if part.encryption is not None:
+            # Only the non-secret per-chunk metadata is persisted; a client
+            # key can never reach this table.
+            required = {"v", "n", "t", "cs", "a", "o"}
+            try:
+                valid = (isinstance(part.encryption, dict)
+                         and set(part.encryption) == required
+                         and int(part.encryption["cs"]) > 0
+                         and int(part.encryption["o"]) >= 0
+                         and int(part.encryption["v"]) == 1
+                         and isinstance(part.encryption["a"], str)
+                         and len(part.encryption["a"]) == 36
+                         and isinstance(part.encryption["n"], str)
+                         and isinstance(part.encryption["t"], str))
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ManifestError("Invalid SSE-C chunk metadata")
+            encoded_encryption = json.dumps(
+                part.encryption, sort_keys=True, separators=(",", ":"))
         count, position = self.db.connection.execute(
             select(func.count(), func.coalesce(func.sum(chunks.c.size), 0))
             .where(chunks.c.object_id == identifier)
@@ -337,13 +469,17 @@ class ManifestStore:
             object_id=identifier, ordinal=part.ordinal, offset=part.offset,
             size=part.size, sha256=part.sha256, account=part.account,
             chat_id=part.chat_id, message_id=part.message_id,
+            encryption=encoded_encryption,
         ))
         self.db.connection.execute(
             update(objects).where(objects.c.id == identifier).values(updated_at=now)
         )
         self.db.commit()
 
-    def finish(self, identifier: str, sha256: str, now: int, *, writer_token: str | None = None) -> StoredObject:
+    def finish(self, identifier: str, sha256: str, now: int, *,
+               writer_token: str | None = None,
+               encryption_etag: str | None = None,
+               digest_kind: str = "plaintext") -> StoredObject:
         if len(sha256) != 64 or any(c not in "0123456789abcdef" for c in sha256):
             raise ManifestError("Invalid object digest")
         row = self.db.connection.execute(
@@ -361,6 +497,14 @@ class ManifestStore:
         self.db.connection.execute(update(objects).where(
             objects.c.id == identifier, objects.c.status == "pending"
         ).values(status="ready", sha256=sha256, updated_at=now, error=None))
+        if encryption_etag is not None:
+            if digest_kind not in {"plaintext", "ciphertext"}:
+                raise ManifestError("Invalid encryption digest kind")
+            changed = self.db.connection.execute(update(object_encryption).where(
+                object_encryption.c.object_id == identifier,
+            ).values(etag=encryption_etag, digest_kind=digest_kind))
+            if changed.rowcount != 1:
+                raise ManifestError("Missing SSE-C object marker")
         if writer_token is not None:
             self.db.connection.execute(delete(writer_fences).where(
                 writer_fences.c.object_id == identifier,
@@ -423,7 +567,8 @@ class ManifestStore:
         ).order_by(chunks.c.ordinal)).mappings().all()
         return [ChunkReference(ordinal=int(r["ordinal"]), offset=int(r["offset"]),
                                size=int(r["size"]), sha256=r["sha256"], account=r["account"],
-                               chat_id=int(r["chat_id"]), message_id=int(r["message_id"]))
+                               chat_id=int(r["chat_id"]), message_id=int(r["message_id"]),
+                               encryption=_decode_encryption(r["encryption"]))
                 for r in rows]
 
     def interrupted(self) -> list[tuple[str, str]]:
@@ -440,7 +585,8 @@ class ManifestStore:
         ).order_by(chunks.c.ordinal)).mappings().all()
         return [ChunkReference(ordinal=int(r["ordinal"]), offset=int(r["offset"]),
                                size=int(r["size"]), sha256=r["sha256"], account=r["account"],
-                               chat_id=int(r["chat_id"]), message_id=int(r["message_id"]))
+                               chat_id=int(r["chat_id"]), message_id=int(r["message_id"]),
+                               encryption=_decode_encryption(r["encryption"]))
                 for r in rows]
 
     def append_replica(self, identifier: str, ordinal: int, account: str,

@@ -46,21 +46,18 @@
     },
     {
       "name": "PutObject",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetObject",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "HeadObject",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteObject",
@@ -84,9 +81,8 @@
     },
     {
       "name": "CreateMultipartUpload",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "UploadPart",
@@ -255,19 +251,18 @@
     },
     {
       "name": "GetBucketEncryption",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketEncryption",
-      "status": "unsupported",
-      "workstream": "P2-B"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "DeleteBucketEncryption",
-      "status": "unsupported",
-      "workstream": "P2-B"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "GetObjectLockConfiguration",
@@ -583,8 +578,8 @@
     },
     {
       "name": "UpdateObjectEncryption",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "WriteGetObjectResponse",

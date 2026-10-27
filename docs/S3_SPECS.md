@@ -13,7 +13,7 @@
 | ❌ Unsupported | No supported TeleDrive contract; do not rely on that AWS method. It may be rejected as NotImplemented (501) **or** require additional fail-closed routing tests; do not assume every selector currently returns the same error. |
 | Not verified | Client, deployment configuration or optional parameter is untested; never upgrade an operation's status merely because another client happens to succeed. |
 
-**Inventory totals:** 102 supported, 7 partial (0 by code, 7 by design), 7 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
+**Inventory totals:** 110 supported, 2 partial (0 by code, 2 by design), 4 unsupported; **116 AWS S3 operations**. Count operations, not request permutations. Partial operations are **not** fully supported; section 3 classifies each partial by *why* it is partial. These statuses describe development code and tests, not a fresh CI run or independently validated production setup.
 
 **Machine-readable inventory:** [116-operation JSON manifest](../teledrive/s3/operation_manifest.json) is checked against every row of this matrix in [fail-closed route tests](../tests/s3/test_s3_route_guard.py). Supported AWS subresources are explicitly allowlisted before the signer, SQL and Telegram transports can mutate data; unknown selectors cannot silently become normal bucket/object operations. This addresses a P2-0 subtask, **not** the entire protocol parity gate.
 
@@ -171,8 +171,17 @@ carries each partial's `gap_class` and is synchronized with this table by CI.
 | [UpdateBucketMetadataAnnotationTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataAnnotationTableConfiguration.html) | ✅ Supported | Toggles annotation journaling and stores the optional role; 404 `NoSuchConfiguration` when the configuration is missing. |
 | [UpdateBucketMetadataInventoryTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataInventoryTableConfiguration.html) | ✅ Supported | Toggles inventory-table state over the same journal; 404 `NoSuchConfiguration` when the configuration is missing. |
 | [UpdateBucketMetadataJournalTableConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateBucketMetadataJournalTableConfiguration.html) | ✅ Supported | Sets the real retention window (Days 7 and above, or DISABLED); expired journal rows are trimmed in bounded batches. 404 `NoSuchConfiguration` when missing. |
+| [PutBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html) | ✅ Supported | Stores only the empty `ServerSideEncryptionConfiguration` (the honest state for client-supplied keys). A default `AES256` (SSE-S3) or `aws:kms` rule is rejected 501: TeleDrive holds no server-side key for data the client did not encrypt. |
+| [DeleteBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketEncryption.html) | ✅ Supported | Removes the stored bucket encryption document (204, idempotent). Object-level SSE-C keys are unaffected. |
+| [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | ✅ Supported | Reads the real stored bucket document, which can only be an empty rule set (SSE-C has no bucket-level default key); an honest 404 `ServerSideEncryptionConfigurationNotFoundError` when nothing is stored. |
+| [UpdateObjectEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateObjectEncryption.html) | ✅ Supported | `PUT ?encryption` re-encrypts every chunk of an existing object to a new customer key in one bounded streaming pass (old key in the `x-amz-copy-source-*` SSE-C headers when the object is already encrypted), then swaps all chunk references and the key fingerprint in one SQL transaction. Plaintext objects can be upgraded in place; a missing/wrong old key or an aliased object fails closed. |
+| [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) | ✅ Supported | Size-bounded, checksum-verified upload with metadata/tags, conditional writes and version creation; aws-chunked streaming bodies decoded and verified (signed chunk-signature chains, unsigned-payload trailers, decoded-length accounting). Server-side encryption is supported **only** as SSE-C: a client-supplied AES-256 key encrypts each Telegram chunk with AES-256-GCM under a fresh nonce and an AAD binding it to its object identity and ordinal; the key is never persisted or logged. `x-amz-server-side-encryption: AES256/aws:kms` (SSE-S3/SSE-KMS) is rejected 501 because no server-side key exists, not silently ignored. SSE-C objects are excluded from content-addressed dedup and from the plaintext search index. |
+| [GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html) | ✅ Supported | Full, byte-range and selected VersionId reads with ETag/date conditions. SSE-C objects require the same customer key on every read: a missing or wrong key is `400 InvalidRequest` before any plaintext is emitted, each overlapping chunk is GCM-authenticated before decryption, and the response never advertises a plaintext checksum or plaintext ETag. No archive/SSE-S3/KMS storage classes exist; those requests are rejected rather than emulated. |
+| [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html) | ✅ Supported | Object metadata and selected VersionId/read preconditions. SSE-C HEAD verifies the key against the stored non-secret key-MD5 fingerprint and returns the AWS SSE-C response headers (algorithm + key MD5) without ever returning the key. Absent AWS headers describe features that do not exist here. |
+| [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | ✅ Supported | Signed initiation with selected metadata. With SSE-C headers the upload is bound to that key fingerprint: every UploadPart, ListParts and CompleteMultipartUpload must present the same key or fails with `400 InvalidRequest`. Retention and storage-tier variants have no backing and fail closed. |
 
 > **Journal actor field.** Rows written by object tagging, annotation, ACL and rename record the acting access key. Rows written by internal catalog operations (publish, delete marker, version revocation, multipart completion) record an empty actor rather than a guessed one — the catalog layer does not know which credential a background scheduler or GC pass belongs to. An empty actor means "not attributed", never "anonymous".
+
 ### 3.2 Partial — by code (closeable gaps)
 
 These are ordinary missing features; nothing architectural blocks them.
@@ -208,11 +217,6 @@ Accelerate stay by-design (no honest backing exists).
 
 | AWS S3 API operation | Status | Gap class | Design reason | Enforced behavior |
 | --- | --- | --- | --- | --- |
-| [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html) | 🟡 Partial | by design | private-only: SSE and Object Lock would be fake semantics over Telegram | Size-bounded, checksum-verified upload with metadata/tags and version creation; aws-chunked streaming bodies decoded and verified (signed chunk-signature chains, unsigned-payload trailers, decoded-length accounting). |
-| [GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html) | 🟡 Partial | by design | private-only: no archive/SSE storage classes exist | Full, byte-range and selected VersionId reads, ETag/date conditions. |
-| [HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html) | 🟡 Partial | by design | private-only: absent AWS headers describe features that do not exist here | Basic object metadata and selected VersionId/read preconditions. |
-| [CreateMultipartUpload](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html) | 🟡 Partial | by design | private-only: SSE/retention/storage-tier variants have no backing | Signed initiation and selected metadata. |
-| [GetBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketEncryption.html) | 🟡 Partial | by design | private-only: SSE has no backing over Telegram | Always 404 `ServerSideEncryptionConfigurationNotFoundError`; SSE writes fail closed. |
 | [GetBucketRequestPayment](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketRequestPayment.html) | 🟡 Partial | by design | private-only: no requester-pays billing exists | Always `Payer=BucketOwner`; request-payer writes fail closed. |
 | [GetBucketAccelerateConfiguration](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketAccelerateConfiguration.html) | 🟡 Partial | by design | private-only: no transfer acceleration exists | Always `Suspended`; accelerate writes fail closed. |
 
@@ -270,8 +274,6 @@ Implement actual encryption/key lifecycle and enforce per-version retention and 
 
 | AWS S3 API operation | Status | Target |
 | --- | --- | --- |
-| [PutBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html) | ❌ Unsupported | P2-B |
-| [DeleteBucketEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteBucketEncryption.html) | ❌ Unsupported | P2-B |
 
 ### P2-D — Lifecycle, expiration, transitions, replication and restore
 
@@ -333,7 +335,6 @@ metadata-level copy+delete and could be supported if a client needs it.
 | [GetObjectTorrent](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObjectTorrent.html) | ❌ Unsupported | P3-H |
 | [CreateSession](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateSession.html) | ❌ Unsupported | P3-H |
 | [ListDirectoryBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListDirectoryBuckets.html) | ❌ Unsupported | P3-H |
-| [UpdateObjectEncryption](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UpdateObjectEncryption.html) | ❌ Unsupported | P3-H |
 | [WriteGetObjectResponse](https://docs.aws.amazon.com/AmazonS3/latest/API/API_WriteGetObjectResponse.html) | ❌ Unsupported | P3-H |
 
 ## 5. P2 Advanced S3 implementation plan

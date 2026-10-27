@@ -46,7 +46,7 @@ _BUCKET_CONTROL = frozenset({
     "notification", "notificationConfiguration", "requestPayment", "accelerate",
     "encryption", "object-lock", "abac",
 })
-_OBJECT_CONTROL = frozenset({"tagging", "annotation", "attributes", "uploads", "uploadId", "versionId"})
+_OBJECT_CONTROL = frozenset({"tagging", "annotation", "attributes", "uploads", "uploadId", "versionId", "encryption"})
 _EMPTY_FLAG = frozenset({
     "location", "cors", "tagging", "annotation", "versioning", "publicAccessBlock",
     "lifecycle", "policyStatus", "uploads", "versions", "delete", "attributes",
@@ -116,7 +116,7 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "notification": {"GET", "PUT"},
                 "notificationConfiguration": {"GET", "PUT"},
                 "requestPayment": {"GET", "PUT"}, "accelerate": {"GET", "PUT"},
-                "encryption": {"GET"}, "object-lock": {"GET", "PUT"},
+                "encryption": {"GET", "PUT", "DELETE"}, "object-lock": {"GET", "PUT"},
                 # Phase N: report configuration CRUD. The optional `id`
                 # query field selects one configuration; list requests have
                 # none. Continuation tokens are not needed because the list
@@ -165,6 +165,10 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
             }.get(method, frozenset())
         elif "uploads" in real:
             allowed = frozenset({"uploads"}) if method == "POST" else frozenset()
+        elif "encryption" in real:
+            # UpdateObjectEncryption (SSE-C key rotation) is a PUT-only
+            # object operation. There is no GetObjectEncryption API.
+            allowed = frozenset({"encryption"}) if method == "PUT" else frozenset()
         elif "tagging" in real:
             allowed = (frozenset({"tagging", "versionId"})
                        if method in {"GET", "PUT", "DELETE"} else frozenset())

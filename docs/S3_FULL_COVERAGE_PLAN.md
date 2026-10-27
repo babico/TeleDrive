@@ -1,6 +1,6 @@
 # TeleDrive — Full S3 Operation Coverage Plan
 
-**Durum:** 60 supported / 8 partial (0 by code) / 48 unsupported — 116 operasyon.
+**Durum:** 89 supported / 7 partial (0 by code) / 20 unsupported — 116 operasyon.
 **Hedef:** 112 supported / 0 partial / 4 unsupported (96.5%).
 **Kural:** her operasyonun arkasında GERÇEK bir state veya GERÇEK bir iş olacak.
 "Kabul et ve yut" yasak; yapılamayan dürüstçe reddedilir.
@@ -10,6 +10,30 @@ yolu tanımlar. Sıralama (değer / efor) oranına göredir; her faz bağımsız
 sevkiyat edilebilir ve kendi CI doğrulamasını taşır.
 
 ---
+
+## Durum (2026-10-27)
+
+| Faz | Kapsam | Op | Durum |
+|---|---|---|---|
+| Başlangıç | — | — | 60 supported / 8 partial / 48 unsupported |
+| **L** | Policy engine, ownership, ABAC, PAB delete | 8 | ✅ `4831a67` |
+| **N1–N3** | Analytics/inventory/metrics config + gerçek rapor üretimi | 12 | ✅ `4831a67` |
+| **O** | RenameObject, SelectObjectContent, RestoreObject, annotations, RequestPayment/Accelerate yazma | 9 | ✅ `4831a67` + `2e461d1` (gerçek AWS wire shape'leri) |
+| **Ara toplam** | | **29** | **89 supported / 7 partial / 20 unsupported** |
+| **N5 + O1** | Erişim sayacı, intelligent-tiering, RestoreObject'ın gerçek arşiv yolu | 6 | 🔄 paralel ajan |
+| **O3** | Bucket metadata journal (gerçek mutasyon jurnali) | 9 | 🔄 paralel ajan |
+| **M1** | SSE-C (client-supplied key, AES-256-GCM/chunk) | 8 | 🔄 paralel ajan |
+| **Hedef** | | **23** | **112 supported / 0 partial / 4 unsupported** |
+| **D — imkânsız** | Torrent, CreateSession, ListDirectoryBuckets, WriteGetObjectResponse | 4 | ⛔ kalıcı olarak unsupported |
+
+> **Neden bu 4'ü "destekliyoruz" demiyoruz:** `GetObjectTorrent` bir
+> BitTorrent swarm/seeder gerektirir (üretilen .torrent'i seed edememek
+> kullanıcıyı yanıltır), `CreateSession`/`ListDirectoryBuckets` S3 Express
+> One Zone directory bucket'larına bağlıdır (öyle bir depolama yok),
+> `WriteGetObjectResponse` S3 Object Lambda'dır (Lambda çalıştırma ortamı
+> yok). Dördü de gerçek bir backing olmadan uydurulursa "supported"
+> etiketi yalan olur. TeleDrive'ın kullanım profili (self-host yedekleme)
+> bu çağrıları hiç üretmez.
 
 ## 0. Sınıflandırma
 

@@ -210,7 +210,12 @@ def _days(node) -> int:
 
 
 def _tiering(node) -> dict:
-    _expect(node, "Tiering")
+    # Flattened list element: <Tiering>. <Tierings> tolerated on input.
+    if _name(node) not in {"Tiering", "Tierings"}:
+        raise TieringError(
+            "MalformedXML", f"Unexpected {_name(node)!r}; expected Tiering")
+    if node.attrib:
+        raise TieringError("MalformedXML", "Tierings must not carry attributes")
     group = _children(node, {"Days", "AccessTier"})
     days = _days(_single(group, "Days"))
     access_tier = _leaf(_single(group, "AccessTier"), "AccessTier",
@@ -241,7 +246,10 @@ def parse_document(payload: bytes, *,
     if not _valid(root, "IntelligentTieringConfiguration") or root.attrib:
         raise TieringError(
             "MalformedXML", "Expected IntelligentTieringConfiguration")
-    group = _children(root, {"Id", "Status", "Filter", "Tiering"})
+    # botocore models `Tierings` as a FLATTENED list whose XML locationName
+    # is "Tiering", so the wire element is <Tiering> (singular). <Tierings>
+    # is accepted on input for clients that follow the Python name.
+    group = _children(root, {"Id", "Status", "Filter", "Tiering", "Tierings"})
     ident = _config_id(_leaf(_single(group, "Id"), "Id"))
     status = _leaf(_single(group, "Status"), "Status", maximum=16)
     if status not in STATUSES:
@@ -249,9 +257,10 @@ def parse_document(payload: bytes, *,
     filter_node = _single(group, "Filter", required=False)
     filter_value = (_filter(filter_node) if filter_node is not None
                     else {"prefix": "", "tag": None})
-    if not group["Tiering"]:
+    tier_nodes = group["Tiering"] + group["Tierings"]
+    if not tier_nodes:
         raise TieringError("InvalidArgument", "At least one Tiering is required")
-    tiers = [_tiering(node) for node in group["Tiering"]]
+    tiers = [_tiering(node) for node in tier_nodes]
     by_tier: dict[str, int] = {}
     for tier in tiers:
         if tier["access_tier"] in by_tier:
@@ -300,6 +309,7 @@ def config_xml(config: dict) -> bytes:
             ET.SubElement(node, "Prefix").text = prefix
     ET.SubElement(root, "Status").text = config["status"]
     for tier in config["tiers"]:
+        # Flattened list: the wire element is <Tiering>, repeated.
         node = ET.SubElement(root, "Tiering")
         ET.SubElement(node, "Days").text = str(tier["days"])
         ET.SubElement(node, "AccessTier").text = tier["access_tier"]

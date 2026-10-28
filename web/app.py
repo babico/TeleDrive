@@ -5678,3 +5678,6 @@ async def public_website_root(bucket: str, request: Request):
 @app.get("/site/{bucket}/{path:path}", include_in_schema=False)
 async def public_website_object(bucket: str, path: str, request: Request):
     return await _serve_site(bucket, path, request)
+
+from web import s3_governance_api  # noqa: E402  (router import, no app logic)
+app.include_router(s3_governance_api.router)

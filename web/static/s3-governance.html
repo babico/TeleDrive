@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TeleDrive - S3 Governance</title>
+<script src="/static/vendor/tailwindcss.js"></script>
+<script defer src="/static/vendor/alpine.min.js"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' } } } }
+}
+</script>
+<style>
+  [x-cloak]{display:none!important}
+  .card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px}
+  .input{width:100%;background:#0f172a;color:#e5e7eb;border:1px solid #374151;border-radius:8px;padding:8px 12px;font-size:14px}
+  .input:focus{outline:none;border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.2)}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid #374151;background:#1f2937;color:#e5e7eb;transition:all .15s}
+  .btn:hover{background:#374151}
+  .btn-primary{background:#4f46e5;border-color:#4f46e5;color:#fff}
+  .btn-primary:hover{background:#4338ca}
+  .btn-danger{background:#7f1d1d;border-color:#991b1b;color:#fecaca}
+  .btn-danger:hover{background:#991b1b}
+  .btn-ghost{background:transparent;border-color:transparent;color:#9ca3af}
+  .btn-ghost:hover{background:#1f2937;color:#e5e7eb}
+  .btn-sm{padding:4px 8px;font-size:12px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:500}
+  .badge-green{background:#064e3b;color:#6ee7b7}
+  .badge-red{background:#7f1d1d;color:#fca5a5}
+  .badge-gray{background:#374151;color:#9ca3af}
+  .badge-blue{background:#1e3a8a;color:#93c5fd}
+  .badge-amber{background:#78350f;color:#fcd34d}
+  .toast{position:fixed;right:16px;bottom:16px;padding:12px 16px;border-radius:10px;display:none;z-index:50;max-width:420px}
+  .toast.show{display:block}
+  .toast.bad{background:#7f1d1d;border:1px solid #991b1b;color:#fecaca}
+  .toast.good{background:#064e3b;border:1px solid #065f46;color:#6ee7b7}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #1f2937;font-size:13px}
+  th{color:#9ca3af;font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  .scroll{max-height:420px;overflow:auto}
+  .tab{padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;color:#9ca3af;background:transparent;border:none}
+  .tab:hover{color:#e5e7eb;background:#1f2937}
+  .tab.active{color:#fff;background:#4f46e5}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:#9ca3af;margin-bottom:4px}
+  .hint{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:9999px;border:1px solid #4b5563;color:#9ca3af;font-size:10px;font-style:italic;cursor:help;position:relative;margin-left:5px;user-select:none;vertical-align:middle}
+  .hint:hover{border-color:#818cf8;color:#c7d2fe}
+  .hint:hover::after{content:attr(data-tip);position:absolute;left:0;bottom:22px;background:#1f2937;border:1px solid #374151;color:#e5e7eb;padding:8px 10px;border-radius:8px;font-size:12px;font-style:normal;width:260px;white-space:normal;z-index:60;box-shadow:0 4px 12px rgba(0,0,0,.5)}
+  input[type=checkbox]{accent-color:#6366f1;width:16px;height:16px;cursor:pointer}
+  .muted{color:#6b7280;font-size:13px}
+  .section{margin-top:16px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .row>*{flex:1}
+  .row .btn{flex:0 0 auto}
+  pre{white-space:pre-wrap;word-break:break-all;background:#0f172a;border:1px solid #1f2937;padding:12px;border-radius:8px;font-size:12px;max-height:300px;overflow:auto}
+  h3{font-size:16px;font-weight:600;color:#f3f4f6;margin:0 0 4px}
+  h4{font-size:13px;font-weight:600;color:#9ca3af;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.05em}
+  .warn{border:1px solid #92400e;background:#1c1408;color:#fcd34d;border-radius:10px;padding:12px 14px;font-size:13px}
+  .danger{border:1px solid #991b1b;background:#1c0a0a;color:#fca5a5;border-radius:10px;padding:12px 14px;font-size:13px}
+  .info{border:1px solid #1e3a8a;background:#0b1220;color:#93c5fd;border-radius:10px;padding:12px 14px;font-size:13px}
+  .ok{border:1px solid #065f46;background:#06120d;color:#6ee7b7;border-radius:10px;padding:12px 14px;font-size:13px}
+  .toggle-row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid #1f2937}
+  .toggle-row:last-child{border-bottom:none}
+  .toggle-row .txt{flex:1;font-size:13px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .radio-row{display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid #1f2937;border-radius:8px;margin-bottom:8px;cursor:pointer}
+  .radio-row.sel{border-color:#6366f1;background:#111a33}
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen" x-data="app()">
+
+<div id="toast" class="toast" :class="toastBad?'bad':'good'" x-show="toastMsg" x-text="toastMsg" x-transition></div>
+
+<div class="flex h-screen overflow-hidden" x-cloak>
+<aside class="w-56 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
+  <div class="px-4 py-4 border-b border-gray-800 flex items-center gap-2">
+    <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center font-bold text-sm">T</div>
+    <span class="font-semibold text-lg">TeleDrive</span>
+  </div>
+    <nav class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
+    <a href="/dashboard" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/dashboard')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Dashboard</a>
+    <a href="/queue" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/queue')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Queue</a>
+    <a href="/history" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/history')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">History</a>
+    <div class="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">Settings</div>
+    <a href="/settings/general" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/settings/general')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">General</a>
+    <a href="/settings/telegram" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/settings/telegram')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Telegram</a>
+    <div class="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">S3</div>
+    <a href="/s3/credentials" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/s3/credentials')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Credentials</a>
+    <a href="/s3/buckets" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/s3/buckets')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Buckets</a>
+    <a href="/s3/governance" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors pl-5" :class="navActive('/s3/governance')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Governance</a>
+    <div class="px-3 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">Access</div>
+    <a href="/api-management" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/api-management')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">API Management</a>
+    <a href="/users" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/users')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Users</a>
+    <a href="/logs" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors" :class="navActive('/logs')?'bg-brand-600 text-white':'text-gray-400 hover:text-gray-100 hover:bg-gray-800'">Logs</a>
+  </nav>
+  <div class="px-4 py-3 border-t border-gray-800 text-xs text-gray-500">TeleDrive</div>
+</aside>
+
+<div class="flex-1 flex flex-col overflow-hidden">
+<header class="h-14 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 shrink-0">
+  <div class="text-sm text-gray-400">S3 · Governance</div>
+  <div class="flex items-center gap-3">
+    <span class="text-sm text-gray-300" x-text="currentUser||''"></span>
+    <span class="text-xs text-gray-500" x-text="currentRole"></span>
+    <div class="w-8 h-8 rounded-full bg-brand-700 flex items-center justify-center text-xs font-bold" x-text="(currentUser||'A').charAt(0).toUpperCase()"></div>
+    <button class="btn btn-sm btn-ghost" @click="logout()">Logout</button>
+  </div>
+</header>
+
+<main class="flex-1 overflow-y-auto px-6 py-6">
+<section class="space-y-4" style="max-width:1150px">
+
+  <div class="card">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <h3>S3 governance</h3>
+        <p class="muted">Every control below exists on the S3 API and is signed server-side with a real S3 credential. The browser never receives a secret key.</p>
+      </div>
+      <span class="badge" :class="isAdmin?'badge-green':'badge-amber'" x-text="isAdmin?'admin — read/write':'operator — read only'"></span>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="field">
+        <label>Bucket <span class="muted">— all tabs operate on this bucket</span></label>
+        <select class="input" x-model="govBucket" @change="govSelectBucket()">
+          <template x-for="b in buckets" :key="b.name">
+            <option :value="b.name" x-text="b.name"></option>
+          </template>
+        </select>
+        <p class="muted text-xs mt-1" x-show="!buckets.length">No buckets exist yet. Create one under S3 → Buckets.</p>
+      </div>
+      <div class="field" x-show="isAdmin">
+        <label>Signing credential <span class="hint" data-tip="The router signs the S3 request server-side with this credential. Its secret never leaves the server; only the access-key ID and permissions are visible here.">i</span></label>
+        <select class="input" x-model="govCredentialId">
+          <template x-for="c in govCredentials" :key="c.id">
+            <option :value="c.id" x-text="c.name + ' · ' + c.access_key"></option>
+          </template>
+        </select>
+        <p class="muted text-xs mt-1" x-show="govCredentials.length">Leave the credential selection alone to let the server pick the first active key that grants each action.</p>
+        <p class="muted text-xs mt-1" x-show="!govCredentials.length">No active S3 credentials. Create one under S3 → Credentials; governance writes need a key with the matching s3:* permission.</p>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap gap-1 mt-3">
+      <template x-for="t in govTabs" :key="t[0]">
+        <button class="tab" :class="govTab===t[0]?'active':''" @click="govGo(t[0])" x-text="t[1]"></button>
+      </template>
+    </div>
+  </div>
+
+  <div class="danger" x-show="govError" x-cloak>
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <div class="font-semibold" x-text="'AWS error ' + (govError?.status||'') + ' · ' + (govError?.code||'Error')"></div>
+        <div class="mt-1 mono text-xs" x-text="govError?.message"></div>
+        <div class="muted text-xs mt-1">The raw S3 code and message are shown verbatim so a Deny can be debugged, never a generic "something went wrong".</div>
+      </div>
+      <button class="btn btn-sm" @click="govError=null">Dismiss</button>
+    </div>
+  </div>
+  <div class="warn" x-show="govNotice" x-cloak x-text="govNotice"></div>
+  <div class="info" x-show="govBusy" x-cloak>Working…</div>
+
+  <!-- 1. Bucket policy -->
+  <div class="card" x-show="govTab==='policy'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Bucket policy <span class="badge" :class="govPolicy.configured?'badge-green':'badge-gray'" x-text="govPolicy.configured?'configured':'no policy'"></span></h3>
+        <p class="muted">IAM-style JSON document evaluated by the gateway. <code>GET ?policy</code> / <code>PUT ?policy</code> / <code>DELETE ?policy</code>.</p>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-sm" @click="loadGovPolicy()">Reload</button>
+        <button class="btn btn-sm" @click="govPolicy.text=JSON.stringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Principal:{CanonicalUser:['&lt;access-key-id&gt;']},Action:'s3:GetObject',Resource:'arn:aws:s3:::'+govBucket+'/*'}]},null,2)">Template</button>
+      </div>
+    </div>
+    <div class="warn mt-3">
+      <strong>Deny always wins</strong> over any Allow, and every <code>Principal.CanonicalUser</code> must be an existing, active access key from S3 → Credentials. A policy is never a substitute for IAM (there is no IAM here).
+    </div>
+    <textarea class="input mono text-xs mt-3" rows="16" spellcheck="false" x-model="govPolicy.text" placeholder='{"Version":"2012-10-17","Statement":[]}'></textarea>
+    <div class="row mt-3">
+      <button class="btn btn-primary" x-show="isAdmin" @click="saveGovPolicy()">Save policy</button>
+      <button class="btn btn-danger" x-show="isAdmin && govPolicy.configured" @click="deleteGovPolicy()">Delete policy</button>
+      <span class="muted text-xs">Validation errors from the S3 engine appear above with their raw AWS code.</span>
+    </div>
+  </div>
+
+  <!-- 2. Ownership -->
+  <div class="card" x-show="govTab==='ownership'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Ownership controls <span class="badge badge-blue" x-text="govOwnership.model"></span></h3>
+        <p class="muted">Controls whether object ACL grants participate in authorization.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovOwnership()">Reload</button>
+    </div>
+    <div class="mt-3">
+      <label class="radio-row" :class="govOwnership.model==='BucketOwnerEnforced'?'sel':''">
+        <input type="radio" value="BucketOwnerEnforced" x-model="govOwnership.model">
+        <span class="txt"><strong>BucketOwnerEnforced</strong><br><span class="muted">Object ACL grants are ignored; the bucket owner and the bucket policy decide. This is the private default.</span></span>
+      </label>
+      <label class="radio-row" :class="govOwnership.model==='ObjectWriter'?'sel':''">
+        <input type="radio" value="ObjectWriter" x-model="govOwnership.model">
+        <span class="txt"><strong>ObjectWriter</strong><br><span class="muted">Object ACL grants apply exactly like the Phase D intersection model.</span></span>
+      </label>
+      <label class="radio-row" :class="govOwnership.model==='BucketOwnerPreferred'?'sel':''">
+        <input type="radio" value="BucketOwnerPreferred" x-model="govOwnership.model">
+        <span class="txt"><strong>BucketOwnerPreferred</strong><br><span class="muted">Object ACL grants apply, plus an automatic owner FULL_CONTROL grant when an object is uploaded with <code>x-amz-acl: bucket-owner-full-control</code>.</span></span>
+      </label>
+    </div>
+    <div class="row mt-3">
+      <button class="btn btn-primary" x-show="isAdmin" @click="saveGovOwnership()">Save ownership model</button>
+      <span class="muted text-xs">Switching to a model that honours object ACLs does not create any grants by itself.</span>
+    </div>
+  </div>
+
+  <!-- 3. Public access block -->
+  <div class="card" x-show="govTab==='pab'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Public access block</h3>
+        <p class="muted">Four forward-looking guards stored per bucket. AWS default: all four ON.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovPab()">Reload</button>
+    </div>
+    <div class="warn mt-3">Turning any flag <strong>off</strong> is a deliberate owner decision. TeleDrive has no anonymous object path, so this does not publish anything by itself — it only relaxes the stored guard and is recorded in the audit log.</div>
+    <div class="mt-3">
+      <template x-for="f in [
+        {k:'BlockPublicAcls', l:'Block public ACLs', d:'Reject public ACL grants at write time.'},
+        {k:'IgnorePublicAcls', l:'Ignore public ACLs', d:'Do not evaluate public ACL grants during authorization.'},
+        {k:'BlockPublicPolicy', l:'Block public bucket policies', d:'Reject a bucket policy that would grant public access.'},
+        {k:'RestrictPublicBuckets', l:'Restrict public buckets', d:'Restrict cross-account/public policy access to owner-only principals.'}]" :key="f.k">
+        <div class="toggle-row">
+          <input type="checkbox" x-model="govPab.flags[f.k]">
+          <div class="txt">
+            <div class="mono text-xs" x-text="f.k"></div>
+            <div x-text="f.l"></div>
+            <div class="muted text-xs" x-text="f.d"></div>
+          </div>
+          <span class="badge" :class="govPab.flags[f.k]?'badge-green':'badge-amber'" x-text="govPab.flags[f.k]?'on':'off'"></span>
+        </div>
+      </template>
+    </div>
+    <div class="row mt-3">
+      <button class="btn btn-primary" x-show="isAdmin" @click="saveGovPab()">Save public access block</button>
+    </div>
+  </div>
+
+  <!-- 4. Object lock -->
+  <div class="card" x-show="govTab==='lock'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Object lock
+          <span class="badge" :class="govLock.enabled?'badge-green':'badge-gray'" x-text="govLock.enabled?'Enabled':'Disabled'"></span>
+        </h3>
+        <p class="muted">Bucket-level default retention applied to new objects.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovLock()">Reload</button>
+    </div>
+    <div class="danger mt-3"><strong>Enabling Object Lock is one-way.</strong> It cannot be disabled, and COMPLIANCE retention cannot be shortened or removed — not even by an admin. There is no delete API for this configuration.</div>
+    <div class="grid md:grid-cols-2 gap-4 mt-3" x-show="!govLock.enabled">
+      <div class="field"><label>Default mode</label>
+        <select class="input" x-model="govLock.mode">
+          <option value="COMPLIANCE">COMPLIANCE — cannot be shortened</option>
+          <option value="GOVERNANCE">GOVERNANCE — privileged override possible</option>
+        </select>
+      </div>
+      <div class="field"><label>Default retention days (1–3650, optional)</label>
+        <input class="input" type="number" min="1" max="3650" x-model.number="govLock.days">
+      </div>
+    </div>
+    <div class="ok mt-3" x-show="govLock.enabled">
+      Default mode <span class="mono" x-text="govLock.mode"></span>, retention <span class="mono" x-text="govLock.days ? govLock.days + ' days' : 'not set'"></span>.
+    </div>
+    <div class="row mt-3">
+      <button class="btn btn-danger" x-show="isAdmin && !govLock.enabled" @click="enableGovLock()">Enable Object Lock (one-way)</button>
+      <span class="muted text-xs" x-show="govLock.enabled">This configuration is immutable from the UI.</span>
+    </div>
+  </div>
+
+  <!-- 5. Website -->
+  <div class="card" x-show="govTab==='website'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Website <span class="badge" :class="govWebsite.configured?'badge-green':'badge-gray'" x-text="govWebsite.configured?'configured':'not configured'"></span></h3>
+        <p class="muted">Index/error documents are stored through <code>PUT ?website</code>. RedirectAllRequestsTo and RoutingRules are rejected with 501 (no rewrite engine).</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovWebsite()">Reload</button>
+    </div>
+    <div class="grid md:grid-cols-2 gap-4 mt-3">
+      <div class="field"><label>Index document</label><input class="input" x-model="govWebsite.index_document" placeholder="index.html"></div>
+      <div class="field"><label>Error document (optional)</label><input class="input" x-model="govWebsite.error_document" placeholder="404.html"></div>
+    </div>
+
+    <h4>Public read gate — admin-only, separate decision</h4>
+    <div class="danger">
+      <div class="flex items-start gap-3">
+        <input type="checkbox" x-model="govWebsite.public_read" :disabled="!isAdmin" style="margin-top:3px">
+        <div class="txt">
+          <div><strong>public_read</strong> publishes the bucket's <em>current</em> objects anonymously at <span class="mono" x-text="govWebsite.site_url"></span>.</div>
+          <div class="text-xs mt-1">Anyone who can reach the app origin can read them with no login and no S3 credential. Saving this ON asks for the explicit <code>PUBLISH</code> confirmation; the flag is stored separately from the website XML and defaults to OFF.</div>
+        </div>
+      </div>
+    </div>
+    <div class="ok mt-2" x-show="govWebsite.public_read" x-cloak>
+      Public site URL: <a :href="govWebsite.site_url" class="underline mono" x-text="govWebsite.site_url"></a>
+    </div>
+    <div class="row mt-3">
+      <button class="btn btn-primary" x-show="isAdmin" @click="saveGovWebsite()">Save website</button>
+      <button class="btn btn-danger" x-show="isAdmin && govWebsite.configured" @click="deleteGovWebsite()">Delete website (revokes public_read)</button>
+    </div>
+  </div>
+
+  <!-- 6. Notifications -->
+  <div class="card" x-show="govTab==='notifications'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Notifications <span class="badge" :class="govNotify.enabled?'badge-green':'badge-gray'" x-text="govNotify.enabled?'enabled':'disabled'"></span></h3>
+        <p class="muted">Object mutations enqueue outbox rows and a retry worker POSTs them to an owner-approved HTTP(S) webhook.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovNotify()">Reload</button>
+    </div>
+    <div class="info mt-3"><strong>SQS, SNS and Lambda are not supported.</strong> AWS queue/topic payloads cannot honestly exist over a private Telegram gateway, so those XML elements fail closed with 501. This is a real webhook fan-out, not an AWS queue integration.</div>
+    <div class="field mt-3">
+      <label>Webhook URL <span class="hint" data-tip="Must be an exact origin or path prefix from storage.notification_destinations (owner-managed). Unknown destinations are rejected with AccessDenied.">i</span></label>
+      <input class="input mono text-xs" x-model="govNotify.destination" placeholder="https://hooks.example.com/teledrive">
+      <p class="muted text-xs mt-1" x-show="govNotify.approved_destinations.length">Approved destinations: <span class="mono" x-text="govNotify.approved_destinations.join(', ')"></span></p>
+      <p class="muted text-xs mt-1" x-show="!govNotify.approved_destinations.length">No allowlist is configured (<code>storage.notification_destinations</code>); every webhook destination will be rejected until the owner adds one.</p>
+    </div>
+    <div class="field">
+      <label>Events <span class="badge badge-blue" x-text="govNotify.events.length + ' selected'"></span></label>
+      <div class="grid md:grid-cols-2 gap-x-6">
+        <template x-for="e in govNotify.events_available" :key="e">
+          <label class="flex items-center gap-2 text-sm py-1"><input type="checkbox" :value="e" x-model="govNotify.events"> <span class="mono text-xs" x-text="e"></span></label>
+        </template>
+      </div>
+    </div>
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="field"><label>Prefix filter (optional)</label><input class="input" x-model="govNotify.filter_prefix" placeholder="logs/"></div>
+      <div class="field"><label>Suffix filter (optional)</label><input class="input" x-model="govNotify.filter_suffix" placeholder=".json"></div>
+    </div>
+    <div class="row mt-3">
+      <label class="flex items-center gap-2 text-sm" style="flex:0 0 auto"><input type="checkbox" x-model="govNotify.enabled"> Deliver events</label>
+      <button class="btn btn-primary" x-show="isAdmin" @click="saveGovNotify()">Save notifications</button>
+      <span class="muted text-xs">Saving with "Deliver events" off sends an empty NotificationConfiguration.</span>
+    </div>
+  </div>
+
+  <!-- 7. Replication -->
+  <div class="card" x-show="govTab==='replication'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Replication <span class="badge" :class="govReplication.configured?'badge-green':'badge-gray'" x-text="govReplication.configured?'configured':'not configured'"></span></h3>
+        <p class="muted">AWS-shaped rules over the existing TeleDrive cross-account replica engine.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovReplication()">Reload</button>
+    </div>
+    <div class="info mt-3">A rule's destination is a <strong>configured Telegram credential-set label</strong>, not an AWS bucket or ARN. The engine already keeps a second Telegram copy of every chunk in that account and repairs missing copies. One replica per chunk means <strong>enabled prefixes must be disjoint</strong>; overlap is rejected with <code>InvalidRequest</code>. A stored configuration is authoritative: no enabled match means no replica (the operator-wide default does not apply).</div>
+    <div class="mt-3">
+      <table>
+        <thead><tr><th>Rule ID</th><th>Prefix</th><th>Destination label</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          <template x-for="(rule, i) in govReplication.rules" :key="i">
+            <tr>
+              <td><input class="input mono text-xs" x-model="rule.id"></td>
+              <td><input class="input mono text-xs" x-model="rule.prefix" placeholder="logs/"></td>
+              <td>
+                <select class="input" x-model="rule.destination">
+                  <option value="">(select an account)</option>
+                  <template x-for="d in govReplication.destinations" :key="d">
+                    <option :value="d" x-text="d"></option>
+                  </template>
+                </select>
+              </td>
+              <td>
+                <select class="input" x-model="rule.status">
+                  <option value="Enabled">Enabled</option>
+                  <option value="Disabled">Disabled</option>
+                </select>
+              </td>
+              <td><button class="btn btn-danger btn-sm" x-show="isAdmin" @click="removeGovReplicationRule(i)">Remove</button></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <p class="muted text-xs mt-2" x-show="!govReplication.destinations.length">No Telegram account labels are configured. Add/authorize an account under Settings → Telegram; the replica engine needs a second account to copy to.</p>
+    </div>
+    <div class="row mt-3">
+      <button class="btn btn-sm" x-show="isAdmin" @click="addGovReplicationRule()">+ Add rule</button>
+      <button class="btn btn-primary" x-show="isAdmin" @click="saveGovReplication()">Save replication</button>
+      <button class="btn btn-danger" x-show="isAdmin && govReplication.configured" @click="deleteGovReplication()">Delete configuration</button>
+    </div>
+  </div>
+
+  <!-- 8. Intelligent-Tiering -->
+  <div class="card" x-show="govTab==='tiering'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Intelligent-Tiering <span class="badge badge-blue" x-text="govTiering.configs.length + ' configuration(s)'"></span></h3>
+        <p class="muted">A real access gate in the SQL catalog, evaluated by the tiering scheduler.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovTiering()">Reload</button>
+    </div>
+    <div class="warn mt-3"><strong>This is not Glacier.</strong> No Telegram bytes move, are copied, compressed or deleted. An archived object answers <code>403 InvalidObjectState</code> until a RestoreObject opens a bounded read window; the chunks stay on Telegram for the whole lifecycle.</div>
+
+    <div class="mt-4" x-show="govTiering.configs.length">
+      <table>
+        <thead><tr><th>Id</th><th>Status</th><th>Prefix</th><th>Tiers (days)</th><th></th></tr></thead>
+        <tbody>
+          <template x-for="c in govTiering.configs" :key="c.id">
+            <tr>
+              <td class="mono text-xs" x-text="c.id"></td>
+              <td><span class="badge" :class="c.status==='Enabled'?'badge-green':'badge-gray'" x-text="c.status"></span></td>
+              <td class="mono text-xs" x-text="c.prefix||'(all objects)'"></td>
+              <td class="text-xs" x-text="c.tiers.map(t => t.access_tier + ' after ' + t.days + 'd').join(', ')"></td>
+              <td class="whitespace-nowrap">
+                <button class="btn btn-sm" x-show="isAdmin" @click="govTieringEdit(c)">Edit</button>
+                <button class="btn btn-danger btn-sm" x-show="isAdmin" @click="deleteGovTiering(c)">Delete</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <template x-if="govTiering.form">
+    <div class="card mt-3" style="background:#0f172a">
+      <div class="grid md:grid-cols-3 gap-4">
+        <div class="field"><label>Configuration id</label><input class="input mono" x-model="govTiering.form.id" :readonly="govTiering.editing"></div>
+        <div class="field"><label>Status</label>
+          <select class="input" x-model="govTiering.form.status"><option value="Enabled">Enabled</option><option value="Disabled">Disabled</option></select>
+        </div>
+        <div class="field"><label>Prefix filter (optional)</label><input class="input mono" x-model="govTiering.form.prefix" placeholder="archive/"></div>
+      </div>
+      <h4>Tiers</h4>
+      <template x-for="(tier, i) in govTiering.form.tiers" :key="i">
+        <div class="row mb-2">
+          <div class="field" style="flex:0 0 140px;margin:0"><label>Days</label><input class="input" type="number" min="1" max="36500" x-model.number="tier.days"></div>
+          <div class="field" style="flex:0 0 260px;margin:0"><label>Access tier</label>
+            <select class="input" x-model="tier.access_tier">
+              <template x-for="t in govTiering.access_tiers" :key="t"><option :value="t" x-text="t"></option></template>
+            </select>
+          </div>
+          <button class="btn btn-danger btn-sm" @click="removeGovTierRow(i)">Remove</button>
+        </div>
+      </template>
+      <div class="row mt-2">
+        <button class="btn btn-sm" @click="addGovTierRow()">+ Add tier</button>
+        <button class="btn btn-primary" x-show="isAdmin" @click="saveGovTiering()">Save configuration</button>
+        <button class="btn btn-sm" x-show="isAdmin" @click="govTieringNew()">New configuration</button>
+      </div>
+      <p class="muted text-xs mt-2">DEEP_ARCHIVE_ACCESS days cannot precede ARCHIVE_ACCESS days. Any read below the archive threshold resets the object to STANDARD on the next scheduler pass.</p>
+    </div>
+    </template>
+  </div>
+
+  <!-- 9. Storage reports -->
+  <div class="card" x-show="govTab==='reports'" x-cloak>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <h3>Storage reports</h3>
+        <p class="muted">Analytics, inventory and metrics configuration CRUD (Phase N). A background runner writes real report objects.</p>
+      </div>
+      <button class="btn btn-sm" @click="loadGovReports()">Reload</button>
+    </div>
+    <div class="warn mt-3">
+      <strong>Documented deviations from AWS:</strong> the inventory CSV is gzip and its ETag is the stored object's SHA-256; analytics is JSON Lines (not Parquet); metrics is computed locally and written under <code>reports/metrics/&lt;id&gt;/</code> — it is <strong>not</strong> delivered to CloudWatch. Schedules are Daily or Weekly only.
+    </div>
+
+    <template x-for="kind in govReports.kinds" :key="kind">
+      <div class="section">
+        <div class="flex items-center justify-between">
+          <h4 x-text="kind"></h4>
+          <button class="btn btn-sm" x-show="isAdmin" @click="govReportNew(kind)">+ New <span x-text="kind"></span></button>
+        </div>
+        <table>
+          <thead><tr><th>Id</th><th>Schedule</th><th>Destination</th><th>Prefix</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="c in govReports.reports[kind]" :key="c.id">
+              <tr>
+                <td class="mono text-xs" x-text="c.id"></td>
+                <td x-text="c.schedule||'-'"></td>
+                <td class="text-xs" x-text="c.destination ? (c.destination.bucket + (c.destination.prefix ? '/' + c.destination.prefix : '') + ' (' + (c.destination.format||'?') + ')') : 'analyzed bucket (local JSON)'"></td>
+                <td class="mono text-xs" x-text="c.prefix||'-'"></td>
+                <td class="whitespace-nowrap">
+                  <button class="btn btn-sm" x-show="isAdmin" @click="govReportEdit(kind, c)">Edit</button>
+                  <button class="btn btn-danger btn-sm" x-show="isAdmin" @click="deleteGovReport(kind, c)">Delete</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <p class="muted text-xs" x-show="!govReports.reports[kind].length">No <span x-text="kind"></span> configuration.</p>
+      </div>
+    </template>
+
+    <template x-if="govReportForm">
+    <div class="card mt-3" style="background:#0f172a">
+      <div class="flex items-center justify-between">
+        <h3 x-text="'Report configuration · ' + govReportForm?.kind"></h3>
+        <button class="btn btn-ghost btn-sm" @click="govReportForm=null">Cancel</button>
+      </div>
+      <div class="grid md:grid-cols-3 gap-4 mt-2">
+        <div class="field"><label>Id</label><input class="input mono" x-model="govReportForm.id"></div>
+        <div class="field" x-show="govReportForm?.kind!=='metrics'"><label>Schedule</label>
+          <select class="input" x-model="govReportForm.schedule"><option value="Daily">Daily</option><option value="Weekly">Weekly</option></select>
+        </div>
+        <div class="field"><label>Prefix filter (optional)</label><input class="input mono" x-model="govReportForm.prefix"></div>
+      </div>
+      <div class="grid md:grid-cols-3 gap-4" x-show="govReportForm?.kind!=='metrics'">
+        <div class="field"><label>Destination bucket</label>
+          <select class="input" x-model="govReportForm.destination.bucket">
+            <template x-for="b in buckets" :key="b.name"><option :value="b.name" x-text="b.name"></option></template>
+          </select>
+        </div>
+        <div class="field"><label>Destination prefix</label><input class="input mono" x-model="govReportForm.destination.prefix" placeholder="reports/inventory"></div>
+        <div class="field" x-show="govReportForm?.kind==='inventory'"><label>Format</label>
+          <select class="input" x-model="govReportForm.destination.format"><option value="CSV">CSV (only implemented format)</option></select>
+        </div>
+      </div>
+      <div class="row mt-2">
+        <label class="flex items-center gap-2 text-sm" style="flex:0 0 auto" x-show="govReportForm?.kind==='inventory'"><input type="checkbox" x-model="govReportForm.enabled"> Enabled</label>
+        <button class="btn btn-primary" x-show="isAdmin" @click="saveGovReport()">Save configuration</button>
+      </div>
+      <p class="muted text-xs mt-2" x-show="govReportForm?.kind==='metrics'">Metrics has no destination in AWS (CloudWatch is the sink). TeleDrive writes the JSON metrics document to the analyzed bucket under <code>reports/metrics/&lt;id&gt;/</code>.</p>
+    </div>
+    </template>
+  </div>
+
+</section>
+</main>
+</div>
+</div>
+
+<script src="/static/app.js"></script>
+</body></html>

@@ -1165,3 +1165,22 @@ def test_pyproject_declares_every_runtime_import_used_at_module_load():
             f"{package} is imported at module load but not declared in "
             f"pyproject dependencies"
         )
+
+
+def test_schema_ensure_caches_are_not_id_keyed():
+    """An id()-keyed 'engine already initialised' cache is unsound.
+
+    id() values are reused after the object is garbage collected, so a
+    brand-new engine can be mistaken for one whose tables were created,
+    silently skipping create_all and failing later with a missing table.
+    That presented as an intermittent route-guard failure under xdist.
+    """
+    for name in ("tiering", "metadata_journal", "annotations",
+                 "notifications", "report_configs"):
+        source = (ROOT / "teledrive/s3" / f"{name}.py").read_text("utf-8")
+        assert "id(engine)" not in source, (
+            f"{name}.py keys its schema cache on id(engine)"
+        )
+        assert "WeakSet()" in source, (
+            f"{name}.py should track initialised engines in a WeakSet"
+        )

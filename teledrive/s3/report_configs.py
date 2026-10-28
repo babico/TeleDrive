@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import weakref
 import time
 from xml.etree import ElementTree as ET
 
@@ -84,7 +85,7 @@ report_configs = Table(
     Column("last_error", Text),
 )
 
-_ENSURED_ENGINES: set[int] = set()
+_ENSURED_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
 _ENSURED_LOCK = threading.Lock()
 
 
@@ -100,12 +101,11 @@ def ensure_report_tables(engine) -> None:
     Called from application startup and from the store constructor — never
     from a catalog mutation transaction (that path deadlocks SQLite).
     """
-    key = id(engine)
     with _ENSURED_LOCK:
-        if key in _ENSURED_ENGINES:
+        if engine in _ENSURED_ENGINES:
             return
         report_metadata.create_all(engine, tables=[report_configs])
-        _ENSURED_ENGINES.add(key)
+        _ENSURED_ENGINES.add(engine)
 
 
 def _name(node) -> str:

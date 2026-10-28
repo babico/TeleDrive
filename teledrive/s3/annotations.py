@@ -39,6 +39,7 @@ import hmac
 import json
 import re
 import threading
+import weakref
 import time
 from email.utils import formatdate
 from xml.etree import ElementTree as ET
@@ -73,7 +74,7 @@ annotations = Table(
 )
 
 _ENSURED_LOCK = threading.Lock()
-_ENSURED_ENGINES: set[int] = set()
+_ENSURED_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
 
 
 def ensure_annotation_tables(engine) -> None:
@@ -84,12 +85,11 @@ def ensure_annotation_tables(engine) -> None:
     mutation: Phase J proved that DDL inside a write transaction deadlocks
     SQLite against the caller's lock.
     """
-    key = id(engine)
     with _ENSURED_LOCK:
-        if key in _ENSURED_ENGINES:
+        if engine in _ENSURED_ENGINES:
             return
         annotation_metadata.create_all(engine, tables=[annotations])
-        _ENSURED_ENGINES.add(key)
+        _ENSURED_ENGINES.add(engine)
 
 
 class AnnotationError(ValueError):

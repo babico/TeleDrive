@@ -6,7 +6,9 @@
 > commands and CI contracts, see [CI and Test Guide](docs/CI_WORKFLOWS.md).
 > Product/feature analysis that produced the roadmap phases:
 > `.opencode/teledrive/10x/session-1.md` (git-ignored).
-> Last audited: 2026-10-26 (base SHA `9c4769d`; all six automatic CI workflows green on that exact commit).
+> Last audited: 2026-10-28 (tree at `45d40ff`). The last all-six-automatic-workflows
+> green run recorded here is on `9c4769d`; later commits carry their own test
+> evidence in their commit messages and must not inherit that green status.
 
 ---
 
@@ -296,6 +298,11 @@ come from simply authorizing more accounts.
       items (per-op exhaustive normal/malformed/retry/race/crash
       coverage, both-DB mutation invariants, migration/rollback docs)
       stay tracked in the spec's engineering checklist.
+
+      Historical snapshot: that paragraph quotes the counts at the time it
+      was written. The metadata-parity and full-coverage phases superseded
+      them; the current inventory is **93 supported / 7 partial (all by
+      design) / 16 unsupported** (§13).
 - [ ] Extend trustworthy recovery of unknown original Telegram history beyond
       candidate markers without inventing metadata.
 - [ ] Establish longer-duration real-environment capacity benchmarks on
@@ -430,7 +437,7 @@ dependency order, each independently shippable; A and B first.
       when re-enabled. versioning-model is a RESOLVED design reason —
       2 operations promoted to Supported. Inventory: **29 supported /
       27 partial (0 by code) / 60 unsupported**.
-- [x] **Phase C — object lock** (commit pending): retention_until_ns/
+- [x] **Phase C — object lock** (`839687c`): retention_until_ns/
       legal_hold columns on storage_objects (defensive ALTER),
       object_lock_enabled + default mode/days on storage_buckets;
       bucket-level one-way enable (lock can never be disabled, default
@@ -444,7 +451,7 @@ dependency order, each independently shippable; A and B first.
       (no governance-elevation model). 6 operations promoted
       (3 partial conversions + 3 P2-B writes). Inventory: **35
       supported / 24 partial (0 by code) / 57 unsupported**.
-- [x] **Phase D — ACL grants** (commit pending):
+- [x] **Phase D — ACL grants** (`2f0b2ed`):
       storage_bucket_acl_grants + storage_object_acl_grants (grantee =
       CanonicalUser access key, READ/WRITE/FULL_CONTROL; owner implicit
       FULL_CONTROL row). PutBucketAcl/PutObjectAcl replace the stored
@@ -462,8 +469,8 @@ dependency order, each independently shippable; A and B first.
       credentials denied at auth. 4 operations promoted (2 partial
       conversions + 2 P2-C writes). Inventory: **39 supported / 22
       partial (0 by code) / 55 unsupported**.
-- [x] **Phase E — PAB/policy status/ownership controls** (commit
-      pending): storage_buckets.public_access_block (4 boolean JSON,
+- [x] **Phase E — PAB/policy status/ownership controls** (`6c30715`):
+      storage_buckets.public_access_block (4 boolean JSON,
       default all-true; defensive ALTER) + object_ownership
       (BucketOwnerEnforced). PutPublicAccessBlock persists any flag
       combination (deliberate owner decision); BlockPublicAcls=on
@@ -476,7 +483,7 @@ dependency order, each independently shippable; A and B first.
       persisted ownership state from bucket metadata; ownership
       writes fail closed 501. 4 operations promoted. Inventory: **43
       supported / 18 partial (0 by code) / 55 unsupported**.
-- [x] **Phase F — notifications + logging** (commit pending): real
+- [x] **Phase F — notifications + logging** (`8b1bf9e`): real
       per-bucket webhook notification config (SQL, encrypted secret,
       owner-approved HTTP(S) destinations only — SQS/SNS/Lambda return an
       honest 501) and a transactional event outbox written in the SAME
@@ -493,7 +500,7 @@ dependency order, each independently shippable; A and B first.
       path deadlocked SQLite against the caller's write lock. 6
       operations promoted. Inventory: **54 supported / 12 partial (0 by
       code) / 50 unsupported**.
-- [x] **Phase G — replication API surface** (commit pending): real
+- [x] **Phase G — replication API surface** (`ef19ee3`): real
       per-bucket replication config mapped onto the EXISTING
       storage-engine cross-account replication — `Destination/Bucket`
       names a configured TeleDrive credential set, never an AWS ARN;
@@ -505,7 +512,7 @@ dependency order, each independently shippable; A and B first.
       IAM). GET returns the real config or an honest 404. 3 operations
       promoted. Inventory: **48 supported / 15 partial (0 by code) / 53
       unsupported**.
-- [x] **Phase I — website hosting** (commit pending): per-bucket
+- [x] **Phase I — website hosting** (`38209bc`): per-bucket
       index/error documents in `storage_website_configs`, served
       anonymously at `/site/{bucket}/...` ONLY when the bucket's
       `public_read` gate is on — a default-false column that only an
@@ -519,7 +526,7 @@ dependency order, each independently shippable; A and B first.
       RedirectAllRequestsTo/RoutingRules return an honest 501. 3
       operations promoted. Inventory: **60 supported / 8 partial (0 by
       code) / 48 unsupported**.
-- [x] **Phase H — CORS grammar widening** (commit pending): one `*`
+- [x] **Phase H — CORS grammar widening** (`fd25e52`): one `*`
       anywhere in the host (`*.example.com`, `api-*.example.com`)
       matching exactly one DNS label — never a dot, slash or scheme, so
       a lookalike suffix can never be echoed; the complete method set
@@ -530,7 +537,7 @@ dependency order, each independently shippable; A and B first.
       policy only, never authentication. 2 operations promoted.
       Inventory: **45 supported / 16 partial (0 by code) / 55
       unsupported**.
-- [x] **Phase J — tagging scope** (commit pending): deferred tag
+- [x] **Phase J — tagging scope** (`cac820b`): deferred tag
       journal. `Put/DeleteObjectTagging` on the current head's pending
       generation now journals into `storage_pending_tags` instead of
       refusing; `BucketCatalog.publish` applies the journal in the SAME
@@ -541,17 +548,36 @@ dependency order, each independently shippable; A and B first.
       version revocation, physical GC collection and bucket deletion.
       3 operations promoted. Inventory: **57 supported / 9 partial (0 by
       code) / 50 unsupported**.
-- [ ] **Full S3 coverage plan (56 kalan operasyon)** — see
+- [x] **Full S3 coverage plan — phases L, N and O** (`4831a67`, fixed
+      by `2e461d1`): policy engine + ABAC + real ownership models (8
+      ops), analytics/inventory/metrics configurations with real report
+      generation (12 ops), and rename/select/restore/annotations plus
+      the only-real-state RequestPayment/Accelerate writes (9 ops). 29
+      operations promoted. Inventory: **89 supported / 7 partial (all by
+      design) / 20 unsupported**.
+- [x] **Phase N5 + O1 — access tracking, tiering and RestoreObject**
+      (`f341691`, wire shape fixed by `45d40ff`): real access counters,
+      a scheduler that transitions `storage_class`, a 403
+      `InvalidObjectState` gate on archived objects and a bounded restore
+      window. No Telegram byte moves; documented as an access gate, not
+      Glacier. Inventory: **93 supported / 7 partial / 16 unsupported**.
+- [ ] **Full S3 coverage plan — remaining phases** — see
       [S3_FULL_COVERAGE_PLAN.md](docs/S3_FULL_COVERAGE_PLAN.md).
-      Every remaining operation has a concrete honest backing; only 4 are
-      permanently impossible (BitTorrent swarm, S3 Express directory
-      buckets, Object Lambda). Target: **112 supported / 0 partial / 4
-      unsupported**. Phases: L policy engine (8 op, ~6d), M SSE-C/SSE-S3
-      (8 op, ~8d), N reporting configs + real report generation (16 op,
-      ~9d), O easy real wins incl. annotations, metadata journal, atomic
-      rename, S3 Select, RestoreObject and the only-real-state
-      RequestPayment/Accelerate (20 op, ~9d). Recommended order by
-      value/effort: O2+O6 → L → N1-3 → M → O3 → N5+O1 → O4+O5+N4.
+      Still open: O3 bucket metadata journal (9 ops) and M1
+      SSE-C/SSE-S3 (8 ops, `PutBucketEncryption` pair and
+      `UpdateObjectEncryption`). The plan quotes a target of **112
+      supported / 0 partial / 4 unsupported**; note that
+      RequestPayment and Accelerate are listed there as kept by design,
+      so the honest reachable end state is 110 supported / 2 partial / 4
+      unsupported unless those two read probes are also promoted. The 4
+      permanently impossible operations (BitTorrent swarm, S3 Express
+      directory buckets, Object Lambda) stay unsupported.
+- [ ] **S3 governance WebUI page (`/s3/governance`)** — one page over the
+      SQL state the API already uses: policy, ownership, PAB, object-lock
+      defaults, website gate, notifications, replication, tiering and
+      report configurations. It is being built in parallel; the README
+      describes it as the intended surface. Nothing on the S3 API depends
+      on it.
 - [ ] **Phase K — SSE envelope** (owner decision, conflicts with
       dedup/replication/search). Converts 1.
 - Kept by-design forever: RequestPayment, Accelerate — no honest
@@ -716,6 +742,72 @@ dependency order, each independently shippable; A and B first.
       it with select-all/category shortcuts and a collapsible legacy
       section. A drift test proves every require_api_scope call site
       uses a registered permission.
+
+## 14. Remaining work after 1.0.8
+
+Nothing here is required for the release to be correct; it is the honest
+backlog that the release notes link to.
+
+### 14.1 Open refactor backlog
+
+[Codebase Review](docs/CODEBASE_REVIEW.md) §4 lists fifteen items. Items 1, 2, 3, 5 and 6 are closed with regression tests
+(`9c4769d` for the key-delegation ceiling, the batch/copy ACL gate, the
+admin-only GC gate and the immutable ACL owner; `4365694` for audit identity
+spoofing). The rest are still open:
+
+- [ ] **#4 Bucket delete leaves orphan metadata** — `delete_bucket` does not
+      remove `storage_bucket_acl_grants`, `storage_object_acl_grants`,
+      `bucket_quotas`, `bucket_account_pins` or `share_links`. Re-creating a
+      bucket with the same name can revive old grants. This is a security
+      bug, not cosmetics (O10).
+- [ ] **#7 Schema init race and scattered migrations** — every store
+      constructor calls `create_all` outside the schema lock, and manual
+      ALTERs stand in for a migration system. See 14.2.
+- [ ] **#8 MySQL SQL leaks** — `ON CONFLICT` in the quota and pin upserts
+      and `INSERT OR IGNORE` in the reindex path still fail on MySQL,
+      although README and CI list MySQL as supported (O9).
+- [ ] **#9 Three permission catalogs** — `ENDPOINT_PERMISSIONS`,
+      `CURATED_PERMISSIONS` and handler string literals still duplicate the
+      same nine REST permissions.
+- [ ] **#10 Canonical `Principal`/`authorize`** — the session, Basic, bearer
+      and S3 paths remain separate decision points.
+- [ ] **#11 Split `web/app.py`** — still one large router module.
+- [ ] **#12 Split `web/s3.py`** — dispatch still lives in one file.
+- [ ] **#13 Raw `text()` in `web/app.py`** — users, sessions, quota, pin and
+      share still bypass a store layer.
+- [ ] **#14 Missing indexes/FKs** — `aliases.source_object_id` and the
+      version/bucket FKs are still unindexed or absent.
+- [ ] **#15 Dead/duplicate helpers in `user_mode.py`** —
+      `_session_from_file` and the first `_session_from_file_for` remain
+      defined and unused.
+
+### 14.2 Schema-initialisation race (O4/O6)
+
+[Codebase Review](docs/CODEBASE_REVIEW.md) files this as **O6** in §2.2
+("schema-init race") and as **O4** in the §0.1 status table; both names
+refer to the same defect. Only `_setup_schema` takes a PostgreSQL advisory
+lock. `BucketCatalog`, `ManifestStore`, `StorageUploadJobs`, `ApiKeyStore`,
+`S3CredentialStore`, `MultipartStore`, `MtprotoRateGuard`,
+`UserSessionRuntime` and `RetainedMediaGC` all call `create_all` outside it,
+and `ensure_versioning_column` is guarded only by a process-local flag. Two
+workers starting together can race `CREATE TABLE` and a double `ALTER TABLE`.
+This needs a migration baseline and a cross-process lock, not a patch.
+
+### 14.3 Open design decisions
+
+Both change the backward-compatibility contract, so neither was fixed
+silently.
+
+- [ ] **P5 — session/bearer asymmetry.** A viewer session can read every GET
+      API route, while an API key for the same user needs an explicit
+      permission per route. "Viewer" therefore means two different things.
+      The decision is whether sessions should shrink to the route
+      permission set or bearer keys should gain a role-derived default.
+- [ ] **P6 — legacy HTTP Basic is unconditional admin.** The configured
+      `web.user`/`web.password` bypasses the database user and role system.
+      Keeping it for scripts is defensible, but it needs a separate
+      principal identity and an additional guard on admin-only routes, or
+      removal.
 
 ## 11. Release decision rules
 

@@ -20,6 +20,8 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 | [Reverse Proxy](docs/REVERSE_PROXY.md) | nginx/Caddy/Traefik TLS termination, SigV4 Host rules, bucket path-style vs virtual-hosted, upload size limits |
 | [Contributing](CONTRIBUTING.md) | Development workflow and documentation rules |
 | [S3 Compatibility Matrix](docs/S3_SPECS.md) | 116-operation status matrix, supported limits and P2 advanced implementation roadmap |
+| [Upgrading to 1.0.8](docs/UPGRADING.md) | Breaking changes for existing deployments: env-only ports/TLS, settings in SQL, ownership default, new S3 scopes |
+| [Changelog](CHANGELOG.md) | What changed in each version and why it mattered |
 | [Local Agent Acceptance Mission](docs/LOCAL_AGENT_ACCEPTANCE.md) | Docker test installation, real bytes, independent recovery and GC safety acceptance, with owner-only gates |
 | [TODO and Roadmap](TODO.md) | The single prioritized plan: completed milestones, roadmap phases, S3 parity track and owner gates |
 
@@ -38,7 +40,7 @@ cp config.example.yaml config/config.yaml   # optional tidy template
 chmod 600 .env config/config.yaml
 ~~~
 
-Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. Settings persist in SQL: `config/config.yaml` seeds the database on first start, and after that the encrypted `service_settings` row is authoritative (a UI save survives a rebuild from an older mounted file; an undecryptable row falls back to the file). Deployment plumbing stays in the environment: `.env` holds `PUID`/`PGID`/`TZ`, the port/bind mapping (`TELEDRIVE_WEB_PORT`, `TELEDRIVE_S3_PORT`, `TELEDRIVE_BIND_ADDRESS`). Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session before or after starting Docker: either run the interactive helper in [Section 4](#4-s3-compatible-api) on a trusted host, or use the **Storage** page in the WebUI, which walks through the Telegram code request/verification interactively. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
+Authentication is **token-based**: on first start the service creates a default administrator with username `admin` and password `admin`. Log in once at [`http://127.0.0.1:8080/login`](http://127.0.0.1:8080/login) and **change that password immediately** in **Users** (or via `PUT /api/v1/admin/users/{user_id}/password`) — the default is public knowledge and must not survive first contact with any shared network. Settings persist in SQL: `config/config.yaml` seeds the database on first start, and after that the encrypted `service_settings` row is authoritative (a UI save survives a rebuild from an older mounted file; an undecryptable row falls back to the file). Deployment plumbing stays in the environment: `.env` holds `PUID`/`PGID`/`TZ`, the port/bind mapping (`TELEDRIVE_WEB_PORT`, `TELEDRIVE_S3_PORT`, `TELEDRIVE_BIND_ADDRESS`) and the optional per-listener TLS paths. Adjust `PUID` and `PGID` to match the owner of the mounted directories. The service creates `config/config.yaml` with safe defaults on first start (or copy the tidy [`config.example.yaml`](config.example.yaml) template); add your authorized USER MTProto credentials there under the **`storage:`** section as an `apis:` list (see [Telethon USER Storage](docs/TELETHON_STORAGE.md)) — one or more `api_id`/`api_hash`/`session_file` sets sharing the same dedicated channel, with `round_robin` (default) or `failover` rotation. Create the private session before or after starting Docker: either run the interactive helper in [Section 4](#4-s3-compatible-api) on a trusted host, or use the **Storage** page in the WebUI, which walks through the Telegram code request/verification interactively. Without an authorized session, initial health/admin endpoints may run, but binary uploads fail closed.
 
 ~~~bash
 docker compose up -d --build
@@ -156,7 +158,7 @@ The default REST upload ceiling is 2 GiB, configurable with `web.rest_max_upload
 
 ## 4. S3-compatible API
 
-For the **116-operation AWS S3 API compatibility matrix**, parameter-level limitations, unsupported-operation groups, and the P2 Advanced S3 work plan, see [S3 Specifications](docs/S3_SPECS.md).
+For the **116-operation AWS S3 API compatibility matrix**, parameter-level limitations, unsupported-operation groups, and the P2 Advanced S3 work plan, see [S3 Specifications](docs/S3_SPECS.md). That document is the authoritative inventory: at the time of this release it records **93 supported, 7 partial (all by design) and 16 unsupported operations**. Count operations, not request permutations, and treat every partial as partial.
 
 The S3 endpoint is **part of the default container**, not a separate Compose profile. It implements a tested **subset** of S3 over the shared Telegram-backed catalog. It is **not AWS S3 feature parity**.
 
@@ -226,13 +228,46 @@ assert client.get_object(Bucket="backup-bucket", Key="hello.txt")["Body"].read()
 | Buckets and listing | Create/Head/DeleteBucket; V1/V2 object listing, prefixes, delimiters, marker/continuation and URL encoding |
 | Objects | Put/Get/Head/Delete (logical unlink), Range, CopyObject, conditional GET/HEAD and signed conditional writes/deletes |
 | Multipart | UploadPart, Complete/Abort and guarded stale-completion recovery through an admin-only API |
-| Metadata and versions | Selected published VersionId reads/listing, always-Enabled versioning, fixed private-only Public Access Block and incomplete-MPU lifecycle abort rules, object/bucket tags, metadata, CopySource, CORS and GetObjectAttributes (`ETag`, `ObjectSize`, full-object SHA-256 `Checksum`, `STANDARD`, historical `VersionId`, immutable multipart `ObjectParts` with bounded pagination) |
+| Metadata and versions | Published and delete-marker versions, Enabled/Suspended bucket versioning, object lock with retention and legal hold, Public Access Block, bucket policies and ABAC, ACL grants, object/bucket tags with a deferred journal for in-flight uploads, metadata, CopySource, CORS, website documents behind an admin gate, notifications, replication configuration, GetObjectAttributes (`ETag`, `ObjectSize`, full-object SHA-256 `Checksum`, `STANDARD`, historical `VersionId`, immutable multipart `ObjectParts` with bounded pagination) |
+| Reports and tiering | Analytics, inventory and metrics configuration with real generated output into a destination bucket; intelligent-tiering backed by real access counting and a restore gate. Every deviation from the AWS output format is documented in the module and in the spec |
 | Checksums | SHA-256, SHA-1, Content-MD5, CRC32, CRC32C and CRC64NVME validation where explicitly implemented |
-| Known gaps | Object lifecycle expiration/transitions, bucket policies, SSE, full AWS delete-marker semantics, every multipart POST variant and unverified clients |
+| Known gaps | SSE-S3/SSE-KMS/SSE-C, requester-pays billing, transfer acceleration, directory buckets, Object Lambda and BitTorrent export; exhaustive per-operation crash/race coverage and unverified clients. Physical Telegram GC remains an owner-gated decision |
 
 **Safety:** `UNSIGNED-PAYLOAD` writes are accepted only when an appropriately **signed, verifiable** checksum binds the actual received bytes. Public ACLs and unsupported archival tiers must not be inferred from AWS-style parameters. Failed conditional publications may retain protected, unpublished Telegram manifests rather than deleting uncertain remote media.
 
 S3 client integrations tested in CI use **real** AWS CLI and rclone executables against the actual gateway and SQL with **synthetic Telegram transport**; real Telegram byte transfer is tested in separate live E2E workflows. For rclone use `type=s3`, `provider=Other`, `force_path_style=true` and your issued S3 key pair. Create buckets first if `no_check_bucket=true`.
+
+### S3 governance from the WebUI
+
+`/s3/governance` is the intended single place to manage bucket governance
+without an S3 client: bucket policy and ABAC, object ownership, Public
+Access Block, object-lock defaults, website hosting, notifications,
+replication, the intelligent-tiering configuration and the
+analytics/inventory/metrics reports. The page is built alongside this
+release; until it ships, the same state is managed through the S3 API. It
+is intended to write the same SQL state the S3 API reads, so there is no
+second configuration store. Destructive or exposing actions (the website
+public-read gate, physical GC) stay admin-only and are audit-logged.
+
+### Client certificate bootstrap
+
+A self-signed deployment can hand out its own certificate before a client
+can log in. Both routes are unauthenticated, because a certificate is public
+data and requiring a login over the TLS connection being bootstrapped would
+deadlock:
+
+| Path | Format | Use |
+| --- | --- | --- |
+| `/server.cer` | DER | Windows certificate import |
+| `/server.crt` | PEM chain | `curl --cacert`, `AWS_CA_BUNDLE`, non-Windows clients |
+
+Only certificate blocks are served; the private key in a combined `.pem` is
+stripped. On Windows, download `/server.cer`, open it, choose **Install
+Certificate → Local Machine → Trusted Root Certification Authorities**, then
+restart the client. Per-application "ignore certificate" switches are
+unreliable for bucket listing. Full certificate, proxy and client
+configuration details are in [Reverse Proxy](docs/REVERSE_PROXY.md#client-configuration-examples). The Settings page also
+has a **TLS certificate** card with both download links.
 
 ### Bucket quotas
 

@@ -58,6 +58,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import weakref
 import time
 from xml.etree import ElementTree as ET
 
@@ -88,7 +89,7 @@ tiering_configs = Table(
     Column("updated_ns", BigInteger, nullable=False),
 )
 
-_ENSURED_ENGINES: set[int] = set()
+_ENSURED_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
 _ENSURED_LOCK = threading.Lock()
 
 
@@ -100,12 +101,11 @@ class TieringError(ValueError):
 
 def ensure_tiering_tables(engine) -> None:
     """Create the tiering table once per engine (never in a hot mutation)."""
-    key = id(engine)
     with _ENSURED_LOCK:
-        if key in _ENSURED_ENGINES:
+        if engine in _ENSURED_ENGINES:
             return
         tiering_metadata.create_all(engine, tables=[tiering_configs])
-        _ENSURED_ENGINES.add(key)
+        _ENSURED_ENGINES.add(engine)
 
 
 # -- strict XML parser ----------------------------------------------------

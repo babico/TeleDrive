@@ -73,6 +73,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import weakref
 import time
 from xml.etree import ElementTree as ET
 
@@ -145,7 +146,7 @@ metadata_configs = Table(
     Column("updated_ns", BigInteger, nullable=False),
 )
 
-_ENSURED_ENGINES: set[int] = set()
+_ENSURED_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
 _ENSURED_LOCK = threading.Lock()
 _LOGGER = logging.getLogger("teledrive.s3.metadata_journal")
 
@@ -164,13 +165,12 @@ def ensure_metadata_tables(engine) -> None:
     the caller's write transaction holds SQLite's lock deadlocks (the same
     failure mode Phase J fixed for the pending-tag journal).
     """
-    key = id(engine)
     with _ENSURED_LOCK:
-        if key in _ENSURED_ENGINES:
+        if engine in _ENSURED_ENGINES:
             return
         metadata_journal_metadata.create_all(
             engine, tables=[metadata_configs, metadata_journal])
-        _ENSURED_ENGINES.add(key)
+        _ENSURED_ENGINES.add(engine)
 
 
 # --------------------------------------------------------------------------

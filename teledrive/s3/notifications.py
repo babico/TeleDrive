@@ -31,6 +31,7 @@ import http.client
 import json
 import logging
 import threading
+import weakref
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -119,7 +120,7 @@ logging_configs = Table(
 
 _CONFIG_TABLES = (notification_configs, logging_configs)
 _ALL_TABLES = (notification_configs, event_outbox, logging_configs)
-_ENSURED_ENGINES: set[int] = set()
+_ENSURED_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
 _ENSURED_LOCK = threading.Lock()
 
 
@@ -437,13 +438,12 @@ def _payload(event_type: str, bucket: str, key: str,
 
 def ensure_notification_tables(engine) -> None:
     """Create notification tables once per engine (idempotent)."""
-    key = id(engine)
     with _ENSURED_LOCK:
-        if key in _ENSURED_ENGINES:
+        if engine in _ENSURED_ENGINES:
             return
         catalog_metadata.create_all(engine, tables=_CONFIG_TABLES)
         outbox_metadata.create_all(engine, tables=[event_outbox])
-        _ENSURED_ENGINES.add(key)
+        _ENSURED_ENGINES.add(engine)
 
 
 def enqueue_event(connection, *, event_type: str, bucket: str, object_key: str,

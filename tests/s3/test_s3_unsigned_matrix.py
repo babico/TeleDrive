@@ -215,3 +215,52 @@ def test_an_unsigned_request_is_rejected_and_changes_nothing(service, operation)
     head = signed(service, "HEAD", K)
     assert head.headers["content-length"] == str(len(b"auth-matrix-bytes"))
     assert telegram.uploads == uploads_before
+
+
+def test_batch_version_delete_queues_media_for_gc(service):
+    """The batch-delete GC enqueue must actually run.
+
+    `RetainedMediaGC(db)` referenced an unbound name in this function, and a
+    bare `except Exception: pass` swallowed the NameError -- so the
+    "queue the revoked version's media" step had never executed and media was
+    reclaimed only by a later broad sweep. An ImportError-free reference is
+    not enough: the queue row is the observable outcome.
+    """
+    from sqlalchemy import text
+    client, _creds, _telegram, connection, _key = service
+    assert signed(service, "PUT", B).status_code == 200
+    assert signed(service, "PUT", K, b"gc-queue-bytes").status_code == 200
+
+    db = connection()
+    try:
+        oid = db.connection.execute(text(
+            "SELECT object_id FROM storage_object_heads WHERE bucket = :b"),
+            {"b": "auth-bucket"}).scalar_one()
+        # Physical GC must be enabled for the enqueue to happen at all.
+        db.connection.execute(text(
+            "INSERT INTO storage_gc_state (id, enabled, updated_ns, updated_by) "
+            "VALUES (1, :e, :n, 'test') "
+            "ON CONFLICT (id) DO UPDATE SET enabled = :e"),
+            {"e": True, "n": 1})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    body = (
+        "<Delete><Object><Key>asset.bin</Key>"
+        f"<VersionId>{oid}</VersionId></Object></Delete>").encode()
+    import base64 as _b64
+    import hashlib as _hashlib
+    reply = signed(service, "POST", f"{B}?delete", body, extra_headers={
+        "Content-MD5": _b64.b64encode(
+            _hashlib.md5(body, usedforsecurity=False).digest()).decode()})
+    assert reply.status_code == 200, reply.text
+
+    db = connection()
+    try:
+        queued = db.connection.execute(text(
+            "SELECT COUNT(*) FROM storage_gc_queue WHERE object_id = :o"),
+            {"o": oid}).scalar_one()
+    finally:
+        db.close()
+    assert queued == 1, "the revoked version was never queued for collection"

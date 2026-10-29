@@ -280,6 +280,7 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
     """POST ?delete: multi-object delete with a DeleteObjects XML body."""
     request = ctx.request
     bucket = ctx.bucket
+    db = ctx.db
     catalog = ctx.catalog
     if bucket not in catalog.list_buckets():
         return _error("NoSuchBucket", "The specified bucket does not exist", 404)

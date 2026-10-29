@@ -10,7 +10,152 @@ the mandatory checks pass on the exact SHA.
 
 ## [Unreleased]
 
-Nothing yet.
+The security-hardening and refactor cycle that followed the 1.0.8 candidate.
+**Several of these are breaking**; `docs/UPGRADING.md` §7 lists the
+operator-visible consequences and the migration for each.
+
+### Security
+
+- **HTTP Basic and the config password are gone.** Removed, not restricted:
+  no code path reads `WEB_PASSWORD`, and `web.user`/`web.password`/
+  `web.password_file`/`web.allow_insecure` are stripped from an existing
+  config file or SQL document on read. Identity is the login-form session or
+  an API key. First boot creates a hardcoded `admin`/`admin` administrator in
+  code — never configurable, and never overwriting an existing `admin` row.
+- **The API-key delegation ceiling now covers lifetime.** A key could mint a
+  descendant with no expiry, and the descendant kept minting after the parent
+  was revoked. A child may now expire no later than its parent.
+- **`admin:*` is a real wildcard.** It expanded to only the nine curated REST
+  names, so the UI's "full access" preset was rejected on every admin route,
+  including rotating itself. It now covers the live route table (112
+  permissions), resolved at issue and check time so a later-added route
+  cannot retroactively widen an existing key.
+- **An S3 credential is an interactive-session surface.** Issue, edit,
+  revoke and reveal answer 403 to an API key. A key scoped to only that route
+  could otherwise mint a credential holding all 90 permissions and receive
+  its secret — a complete bypass of the delegation ceiling. Creating a
+  credential without a `permissions` list now grants a READ-ONLY set;
+  `PUT` enforces the same expiry bounds as `POST` and refuses to revive an
+  expired credential.
+- **Config writes cannot redirect the database.** `state.database_url`,
+  `state.db_path` and `state.db_extra_packages` are file-only: they can only
+  be changed by editing `config.yaml` on the server. The API used to accept
+  them, switch databases, and the startup bootstrap then created
+  `admin`/`admin` in the NEW database — a one-request takeover that also
+  orphaned the real data. Config writes are also interactive-session only.
+- **Config GET redacts by field name, recursively.** It used to leak
+  `storage.apis[*].session_string` and account `api_hash` to a viewer, which
+  is full control of the Telegram storage account.
+- **A deleted user's session cannot be inherited.** `user_sessions` has no
+  foreign key and SQLite reuses integer rowids, so an orphan session could
+  authenticate as a LATER account — verified end to end as a deleted viewer
+  becoming a newly created admin. Sessions are deleted in the same
+  transaction as the user, and the last *enabled* admin can no longer be
+  disabled.
+- **Share links are object-version-bound.** `share_links` pins `object_id`
+  (schema step 24), so a link serves exactly the version it was issued for:
+  it no longer re-targets replaced bytes, and it does not revive after an
+  unlink plus a re-upload. A failed request no longer consumes a download
+  slot, and the public response sends `Cache-Control: no-store`.
+- **Bucket policy globs are matched linearly.** `*` compiled to `.*` and ran
+  with `fullmatch`, so a short resource pattern against a long key was
+  catastrophic backtracking — measured over five seconds per request,
+  single-threaded, from a policy-writing credential. The same input is now
+  0.4 ms.
+- **A `Deny` on `s3:prefix` now covers a bare listing.** ListBucket's
+  documented defaults (`prefix`, `delimiter`, `max-keys`) were absent from
+  the policy context, so the Deny answered 403 for `?prefix=a` and 200 for a
+  bare `GET /bucket`, which enumerated everything.
+- **Credential secrets are audited durably.** New `security_audit_events`
+  table (schema step 25) and `GET /api/v1/admin/audit`, admin-only. It records
+  credential issue/edit/revoke/reveal, API-key issue/rotate, config writes,
+  user changes, physical GC start/finish, presign and share creation with
+  the actor and a scrubbed detail blob, and refuses to store anything shaped
+  like a credential. The in-memory log buffer is admin-only now.
+- **Object-lock, retention and legal hold cannot be weakened.** A suspended
+  bucket no longer removes a COMPLIANCE-retained head, multipart completion
+  and copy apply the destination bucket's default retention, and the
+  governance UI cannot erase the retention period or downgrade COMPLIANCE.
+- **The anonymous surfaces refuse what they cannot serve.** The public
+  website, the WebUI download button, `GET /share` and the REST read path all
+  apply the archive gate (403 `InvalidObjectState`) and refuse SSE-C objects
+  instead of answering `200` with zero bytes. The browser form upload parser
+  counts MIME boundaries before parsing (34 s of pre-auth CPU for a 3.5 MiB
+  body became 3 ms).
+- **Bucket delete no longer revives the previous bucket's rights.** It cleared
+  nine tables and left thirteen behind — bucket policy (including a `Deny`),
+  ABAC, SSE, replication, tiering, notification, logging, report configs,
+  quotas, account pins and public share links. Re-creating the name silently
+  restored all of them.
+
+### Fixed
+
+- **Physical GC no longer deletes media it cannot account for.** The
+  collector inserted a `storage_removed_versions` row that `delete_version`
+  had already written; the UNIQUE violation rolled its own record back AFTER
+  the Telegram messages were gone, leaving SQL saying `ready`. The safety
+  window also measured upload age rather than revocation age, so a version
+  revoked a second ago was immediately eligible. Both are fixed, and a
+  durable lease (schema step 23) serialises concurrent collectors.
+- **Replica copies are deleted.** The collector removed only the primary
+  Telegram messages and then dropped the replica rows, leaving a complete
+  second copy of a "deleted" object on another account forever.
+- **A conditional delete cannot destroy a newer object.** `publish` restarts
+  the generation counter at 1 when the head is absent, so `A@gen1 → unlink →
+  B@gen1` gave the same generation to a different object and
+  `DELETE ?generation=1` removed B. The unlink always fences on the object id.
+- **Versioned buckets keep history.** The REST unlink removed the head with no
+  marker and no journal entry; an Enabled bucket now writes a real delete
+  marker.
+- **The quota, pin and reindex writes work on MySQL.** `ON CONFLICT` and
+  `INSERT OR IGNORE` raised there, although the README and CI both promise
+  MySQL support. Upload jobs also bypassed the bucket quota entirely.
+- **The accelerate renderer emits `<Status>`.** It emitted the internal enum
+  name, so botocore — whose shape has exactly one member — parsed our
+  document into an empty dict and the SDK never saw the state.
+
+### Added
+
+- **114 supported / 0 partial / 2 unsupported S3 operations.** No partial by
+  code or by design. `ListDirectoryBuckets` answers the real AWS answer for a
+  deployment with no directory buckets (200, empty result), `CreateSession`
+  refuses truthfully per name class, and both accept the real `s3express`
+  SigV4 scope. The remaining two are permanently impossible here:
+  `GetObjectTorrent` (no seeder) and `WriteGetObjectResponse` (no Lambda
+  runtime), each rejecting with a named reason.
+- **One serialized schema migration path** (`teledrive/storage/schema.py`):
+  25 append-only steps, a recorded `schema_migrations` version, and a real
+  cross-process lock per backend (flock / `pg_advisory_xact_lock` /
+  `GET_LOCK`). Proved with five simultaneous OS processes on SQLite,
+  PostgreSQL and MySQL. A warm store constructor costs ~5 µs and emits zero
+  SQL.
+- **Per-operation test matrices.** Missing-auth for all 114 supported
+  operations, malformed input for every XML-bodied operation, over-limit for
+  every body-limited operation, and restart safety for the stateful ones.
+  Each carries a meta-test that fails when a supported operation is added
+  without an entry.
+- **The S3 credentials console** groups 90 scopes into 21 resource families
+  with live search, five presets with stated consequences, 37 risk-marked
+  scopes, rotate/revoke confirmations, and absolute+relative expiry. A test
+  fails if the server enforces a scope the UI cannot show, and the secret is
+  proven never to reach localStorage, sessionStorage, a cookie or a URL.
+
+### Changed
+
+- **`web/s3.py` split: 5 106 → 225 lines, 81 → 6 definitions**, across eleven
+  focused modules. Move-only: no test was edited, the route surface is
+  unchanged, and the inventory is still 114/0/2.
+- **Raw SQL is moving behind typed stores** (`teledrive/stores/`): shares,
+  pins, sessions, users, pending Telegram logins and the content index.
+  `web/app.py` is down from 51 raw statements to 22, and the remaining ones
+  are the tables the plan never assigned a store plus read-only aggregates.
+- **One object-read path.** The WebUI download and the REST read handler were
+  duplicated copies, so three fixes landed on one and not the other; both now
+  delegate to `_stream_object_response`.
+- **One permission catalog.** The curated route → permission map had two
+  identical definitions; it is now one table in `teledrive/api_keys.py`.
+- **DDL is issued by one place**, and a meta-test enforces it after a
+  duplicate `users.enabled` ALTER was found hiding in `web/app.py`.
 
 ## [1.0.8] - 2026-10-28
 

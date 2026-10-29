@@ -137,14 +137,16 @@ def ensure_pending_tag_table(engine) -> None:
     table must exist before any publish — including on a database where no
     ObjectTagStore has been constructed yet.
     """
-    _meta.create_all(engine, tables=[pending_tags])
+    from teledrive.storage.schema import ensure_schema
+    ensure_schema(engine)
 
 
 class ObjectTagStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog = catalog
         self.db = catalog.db
-        _meta.create_all(self.db.engine, tables=[object_tags, pending_tags])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
         self.db.release_setup_snapshot()
 
     def get(self, object_id: str) -> list[tuple[str, str]]:
@@ -331,7 +333,8 @@ class BucketTagStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog = catalog
         self.db = catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[bucket_tags])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
         self.db.release_setup_snapshot()
 
     def _ensure_bucket(self, bucket: str) -> None:

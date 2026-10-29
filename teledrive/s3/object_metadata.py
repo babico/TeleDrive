@@ -86,9 +86,9 @@ def signed_header_names(request) -> set[str]:
 class ObjectMetadataStore:
     def __init__(self, catalog: BucketCatalog):
         self.db = catalog.db
-        manifest_metadata.create_all(
-            self.db.engine, tables=[object_http_metadata, upload_http_metadata],
-        )
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
+        self.db.release_setup_snapshot()
 
     def get(self, object_id: str) -> dict[str, str]:
         data = self.db.connection.execute(

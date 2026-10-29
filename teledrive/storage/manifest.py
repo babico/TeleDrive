@@ -138,44 +138,22 @@ def _decode_encryption(value) -> dict | None:
     return parsed
 
 
-def _column_names(db, table: str) -> set[str]:
-    from sqlalchemy import text as _text
-    if db.engine.dialect.name == "sqlite":
-        return {row[1] for row in db.connection.execute(
-            _text(f"PRAGMA table_info({table})"))}
-    # Filter by the CURRENT schema: an unfiltered information_schema lookup
-    # sees same-named tables in other databases and can skip a needed ALTER.
-    if db.engine.dialect.name == "mysql":
-        schema = "DATABASE()"
-    else:
-        schema = "current_schema()"
-    return {row[0] for row in db.connection.execute(_text(
-        "SELECT column_name FROM information_schema.columns "
-        # nosec B608 — table is a hardcoded internal identifier.
-        f"WHERE table_name = '{table}' AND table_schema = {schema}"))}
-
-
 def ensure_encryption_column(db, table: str) -> None:
-    """Add a nullable TEXT ``encryption`` column to a legacy table.
+    """Ensure the SSE-C ``encryption`` column exists (via the coordinator).
 
-    MySQL rejects a DEFAULT on TEXT, so the column is nullable with no
-    server default; NULL means plaintext.  The table name is a hardcoded
-    internal identifier, never request input.
+    The actual ALTER lives in ``teledrive.storage.schema`` so it can never
+    run outside the cross-process migration lock.  Kept as a compatibility
+    entry point for callers that still name the column they care about.
     """
-    columns = _column_names(db, table)
-    if columns and "encryption" not in columns:
-        from sqlalchemy import text as _text
-        db.connection.execute(_text(
-            f"ALTER TABLE {table} ADD COLUMN encryption TEXT"))
-        db.commit()
+    from .schema import ensure_schema
+
+    ensure_schema(db.engine)
 
 
 def ensure_encryption_schema(db) -> None:
-    ensure_encryption_column(db, "storage_chunks")
-    # Multipart uploads may not exist yet on a fresh database; create_all
-    # in MultipartStore adds the column, while old deployments need ALTER.
-    if _column_names(db, "storage_multipart_uploads"):
-        ensure_encryption_column(db, "storage_multipart_uploads")
+    from .schema import ensure_schema
+
+    ensure_schema(db.engine)
 
 
 @dataclass(frozen=True)
@@ -225,19 +203,11 @@ class ManifestStore:
 
     def __init__(self, database: Database):
         self.db = database
-        metadata.create_all(database.engine)
-        # Legacy deployments predate the SSE-C columns.
-        ensure_encryption_schema(database)
-        # Dialect-aware FTS structures for content search (idempotent).
-        from .content_index import ensure_content_search
-        ensure_content_search(database)
-        # Schema probing issues SELECTs on this connection. Under MySQL's
-        # default REPEATABLE READ that opens a transaction and freezes the
-        # snapshot, so a write committed by ANOTHER worker afterwards stays
-        # invisible here -- cross-connection reads then silently miss the
-        # row. Setup is not part of any caller transaction, so close it.
-        if database.engine.url.get_backend_name() != "sqlite":
-            database.connection.commit()
+        # All schema creation goes through the one serialized coordinator;
+        # once this process has verified the schema this is a no-op.
+        from .schema import ensure_schema
+        ensure_schema(database.engine)
+        database.release_setup_snapshot()
 
     def begin(self, bucket: str, key: str, size: int, now: int, *,
               sse_key_md5: str | None = None) -> str:

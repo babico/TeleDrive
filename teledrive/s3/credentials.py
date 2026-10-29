@@ -130,29 +130,16 @@ _tags_column_ensured = False
 
 
 def ensure_credential_tags_column(db) -> None:
-    """Add storage_s3_credentials.tags on deployments predating Phase L."""
+    """Add storage_s3_credentials.tags on deployments predating Phase L.
+
+    The ALTER runs in ``teledrive.storage.schema``; this wrapper keeps the
+    historical entry point and its process-wide "already checked" fast path.
+    """
     global _tags_column_ensured
     if _tags_column_ensured:
         return
-    from sqlalchemy import text as _text
-    if db.engine.dialect.name == "sqlite":
-        columns = {row[1] for row in db.connection.execute(_text(
-            "PRAGMA table_info(storage_s3_credentials)"))}
-    else:
-        if db.engine.dialect.name == "mysql":
-            schema = "DATABASE()"
-        else:
-            schema = "current_schema()"
-        columns = {row[0] for row in db.connection.execute(_text(
-            "SELECT column_name FROM information_schema.columns "
-            # nosec B608 — table and schema expressions are fixed
-            # internal identifiers, never user input.
-            "WHERE table_name = 'storage_s3_credentials' "
-            f"AND table_schema = {schema}"))}
-    if columns and "tags" not in columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_s3_credentials ADD COLUMN tags TEXT"))
-        db.commit()
+    from teledrive.storage.schema import ensure_schema
+    ensure_schema(db.engine)
     _tags_column_ensured = True
 
 
@@ -185,8 +172,8 @@ class S3CredentialStore:
     def __init__(self, database: Database, master_key: bytes):
         self.db = database
         self.cipher = Fernet(master_key)
-        _meta.create_all(database.engine)
-        ensure_credential_tags_column(database)
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(database.engine)
 
     def create(self, name: str, permissions: list[str], *,
                expires_at: int | None = None, now: int | None = None,

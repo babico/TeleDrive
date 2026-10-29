@@ -104,7 +104,8 @@ def ensure_tiering_tables(engine) -> None:
     with _ENSURED_LOCK:
         if engine in _ENSURED_ENGINES:
             return
-        tiering_metadata.create_all(engine, tables=[tiering_configs])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(engine)
         _ENSURED_ENGINES.add(engine)
 
 

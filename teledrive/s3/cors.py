@@ -230,7 +230,8 @@ def response_cors_headers(rule: dict, origin: str, *, preflight: bool,
 class BucketCORSStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog, self.db = catalog, catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[cors_config])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
         self.db.release_setup_snapshot()
 
     def _bucket_exists(self, name: str) -> None:

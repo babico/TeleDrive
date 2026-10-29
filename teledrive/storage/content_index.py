@@ -55,8 +55,19 @@ def extract_text(path: Path, key: str) -> str | None:
 
 
 def ensure_content_search(database) -> None:
+    """Route content-search DDL through the schema coordinator.
+
+    Kept for callers that pass a ``Database``; the FTS structures themselves
+    are created by ``_create_content_search_structures`` from the single
+    serialized migration in ``teledrive.storage.schema``.
+    """
+    from .schema import ensure_schema
+
+    ensure_schema(getattr(database, "engine", database))
+
+
+def _create_content_search_structures(engine) -> None:
     """Create the dialect-specific FTS structures (idempotent)."""
-    engine = database.engine
     backend = engine.url.get_backend_name()
     if backend not in ("sqlite", "postgresql"):
         # MySQL and other backends have no tsvector/GIN; content search

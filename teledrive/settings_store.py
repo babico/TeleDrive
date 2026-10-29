@@ -52,7 +52,8 @@ class SettingsStore:
     def __init__(self, db: Database, master_key: bytes | None):
         self.db = db
         self.master_key = master_key
-        _metadata.create_all(db.engine, tables=[settings_document])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(db.engine)
         db.release_setup_snapshot()
 
     def _cipher(self) -> Fernet:

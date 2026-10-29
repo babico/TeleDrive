@@ -28,8 +28,7 @@ from sqlalchemy import (BigInteger, Boolean, Column, Integer, String,
                         Table, Text, delete, func, insert, inspect, not_,
                         select, text, update)
 
-from .catalog import (catalog_metadata, heads, published_versions,
-                     removed_versions)
+from .catalog import heads, published_versions, removed_versions
 from .manifest import (ChunkReference, chunks, metadata,
                        object_aliases, objects, replica_chunks)
 
@@ -71,22 +70,10 @@ DEFAULT_GRACE_SECONDS = 24 * 3600
 
 
 def _ensure_grace_column(db):
-    """storage_gc_state.grace_seconds may be missing in deployments
-    created before Phase A; add it defensively (SQLite and PostgreSQL
-    both support ALTER TABLE ... ADD COLUMN)."""
-    from sqlalchemy import text as _text
-    if db.engine.dialect.name == "sqlite":
-        # PRAGMA rows are (cid, name, type, ...): the NAME is index 1.
-        columns = {row[1] for row in db.connection.execute(_text(
-            "PRAGMA table_info(storage_gc_state)"))}
-    else:
-        columns = {row[0] for row in db.connection.execute(_text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'storage_gc_state'"))}
-    if columns and "grace_seconds" not in columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_gc_state ADD COLUMN grace_seconds INTEGER"))
-        db.commit()
+    """storage_gc_state.grace_seconds may be missing in deployments created
+    before Phase A; the ALTER now runs in the schema coordinator."""
+    from .schema import ensure_schema
+    ensure_schema(db.engine)
 
 
 def _send_intents_table():
@@ -97,9 +84,8 @@ def _send_intents_table():
 class RetainedMediaGC:
     def __init__(self, db):
         self.db = db
-        metadata.create_all(db.engine)
-        catalog_metadata.create_all(db.engine)
-        _ensure_grace_column(db)
+        from .schema import ensure_schema
+        ensure_schema(db.engine)
 
     # -- state -----------------------------------------------------------
     def state(self) -> dict:

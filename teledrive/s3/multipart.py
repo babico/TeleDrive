@@ -26,8 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from teledrive.storage.catalog import BucketCatalog, buckets, heads
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.s3.object_metadata import ObjectMetadataStore
-from teledrive.storage.manifest import (chunks, ensure_encryption_column,
-                                        object_encryption, objects)
+from teledrive.storage.manifest import chunks, object_encryption, objects
 
 MIN_PART_SIZE = 5 * 1024 * 1024
 MAX_PARTS = 10000
@@ -106,9 +105,8 @@ class MultipartStore:
         self.catalog = catalog
         self.db = catalog.db
         self.manifests = catalog.manifests
-        _meta.create_all(self.db.engine)
-        # Legacy deployments predate the SSE-C upload marker.
-        ensure_encryption_column(self.db, "storage_multipart_uploads")
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
         self.db.release_setup_snapshot()
 
     def initiate(self, bucket: str, key: str, owner: str, now: int | None = None,

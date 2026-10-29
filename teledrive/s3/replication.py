@@ -333,7 +333,8 @@ class BucketReplicationStore:
 
     def __init__(self, catalog: BucketCatalog, destinations=None):
         self.catalog, self.db = catalog, catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[replication_configs])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
         self._destinations = destinations
 
     def destination_labels(self) -> set[str]:

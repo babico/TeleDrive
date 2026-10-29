@@ -916,19 +916,9 @@ def validate_and_write_config(raw: dict[str, Any], *,
     _CONFIG_CACHE["mtime"] = None
     _reload_service_settings()
     _create_default_admin()
-    # Migrate users table: add enabled column if missing.
-    try:
-        conn = db_connect()
-        try:
-            from sqlalchemy import text as _text, inspect as _inspect
-            cols = {c['name'] for c in _inspect(conn.engine).get_columns('users')}
-            if 'enabled' not in cols:
-                conn.connection.execute(_text('ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'))
-                conn.connection.commit()
-        finally:
-            conn.close()
-    except Exception:
-        pass
+    # Core schema (including users.enabled) is brought current by the one
+    # schema coordinator when the database engine is first built; there is
+    # deliberately no DDL here any more.
 
 
 def db_connect():
@@ -1124,17 +1114,11 @@ async def lifespan(_: FastAPI):
     _reload_service_settings()
     ensure_config()
     _create_default_admin()
-    # Migrate users table: add enabled column if missing.
+    # The schema coordinator runs inside db_connect()/_build_engine(); opening
+    # the database here keeps a bad database loud at startup without a second
+    # copy of the users.enabled ALTER.
     try:
-        conn = db_connect()
-        try:
-            from sqlalchemy import text as _text, inspect as _inspect
-            cols = {c['name'] for c in _inspect(conn.engine).get_columns('users')}
-            if 'enabled' not in cols:
-                conn.connection.execute(_text('ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1'))
-                conn.connection.commit()
-        finally:
-            conn.close()
+        db_connect().close()
     except Exception:
         pass
     # Set up rotating compressed log file.

@@ -135,7 +135,9 @@ def encryption_xml(rules: list[dict]) -> bytes:
 class BucketEncryptionStore:
     def __init__(self, database: Database):
         self.db = database
-        catalog_metadata.create_all(database.engine, tables=[bucket_encryption])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(database.engine)
+        database.release_setup_snapshot()
 
     def get(self, bucket: str) -> list[dict] | None:
         raw = self.db.connection.execute(select(bucket_encryption.c.rules).where(

@@ -8,12 +8,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import (
     BigInteger, Column, Float, Index, Integer, MetaData, String, Table, Text,
-    and_, create_engine, delete, func, insert, inspect, or_, select, update,
+    and_, create_engine, delete, func, insert, or_, select, update,
 )
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
-from sqlalchemy.schema import CreateColumn
 
 metadata = MetaData()
 
@@ -517,62 +516,25 @@ class Database:
 
 
 # Arbitrary stable key for the PostgreSQL schema-setup advisory lock.
+# (Kept here for backwards compatibility; the migration coordinator in
+# teledrive.storage.schema owns cross-process locking now.)
 _SCHEMA_LOCK_KEY = 715273001
 
 
 def _setup_schema(engine: Engine) -> None:
-    """create_all plus dialect-aware migrations for older databases."""
-    metadata.create_all(engine)
+    """Apply every pending schema migration through the coordinator.
 
-    # Dialect-aware migrations for older TeleDrive databases.
-    columns = {c["name"] for c in inspect(engine).get_columns("files")}
-    migrations = [
-        Column("tg_account", String(255)),
-        Column("claim_token", String(255)),
-        Column("claim_ts", BigInteger),
-    ]
-    missing = [column for column in migrations if column.name not in columns]
-    if missing:
-        preparer = engine.dialect.identifier_preparer
-        table_name = preparer.quote("files")
-        with engine.begin() as conn:
-            for column in missing:
-                rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
-                conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
+    Kept as a thin compatibility wrapper: a single serialized path lives in
+    ``teledrive.storage.schema`` so no caller can issue DDL outside the
+    cross-process lock.
+    """
+    from teledrive.storage.schema import ensure_schema
 
-    # telegram_sessions health-probe columns: existing databases get
-    # them via the same dialect-aware ALTER.
-    session_cols = {c["name"] for c in inspect(engine).get_columns(
-        "telegram_sessions")}
-    for name, column in (
-        ("authorized", Column("authorized", Integer)),
-        ("health_checked_at", Column("health_checked_at", BigInteger)),
-        ("soft_quota_bytes", Column("soft_quota_bytes", BigInteger)),
-    ):
-        if name not in session_cols:
-            preparer = engine.dialect.identifier_preparer
-            table_name = preparer.quote("telegram_sessions")
-            rendered = str(CreateColumn(column).compile(
-                dialect=engine.dialect))
-            with engine.begin() as conn:
-                conn.exec_driver_sql(
-                    f"ALTER TABLE {table_name} ADD {rendered}")
-
-    # telegram_session_pending.session_string (login-flow fix): existing
-    # databases get the column via the same dialect-aware ALTER.
-    pending_cols = {c["name"] for c in inspect(engine).get_columns(
-        "telegram_session_pending")}
-    if "session_string" not in pending_cols:
-        preparer = engine.dialect.identifier_preparer
-        table_name = preparer.quote("telegram_session_pending")
-        column = Column("session_string", Text)
-        rendered = str(CreateColumn(column).compile(dialect=engine.dialect))
-        with engine.begin() as conn:
-            conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD {rendered}")
+    ensure_schema(engine)
 
 
 def _build_engine(url: str) -> Engine:
-    """Create a new engine and run idempotent schema setup/migrations."""
+    """Create a new engine and ensure the schema is current."""
     connect_args: dict[str, Any] = {}
 
     if url.startswith("sqlite:"):
@@ -589,22 +551,10 @@ def _build_engine(url: str) -> Engine:
             "required for the configured database_url."
         ) from exc
 
-    # Two app instances sharing one PostgreSQL database can start
-    # concurrently; create_all's checkfirst race then fails with a
-    # duplicate-table UniqueViolation (observed in the Docker
-    # fault-injection CI). A session-level advisory lock serializes
-    # schema work across every worker using this database.
-    if engine.dialect.name == "postgresql":
-        with engine.connect() as guard:
-            guard.exec_driver_sql(
-                f"SELECT pg_advisory_lock({_SCHEMA_LOCK_KEY})")
-            try:
-                _setup_schema(engine)
-            finally:
-                guard.exec_driver_sql(
-                    f"SELECT pg_advisory_unlock({_SCHEMA_LOCK_KEY})")
-    else:
-        _setup_schema(engine)
+    # Every worker that opens the same database runs the same one serialized
+    # migration: a process-local fast path first, then one version probe, and
+    # real cross-process locks only when the schema is actually stale.
+    _setup_schema(engine)
     return engine
 
 

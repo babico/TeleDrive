@@ -441,8 +441,8 @@ def ensure_notification_tables(engine) -> None:
     with _ENSURED_LOCK:
         if engine in _ENSURED_ENGINES:
             return
-        catalog_metadata.create_all(engine, tables=_CONFIG_TABLES)
-        outbox_metadata.create_all(engine, tables=[event_outbox])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(engine)
         _ENSURED_ENGINES.add(engine)
 
 

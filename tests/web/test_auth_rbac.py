@@ -1043,11 +1043,10 @@ def test_telegram_session_delete_soft_guard(authenv):
         _insert_session(db, "user-3003")
         from sqlalchemy import text as _text
         db.connection.execute(_text(
-            "CREATE TABLE storage_chunks (object_id VARCHAR(36), "
-            "account VARCHAR(255), size BIGINT)"))
-        db.connection.execute(_text(
-            "INSERT INTO storage_chunks VALUES ('obj-1', 'user-3003', 100), "
-            "('obj-1', 'user-3003', 200)"))
+            "INSERT INTO storage_chunks (object_id, ordinal, offset, size, "
+            "sha256, account, chat_id, message_id) VALUES "
+            "('obj-1',0,0,100,'h1','user-3003',1,1),"
+            "('obj-1',1,100,200,'h2','user-3003',1,2)"))
         db.connection.commit()
     finally:
         db.close()
@@ -1117,24 +1116,21 @@ def test_prometheus_metrics(authenv):
     client = authenv["client"]
     admin = _bearer(client, "admin", "admin-password-1")
 
+    # The schema coordinator creates storage_upload_jobs on connect; seed it
+    # with the real column set instead of a pre-schema copy.
     db = authenv["connect"]()
     try:
         from sqlalchemy import text as _text
-        db.connection.execute(_text(
-            "CREATE TABLE storage_upload_jobs (id VARCHAR(36) PRIMARY KEY, "
-            "bucket VARCHAR(63), object_key TEXT, source_path TEXT, "
-            "source_size BIGINT, source_device BIGINT, source_inode BIGINT, "
-            "source_mtime_ns BIGINT, expected_generation BIGINT, "
-            "expected_head_id VARCHAR(36), state VARCHAR(16), "
-            "object_id VARCHAR(36), attempts INTEGER, lease_token VARCHAR(80), "
-            "lease_until BIGINT)"))
+        now = int(time.time())
         db.connection.execute(_text(
             "INSERT INTO storage_upload_jobs (id, bucket, object_key, "
             "source_path, source_size, source_device, source_inode, "
-            "source_mtime_ns, expected_generation, state, attempts) VALUES "
-            "('j1','b','k','p',1,0,0,0,1,'queued',0),"
-            "('j2','b','k2','p2',1,0,0,0,1,'queued',0),"
-            "('j3','b','k3','p3',1,0,0,0,1,'failed',0)"))
+            "source_mtime_ns, expected_generation, state, attempts, "
+            "created_at, updated_at) VALUES "
+            "('j1','b','k','p',1,0,0,0,1,'queued',0,:now,:now),"
+            "('j2','b','k2','p2',1,0,0,0,1,'queued',0,:now,:now),"
+            "('j3','b','k3','p3',1,0,0,0,1,'failed',0,:now,:now)"),
+            {"now": now})
         db.connection.commit()
     finally:
         db.close()
@@ -1295,23 +1291,16 @@ def test_storage_usage_series(authenv):
     db = authenv["connect"]()
     try:
         from sqlalchemy import text as _text
-        db.connection.execute(_text(
-            "CREATE TABLE storage_objects (id VARCHAR(36) PRIMARY KEY, "
-            "bucket VARCHAR(63), object_key TEXT, status VARCHAR(16), "
-            "size BIGINT, sha256 VARCHAR(64), created_at BIGINT, "
-            "updated_at BIGINT, error TEXT)"))
-        db.connection.execute(_text(
-            "CREATE TABLE storage_published_versions (object_id "
-            "VARCHAR(36) PRIMARY KEY, bucket VARCHAR(63), key_hash "
-            "VARCHAR(64), committed_ns BIGINT)"))
         now = int(time.time())
         day = 86_400
         db.connection.execute(_text(
-            "INSERT INTO storage_objects VALUES "
-            "('o1','b','k1','ready',100,'x',:n,:n,NULL),"
-            "('o2','b','k2','ready',50,'x',:n,:n,NULL)"), {"n": now})
+            "INSERT INTO storage_objects (id, bucket, object_key, status, "
+            "size, sha256, created_at, updated_at) VALUES "
+            "('o1','b','k1','ready',100,'x',:n,:n),"
+            "('o2','b','k2','ready',50,'x',:n,:n)"), {"n": now})
         db.connection.execute(_text(
-            "INSERT INTO storage_published_versions VALUES "
+            "INSERT INTO storage_published_versions (object_id, bucket, "
+            "key_hash, committed_ns) VALUES "
             "('o1','b','h1',:ns1),('o2','b','h2',:ns2)"),
             {"ns1": now * 1_000_000_000,
              "ns2": (now - day) * 1_000_000_000})

@@ -149,7 +149,8 @@ class WebsiteConfigStore:
 
     def __init__(self, catalog: BucketCatalog):
         self.catalog, self.db = catalog, catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[website_configs])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
 
     def _bucket_exists(self, name: str) -> None:
         if self.db.connection.execute(

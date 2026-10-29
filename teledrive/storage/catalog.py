@@ -100,120 +100,16 @@ Index("ix_storage_published_versions_key",
 _BUCKET_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?\Z")
 
 
-_versioning_column_ensured: set[int] = set()
-
-
 def ensure_versioning_column(db) -> None:
-    """storage_buckets.versioning_state (Phase B), the Phase C object-lock
-    columns and the Phase N5 access/tiering columns may be missing in older
-    deployments; add them defensively. Cached per engine (not per process)
-    so a worker that opens a second, older database still migrates it."""
-    key = id(db.engine)
-    if key in _versioning_column_ensured:
-        return
-    from sqlalchemy import text as _text
-    sqlite = db.engine.dialect.name == "sqlite"
+    """Ensure the bucket/object versioning, lock and tiering columns exist.
 
-    def columns_of(table):
-        if sqlite:
-            return {row[1] for row in db.connection.execute(_text(
-                f"PRAGMA table_info({table})"))}
-        # Filter by the CURRENT schema/database: an unfiltered
-        # information_schema lookup sees same-named tables in every
-        # database on the server, which silently skips the ALTER when
-        # another database already has the newer column set.
-        if db.engine.dialect.name == "mysql":
-            schema = "DATABASE()"
-        else:
-            schema = "current_schema()"
-        return {row[0] for row in db.connection.execute(_text(
-            "SELECT column_name FROM information_schema.columns "
-            # nosec B608 — `table` is a hardcoded internal table name
-            # (storage_buckets/storage_objects), never user input; the
-            # schema expression is a fixed dialect literal.
-            f"WHERE table_name = '{table}' AND table_schema = {schema}"))}
+    The defensive ALTERs moved into ``teledrive.storage.schema`` so they run
+    exactly once per schema under the cross-process migration lock instead of
+    racing between worker processes.  This wrapper keeps the old entry point.
+    """
+    from .schema import ensure_schema
 
-    bucket_columns = columns_of("storage_buckets")
-    if bucket_columns and "versioning_state" not in bucket_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN versioning_state "
-            "VARCHAR(16) NOT NULL DEFAULT 'Enabled'"))
-        db.commit()
-    if bucket_columns and "object_lock_enabled" not in bucket_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN object_lock_enabled "
-            "BOOLEAN NOT NULL DEFAULT false"))
-        db.commit()
-    if bucket_columns and "object_lock_default_mode" not in bucket_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN "
-            "object_lock_default_mode VARCHAR(16)"))
-        db.commit()
-    if bucket_columns and "object_lock_default_days" not in bucket_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN "
-            "object_lock_default_days INTEGER"))
-        db.commit()
-    if bucket_columns and "public_access_block" not in bucket_columns:
-        # VARCHAR, not TEXT: MySQL cannot DEFAULT a TEXT column.
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN public_access_block "
-            "VARCHAR(512) NOT NULL DEFAULT "
-            "'{\"BlockPublicAcls\": true, \"IgnorePublicAcls\": true, "
-            "\"BlockPublicPolicy\": true, \"RestrictPublicBuckets\": true}'"
-        ))
-        db.commit()
-    if bucket_columns and "object_ownership" not in bucket_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN object_ownership "
-            "VARCHAR(32) NOT NULL DEFAULT 'BucketOwnerEnforced'"))
-        db.commit()
-    if bucket_columns and "public_read" not in bucket_columns:
-        # Phase I: website hosting stays private until an explicit admin
-        # decision. Existing deployments therefore start closed.
-        db.connection.execute(_text(
-            "ALTER TABLE storage_buckets ADD COLUMN public_read "
-            "BOOLEAN NOT NULL DEFAULT false"))
-        db.commit()
-    object_columns = columns_of("storage_objects")
-    if object_columns and "retention_until_ns" not in object_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN retention_until_ns "
-            "BIGINT"))
-        db.commit()
-    if object_columns and "legal_hold" not in object_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN legal_hold "
-            "BOOLEAN NOT NULL DEFAULT false"))
-        db.commit()
-    if object_columns and "retention_mode" not in object_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN retention_mode "
-            "VARCHAR(16)"))
-        db.commit()
-    if object_columns and "access_count" not in object_columns:
-        # DEFAULT 0 is valid for integer columns on every supported dialect.
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN access_count "
-            "BIGINT NOT NULL DEFAULT 0"))
-        db.commit()
-    if object_columns and "last_accessed_ns" not in object_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN last_accessed_ns "
-            "BIGINT"))
-        db.commit()
-    if object_columns and "storage_class" not in object_columns:
-        # VARCHAR, not TEXT: MySQL rejects a server default on TEXT.
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN storage_class "
-            "VARCHAR(32) NOT NULL DEFAULT 'STANDARD'"))
-        db.commit()
-    if object_columns and "restore_until_ns" not in object_columns:
-        db.connection.execute(_text(
-            "ALTER TABLE storage_objects ADD COLUMN restore_until_ns "
-            "BIGINT"))
-        db.commit()
-    _versioning_column_ensured.add(key)
+    ensure_schema(db.engine)
 
 
 @dataclass(frozen=True)
@@ -231,29 +127,14 @@ class BucketCatalog:
 
     def __init__(self, manifests: ManifestStore):
         self.manifests = manifests
-        ensure_versioning_column(manifests.db)
         self.db = manifests.db
-        catalog_metadata.create_all(self.db.engine)
-        # publish() applies the Phase J pending-tag journal, so its table
-        # must exist even on a fresh database where no tagging store was
-        # ever constructed. Lazy import: tagging.py imports this module.
-        try:
-            from teledrive.s3.tagging import ensure_pending_tag_table
-            ensure_pending_tag_table(self.db.engine)
-        except Exception:  # noqa: BLE001 - tagging is optional bookkeeping
-            pass
-        # Phase O3: metadata journal tables must exist before any mutation
-        # transaction tries to append a row. DDL at construction time (and at
-        # application startup), never inside the mutation hot path.
-        try:
-            from teledrive.s3.metadata_journal import ensure_metadata_tables
-            ensure_metadata_tables(self.db.engine)
-        except Exception:  # noqa: BLE001 - journaling is optional bookkeeping
-            pass
-        # Same REPEATABLE-READ snapshot issue as ManifestStore: the probes
-        # above must not pin this connection's view of the database.
-        if self.db.engine.url.get_backend_name() != "sqlite":
-            self.db.connection.commit()
+        # The single serialized migration creates the catalog tables, the
+        # Phase J pending-tag journal and the metadata-journal tables.  On a
+        # warm schema this is a pure in-process no-op, so constructors stay
+        # cheap and never issue DDL of their own.
+        from .schema import ensure_schema
+        ensure_schema(self.db.engine)
+        self.db.release_setup_snapshot()
 
     @staticmethod
     def validate_bucket(name: str) -> None:

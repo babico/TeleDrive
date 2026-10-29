@@ -79,7 +79,8 @@ class StorageUploadJobs:
     def __init__(self, catalog: BucketCatalog):
         self.catalog = catalog
         self.db = catalog.db
-        _meta.create_all(self.db.engine)
+        from .schema import ensure_schema
+        ensure_schema(self.db.engine)
         self.db.release_setup_snapshot()
 
     @staticmethod

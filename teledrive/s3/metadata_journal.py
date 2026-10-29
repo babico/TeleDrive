@@ -168,8 +168,8 @@ def ensure_metadata_tables(engine) -> None:
     with _ENSURED_LOCK:
         if engine in _ENSURED_ENGINES:
             return
-        metadata_journal_metadata.create_all(
-            engine, tables=[metadata_configs, metadata_journal])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(engine)
         _ENSURED_ENGINES.add(engine)
 
 

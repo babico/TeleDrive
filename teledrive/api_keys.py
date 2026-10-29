@@ -91,7 +91,8 @@ class IssuedKey:
 class ApiKeyStore:
     def __init__(self, db: Database):
         self.db = db
-        _metadata.create_all(db.engine)
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(db.engine)
         db.release_setup_snapshot()
 
     @staticmethod

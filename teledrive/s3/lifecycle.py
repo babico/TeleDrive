@@ -139,7 +139,8 @@ def lifecycle_xml(rules):
 class BucketLifecycleStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog, self.db = catalog, catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[rules_table])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
 
     def get(self, bucket):
         if bucket not in self.catalog.list_buckets():
@@ -184,8 +185,9 @@ class BucketLifecycleStore:
         with metadata backing."""
         if type(now) is not int or now < 0 or type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("Invalid lifecycle run bounds")
-        from teledrive.s3.multipart import uploads, _meta
-        _meta.create_all(self.db.engine, tables=[uploads])
+        from teledrive.s3.multipart import uploads
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
         entries = self.db.connection.execute(select(
             rules_table.c.bucket, rules_table.c.rules_json)).all()
         gcx = None

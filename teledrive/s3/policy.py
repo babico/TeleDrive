@@ -606,7 +606,8 @@ _POLICY_CACHE = _CompiledCache()
 class BucketPolicyStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog, self.db = catalog, catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[bucket_policy])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
 
     def _bucket_exists(self, name: str) -> None:
         if self.db.connection.execute(
@@ -667,7 +668,8 @@ class BucketPolicyStore:
 class BucketAbacStore:
     def __init__(self, catalog: BucketCatalog):
         self.catalog, self.db = catalog, catalog.db
-        catalog_metadata.create_all(self.db.engine, tables=[bucket_abac])
+        from teledrive.storage.schema import ensure_schema
+        ensure_schema(self.db.engine)
 
     def _bucket_exists(self, name: str) -> None:
         if self.db.connection.execute(

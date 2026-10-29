@@ -123,7 +123,8 @@ jobs:
             tests/storage/test_metadata_backup.py \
             tests/storage/test_storage_sigkill.py \
             tests/storage/test_metadata_snapshot_rehearsal.py \
-            tests/storage/test_gc_collect.py
+            tests/storage/test_gc_collect.py \
+            tests/storage/test_schema_init_race.py
       - name: Publish CI run summary
         if: always()
         shell: bash

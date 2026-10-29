@@ -199,7 +199,21 @@ Still unsupported or unverified: SSE-S3/SSE-C/SSE-KMS, the bucket-metadata confi
 - [x] Verify nine normal workflows on the newer `aa44bd6` development baseline (not the published v1.0.7 SHA). The current matrix has **six automatic workflows**: Security & Regression, REST/S3 & Databases, Docker Fault Injection, User MTProto E2E, Multiworker PostgreSQL E2E and the Release Gate; the seventh YAML (isolated capacity soak) is manual `workflow_dispatch`. Release packaging now ships the single-container Docker image instead of desktop installers.
 - [ ] Verify **every required workflow on the exact SHA** of any subsequent release candidate.
 - [x] Native PostgreSQL restore drill performed on 192.168.21.2 (source teledrivetest -> restored teledriverestoredrill): pg_dump -Fc exit 0, pg_restore exit 0, 20 tables + row counts identical, TeleDrive container healthy against restored DB. Evidence in .opencode/teledrive-handoff/progress.md.
-- [ ] Implement and independently rehearse the complete physical GC safety/rollback alternative before authorizing deletion.
-- [ ] Complete unknown-history discovery, additional S3 parity tests and long-duration real-environment capacity profiling.
+- [ ] **OWNER ACTION, not engineering work:** implement and independently
+      rehearse the complete physical GC safety/rollback alternative before
+      authorizing deletion. The code side is done and race-tested (see the
+      paragraph above this list); what is missing is an independent backup
+      host, an authorized soak, an original-media recovery rehearsal with the
+      owner's sealed SQL archive, a signed legacy-cutover decision, and
+      two-person approval through `scripts/ops/verify_production_bundle.py`.
+      `deletion_permitted` stays `False` until all of it exists. No commit
+      can close this line.
+- [ ] **Partially done:** unknown-history discovery is an owner/archive
+      exercise; the S3 parity track reached **114 supported / 0 partial /
+      2 unsupported** (the two are permanently impossible: no BitTorrent
+      swarm, no Lambda runtime), and long-duration capacity profiling needs a
+      real SOAK window on the owner's hardware. The remaining genuine
+      engineering item here is the exhaustive per-operation test matrix
+      described in [S3_SPECS](S3_SPECS.md).
 
 Use [TODO.md](../TODO.md) as the single prioritized plan document — completed milestones, roadmap phases, the S3 parity track and the owner gates. Update this file when the verified *behavior or acceptance boundary* changes; do not paste every transient CI run log here. Separate per-version Markdown release notes are intentionally not maintained; use [GitHub Releases](https://github.com/babico/TeleDrive/releases).

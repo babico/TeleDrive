@@ -874,11 +874,32 @@ silently.
 
 ## 11. Release decision rules
 
-- [ ] Any new release candidate requires all mandatory checks green on that
-      exact SHA; previous green commits cannot be reused as proof.
-- [ ] Review binaries, tag, release metadata and supported-feature limits
-      before publication; do not silently publish unreleased `main` features.
+- [ ] **Still open by definition:** any new release candidate requires all
+      mandatory checks green on that exact SHA; previous green commits cannot
+      be reused as proof. This is a per-release gate, not a task to tick once.
+- [ ] **Review binaries, tag, release metadata and supported-feature limits
+      before publication.** The documentation side is now TRUE against the
+      tree (`CHANGELOG.md` Unreleased, `docs/RELEASE_v1.0.8.md`,
+      `docs/UPGRADING.md` §7 all describe 114/0/2 and the security decisions).
+      What remains is the operational act: confirm CI 1–5 green on the exact
+      SHA chosen for the tag, then cut the tag. No tag has been created.
 - [ ] Keep automatic physical Telegram deletion disabled until its
-      independent safety conditions are verified.
+      independent safety conditions are verified. `deletion_permitted` is
+      `False`; the gates are owner actions listed in
+      `docs/IMPLEMENTATION_STATUS.md`.
+
+### What is genuinely left, in one place
+
+| Item | Nature |
+|---|---|
+| Cut the 1.0.8 tag | Operational, after a green SHA. Documentation is ready. |
+| Physical-GC authorization | **Owner only** — backup host, soak, recovery rehearsal, cutover decision, two-person approval. No commit closes this. |
+| Unknown-history recovery beyond the current engine | Needs the owner's sealed SQL archive. |
+| Long-duration capacity profiling | Needs a real soak window on the owner's hardware. |
+| `web/app.py` router split, `catalog.py` mixins, `app.js` page groups | Engineering, in progress or planned with handoffs in `docs/handoffs/`. |
+| Remaining 22 raw statements in `web/app.py` | Engineering: `telegram_sessions`, `telegram_channels`, `flood_waits` tables plus read-only aggregates. |
+| Per-operation matrix: crash/restart and multiworker-race columns | Engineering, partially done; `docs/S3_SPECS.md` states exactly which rows remain. |
+| `GetObjectTorrent`, `WriteGetObjectResponse` | **Permanent**: no seeder, no Lambda runtime. |
+| Envelope encryption (SSE-S3/KMS) | **Rejected**: conflicts with dedup, replication and content search. |
 
 **Reference:** [Project Status and Acceptance](docs/IMPLEMENTATION_STATUS.md) · [CI and Test Guide](docs/CI_WORKFLOWS.md) · [Backup and Restore](docs/BACKUP_RESTORE.md) · [S3 Specifications](docs/S3_SPECS.md) · [Security](docs/SECURITY.md).

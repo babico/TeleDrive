@@ -147,3 +147,35 @@ def test_update_cannot_revive_an_expired_credential(api):
     past = client.put(f"/api/v1/admin/s3/credentials/{ident}",
                       headers=session, json={"name": "x"})
     assert past.status_code in (200, 422)
+
+
+def test_revoke_accepts_the_same_identifier_as_reveal(api):
+    """One identifier contract: id OR access key, on every operation.
+
+    reveal/update matched ``id OR access_key`` while revoke matched the id
+    only, so the same string addressed a credential on one endpoint and
+    404'd on another -- an operator could believe they had revoked a key
+    whose access key they had copied.
+    """
+    client, _url, _master = api
+    session = _session(client)
+    created = client.post("/api/v1/admin/s3/credentials", headers=session,
+                          json={"name": "by-access-key",
+                                "permissions": ["s3:GetObject"]})
+    assert created.status_code == 201, created.text
+    body = created.json()
+
+    # Reveal and revoke both accept the ACCESS KEY, not just the uuid.
+    assert client.get(
+        f"/api/v1/admin/s3/credentials/{body['access_key']}/secret",
+        headers=session).status_code == 200
+    assert client.delete(
+        f"/api/v1/admin/s3/credentials/{body['access_key']}",
+        headers=session).status_code == 200
+    # And it is really revoked, by either identifier.
+    assert client.get(
+        f"/api/v1/admin/s3/credentials/{body['id']}/secret",
+        headers=session).status_code == 422
+    assert client.delete(
+        f"/api/v1/admin/s3/credentials/{body['id']}",
+        headers=session).status_code == 404

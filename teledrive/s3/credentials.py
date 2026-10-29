@@ -201,6 +201,24 @@ class S3CredentialStore:
         self.db.commit()
         return IssuedS3Credential(identifier, access, secret, perms)
 
+    def _resolve(self, identifier) -> str:
+        """The credential's canonical id, from an id OR an access key.
+
+        All four operations (reveal, update, rotate-by-reissue, revoke) used
+        to interpret ``identifier`` differently -- reveal/update matched
+        ``id OR access_key`` while revoke matched the id only, so the same
+        string addressed a credential on one endpoint and 404'd on another.
+        One resolver, with a bounded input, keeps them consistent.
+        """
+        if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
+            raise ValueError("Invalid credential identifier")
+        row = self.db.connection.execute(select(credentials.c.id).where(
+            (credentials.c.id == identifier)
+            | (credentials.c.access_key == identifier)).limit(1)).first()
+        if row is None:
+            raise ValueError("Unknown credential")
+        return row[0]
+
     def list(self) -> list[dict]:
         rows = self.db.connection.execute(select(
             credentials.c.id, credentials.c.name, credentials.c.access_key,
@@ -262,12 +280,12 @@ class S3CredentialStore:
         Secrets are encrypted at rest and shown on demand; every reveal
         must be audit-logged by the caller.
         """
+        resolved = self._resolve(identifier)
         row = self.db.connection.execute(select(
             credentials.c.id, credentials.c.access_key,
             credentials.c.encrypted_secret, credentials.c.revoked,
             credentials.c.expires_at, credentials.c.permissions,
-        ).where((credentials.c.id == identifier)
-                | (credentials.c.access_key == identifier))).first()
+        ).where(credentials.c.id == resolved)).first()
         if not row:
             raise ValueError("Unknown credential")
         if row[3]:
@@ -295,10 +313,10 @@ class S3CredentialStore:
         The access key and secret never change: rotating the secret means
         issuing a new credential, which keeps the audit trail honest.
         """
+        resolved = self._resolve(identifier)
         row = self.db.connection.execute(select(
             credentials.c.id, credentials.c.revoked,
-        ).where((credentials.c.id == identifier)
-                | (credentials.c.access_key == identifier))).first()
+        ).where(credentials.c.id == resolved)).first()
         if not row:
             raise ValueError("Unknown credential")
         if row[1]:
@@ -350,8 +368,9 @@ class S3CredentialStore:
         return updated[0]
 
     def revoke(self, identifier: str) -> bool:
+        resolved = self._resolve(identifier)
         changed = self.db.connection.execute(update(credentials).where(
-            credentials.c.id == identifier, credentials.c.revoked.is_(False)
+            credentials.c.id == resolved, credentials.c.revoked.is_(False)
         ).values(revoked=True))
         self.db.commit()
         return changed.rowcount == 1

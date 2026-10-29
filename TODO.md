@@ -807,17 +807,21 @@ spoofing). The rest are still open:
 - [x] **#8 MySQL SQL leaks** (`62b3a91`) — the quota and pin upserts used
       `ON CONFLICT` and reindex used `INSERT OR IGNORE`; all three are now
       portable update-then-insert, verified against a live MySQL 8.4.
-- [ ] **#9 Three permission catalogs** — `ENDPOINT_PERMISSIONS`,
-      `CURATED_PERMISSIONS` and handler string literals still duplicate the
-      same nine REST permissions.
+- [x] **#9 Three permission catalogs** (`aba4cc3` + this commit) —
+      `ENDPOINT_PERMISSIONS` and the web registry's map are now built from one
+      table (`CURATED_PERMISSION_ROWS` in `teledrive/api_keys.py`), which also
+      carries the UI label. Handler string literals reference those constants.
 - [ ] **#10 Canonical `Principal`/`authorize`** — the session, Basic, bearer
       and S3 paths remain separate decision points.
 - [ ] **#11 Split `web/app.py`** — still one large router module.
 - [ ] **#12 Split `web/s3.py`** — dispatch still lives in one file.
 - [ ] **#13 Raw `text()` in `web/app.py`** — users, sessions, quota, pin and
       share still bypass a store layer.
-- [ ] **#14 Missing indexes/FKs** — `aliases.source_object_id` and the
-      version/bucket FKs are still unindexed or absent.
+- [x] **#14 Missing indexes/FKs** (`a87e1d5`) — `aliases.source_object_id`
+      (every GC candidate and dedup lookup), `heads.object_id` (the GC
+      "is this a head anywhere?" probe, not covered by that table's primary
+      key) and `gc_queue.enqueued_ns` are indexed, applied by append-only
+      schema steps 22 and 23.
 - [x] **#15 Dead/duplicate helpers in `user_mode.py`** (`62b3a91`) —
       `_session_from_file` (no callers) and the shadowed first
       `_session_from_file_for` are gone.
@@ -842,22 +846,19 @@ silently.
 - [x] **P5 — session/bearer asymmetry** (`b97bf62`) — one role→permission
       map derived from the live route table governs session and Basic alike;
       the "any GET is allowed" branch is gone. API keys keep their scopes.
-- [ ] **P5 (historical note) — session/bearer asymmetry.** A viewer session can read every GET
-      API route, while an API key for the same user needs an explicit
-      permission per route. "Viewer" therefore means two different things.
-      The decision is whether sessions should shrink to the route
-      permission set or bearer keys should gain a role-derived default.
+- [x] **P5 — session/bearer asymmetry is resolved** (`b97bf62`): sessions are
+      gated by the role→route-permission map and API keys by their own
+      scopes; both are evaluated in `require_auth`, and the "any GET is
+      allowed for a session" branch is gone.
 - [x] **P6 — HTTP Basic removed entirely** (`b97bf62`). There is no
       Basic path and no config credential: `web.user`/`web.password`/
       `web.password_file`/`web.allow_insecure` are not settings any more and
       are stripped on read. Identity is the login session or an API key.
       First boot creates the hardcoded `admin`/`admin` administrator and
       never overwrites an existing `admin` row.
-- [ ] **P6 (historical note) — legacy HTTP Basic was unconditional admin.** The configured
-      `web.user`/`web.password` bypasses the database user and role system.
-      Keeping it for scripts is defensible, but it needs a separate
-      principal identity and an additional guard on admin-only routes, or
-      removal.
+- [x] **P6 — HTTP Basic is gone** (`b97bf62`), not merely guarded: no
+      authenticator reads `WEB_PASSWORD`, and the retired config keys are
+      stripped on read.
 
 ## 11. Release decision rules
 

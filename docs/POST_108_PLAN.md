@@ -45,8 +45,18 @@ Every permissioned route gets its own reviewer with one job: read that route's
 implementation end to end and report defects. Waves of 4 until the list is
 exhausted.
 
-- [ ] Build the authoritative route list from the live FastAPI table.
-- [ ] Wave 1 (4 routes), wave 2, … until every route is reviewed.
+- [x] Build the authoritative route list from the live FastAPI table —
+      112 permissioned routes across 101 unique handlers.
+- [x] Wave 1 (`61c4c77`, `2ead9b6`): issue_api_key, rotate_api_key,
+      reveal secret, gc_collect.
+- [x] Wave 2 (`5299cde`): put_object_content, admin_create_share,
+      telegram request/verify-code, create_storage_upload_job.
+- [x] Wave 3 (`aba4cc3`): user management, get_object_content,
+      issue/update S3 credential, remove_object_content.
+- [x] Wave 4 (`48e188b`): get_object_content read gate (archive, SSE-C,
+      access accounting).
+- [ ] Wave 5 (running): config, /share/{token}, presign + copy, bucket
+      policy. Then waves 6+ until the 101 handlers are covered.
 - [ ] Each review is appended to `docs/API_REVIEW.md` in a fixed format:
       route, handler, auth model, inputs, failure modes, findings by severity,
       and the test that should exist.

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import time
 
-from tests.s3.test_s3_admin import admin
+from tests import basic_header
+from tests.s3.test_s3_admin import admin, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.jobs import StorageUploadJobs
@@ -29,7 +30,7 @@ def test_operator_storage_health_is_authenticated_and_fail_safe(admin, tmp_path)
 
     endpoint = "/api/v1/admin/storage/health"
     assert client.get(endpoint).status_code in (401, 403)
-    response = client.get(endpoint, auth=("testadmin", "secure-auth-password"))
+    response = client.get(endpoint, headers=admin_headers(client))
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["job_states"]["queued"] >= 1
@@ -66,7 +67,7 @@ def test_operator_health_alerts_failed_jobs_and_stale_pending_without_secrets(ad
     denied = client.get("/api/v1/admin/storage/health")
     assert denied.status_code in (401, 403)
     response = client.get("/api/v1/admin/storage/health",
-                          auth=("testadmin", "secure-auth-password"))
+                          headers=admin_headers(client))
     assert response.status_code == 200, response.text
     payload = response.json()
     by_code = {entry["code"]: entry for entry in payload["alerts"]}
@@ -103,7 +104,7 @@ def test_operator_health_counts_unjournaled_mtproto_receipts_without_exposing_id
         db.close()
 
     url = "/api/v1/admin/storage/health"
-    response = client.get(url, auth=("testadmin", "secure-auth-password"))
+    response = client.get(url, headers=admin_headers(client))
     assert response.status_code == 200, response.text
     assert response.json()["unjournaled_mtproto_receipt_count"] == 1
     alerts = {row["code"]: row for row in response.json()["alerts"]}
@@ -122,7 +123,7 @@ def test_operator_health_counts_unjournaled_mtproto_receipts_without_exposing_id
         )
     finally:
         db.close()
-    resolved = client.get(url, auth=("testadmin", "secure-auth-password"))
+    resolved = client.get(url, headers=admin_headers(client))
     assert resolved.status_code == 200, resolved.text
     assert resolved.json()["unjournaled_mtproto_receipt_count"] == 0
     assert "unjournaled_mtproto_receipts" not in {
@@ -147,7 +148,7 @@ def test_operator_health_warns_on_unresolved_mtproto_send_without_identifiers(ad
         db.close()
     url = "/api/v1/admin/storage/health"
     assert client.get(url).status_code in (401, 403)
-    response = client.get(url, auth=("testadmin", "secure-auth-password"))
+    response = client.get(url, headers=admin_headers(client))
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["unresolved_mtproto_send_count"] == 1
@@ -167,7 +168,7 @@ def test_operator_health_warns_on_unresolved_mtproto_send_without_identifiers(ad
         )
     finally:
         db.close()
-    again = client.get(url, auth=("testadmin", "secure-auth-password"))
+    again = client.get(url, headers=admin_headers(client))
     assert again.status_code == 200
     assert again.json()["unresolved_mtproto_send_count"] == 0
     assert "unresolved_mtproto_sends" not in {
@@ -195,13 +196,13 @@ def test_operator_unresolved_mtproto_inventory_requires_auth_and_has_no_side_eff
         db.close()
     endpoint = "/api/v1/admin/storage/mtproto-unresolved"
     assert client.get(endpoint).status_code in (401, 403)
-    unauthorized = client.get(endpoint, auth=("testadmin", "not-correct"))
+    unauthorized = client.get(endpoint, headers=basic_header("testadmin", "not-correct"))
     assert unauthorized.status_code in (401, 403)
     for limit in ("0", "1001", "-1", "not-an-integer"):
         assert client.get(endpoint + "?limit=" + limit,
-                          auth=("testadmin", "secure-auth-password")).status_code == 422
+                          headers=admin_headers(client)).status_code == 422
     response = client.get(endpoint + "?limit=1",
-                          auth=("testadmin", "secure-auth-password"))
+                          headers=admin_headers(client))
     assert response.status_code == 200, response.text
     content = response.json()
     assert content["total"] == 2
@@ -214,7 +215,7 @@ def test_operator_unresolved_mtproto_inventory_requires_auth_and_has_no_side_eff
     for forbidden in ("session", "file_id", "secret_key",
                       "lease_token", "123456:"):
         assert forbidden not in response.text
-    full = client.get(endpoint, auth=("testadmin", "secure-auth-password"))
+    full = client.get(endpoint, headers=admin_headers(client))
     assert full.status_code == 200
     assert len(full.json()["intents"]) == 2
     assert full.json()["total"] == 2
@@ -245,7 +246,7 @@ def test_operator_health_exposes_only_aggregate_explicit_flood_total(admin):
         conn.close()
     endpoint = "/api/v1/admin/storage/health"
     assert client.get(endpoint).status_code in (401, 403)
-    response = client.get(endpoint, auth=("testadmin", "secure-auth-password"))
+    response = client.get(endpoint, headers=admin_headers(client))
     assert response.status_code == 200, response.text
     assert response.json()["mtproto_explicit_flood_total"] == 1
     for sensitive in ("private-flood-account", "-100987654321", "session"):

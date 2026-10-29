@@ -43,14 +43,16 @@ def service(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
     monkeypatch.setattr(webapp, "REST_MAX_UPLOAD_BYTES", 4 * 1024**2)
-    monkeypatch.setattr(webapp, "WEB_USER", "admin-test")
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", "some-long-password")
+    from tests import seed_local_user
+    seed_local_user(lambda: connect_database(str(path)),
+                    "admin-test", "some-long-password", "admin")
     webapp.AUTH_FAILURES.clear()
     client = TestClient(webapp.app, headers={"host": "localhost"})
     try:
+        from tests import login_headers
         response = client.post("/api/v1/admin/keys",
-            auth=("admin-test", "some-long-password"),
-            headers={"x-teledrive-csrf": "1"}, json={
+            headers={**login_headers(client, "admin-test", "some-long-password"),
+                     "x-teledrive-csrf": "1"}, json={
                 "name": "storage-integration", "scopes": [
                     "buckets:read", "buckets:manage", "objects:read",
                     "objects:write", "objects:delete",
@@ -202,9 +204,15 @@ def test_head_returns_actual_object_metadata_without_telegram_download(service):
 ADMIN = ("admin-test", "some-long-password")
 
 
+def _admin_headers(client):
+    from tests import login_headers
+    return login_headers(client, *ADMIN)
+
+
 def _admin_post(client, path, **kw):
-    kw.setdefault("headers", {})["x-teledrive-csrf"] = "1"
-    return client.post(path, auth=ADMIN, **kw)
+    kw["headers"] = {**_admin_headers(client), **kw.get("headers", {}),
+                     "x-teledrive-csrf": "1"}
+    return client.post(path, **kw)
 
 
 def _share(client, payload, bucket="backup-bucket"):
@@ -232,7 +240,7 @@ def test_share_link_streams_object_without_auth(service):
     assert "attachment" in res.headers.get("content-disposition", "")
 
     # The download is counted and reported by the admin listing.
-    listing = client.get("/api/v1/admin/storage/shares", auth=ADMIN)
+    listing = client.get("/api/v1/admin/storage/shares", headers=_admin_headers(client))
     assert listing.status_code == 200
     entry = next(s for s in listing.json()["shares"] if s["token"] == token)
     assert entry["download_count"] == 1
@@ -295,7 +303,8 @@ def test_share_link_expiry_count_and_revocation(service):
                     json={"key": "data.bin"})
     token3 = r.json()["token"]
     revoked = client.delete(f"/api/v1/admin/storage/shares/{token3}",
-                            auth=ADMIN, headers={"x-teledrive-csrf": "1"})
+                            headers={**_admin_headers(client),
+                                     "x-teledrive-csrf": "1"})
     assert revoked.status_code == 200
     assert client.get(f"/share/{token3}").status_code == 404
 
@@ -346,7 +355,7 @@ def test_content_search_and_reindex(service):
                key="blob.bin").status_code in (200, 201)
 
     r = client.get("/api/v1/admin/storage/search",
-                   auth=ADMIN, params={"q": "unique-zeta-marker",
+                   headers=_admin_headers(client), params={"q": "unique-zeta-marker",
                                        "mode": "content"})
     assert r.status_code == 200
     results = r.json()["objects"]
@@ -356,12 +365,12 @@ def test_content_search_and_reindex(service):
 
     # Key mode is unchanged and does not match content.
     r = client.get("/api/v1/admin/storage/search",
-                   auth=ADMIN, params={"q": "unique-zeta-marker"})
+                   headers=_admin_headers(client), params={"q": "unique-zeta-marker"})
     assert [o["key"] for o in r.json()["objects"]] == []
 
     # Invalid mode is rejected.
     assert client.get("/api/v1/admin/storage/search",
-                      auth=ADMIN,
+                      headers=_admin_headers(client),
                       params={"q": "x", "mode": "wild"}).status_code == 422
 
     # Reindex backfill: wiping the index makes the object searchable again.
@@ -375,17 +384,18 @@ def test_content_search_and_reindex(service):
     finally:
         db.close()
     r = client.get("/api/v1/admin/storage/search",
-                   auth=ADMIN, params={"q": "unique-zeta-marker",
+                   headers=_admin_headers(client), params={"q": "unique-zeta-marker",
                                        "mode": "content"})
     assert r.json()["objects"] == []
 
     r = client.post("/api/v1/admin/storage/search/reindex",
-                    auth=ADMIN, headers={"x-teledrive-csrf": "1"},
+                    headers={**_admin_headers(client),
+                             "x-teledrive-csrf": "1"},
                     json={"limit": 10})
     assert r.status_code == 200, r.text
     assert r.json()["indexed"] >= 1
 
     r = client.get("/api/v1/admin/storage/search",
-                   auth=ADMIN, params={"q": "unique-zeta-marker",
+                   headers=_admin_headers(client), params={"q": "unique-zeta-marker",
                                        "mode": "content"})
     assert len(r.json()["objects"]) == 1

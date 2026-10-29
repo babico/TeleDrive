@@ -6,22 +6,27 @@ import pytest
 from web import app as webapp
 
 
-AUTH = ("testadmin", "long-secure-test-password")
+ADMIN = ("testadmin", "long-secure-test-password")
 CSRF = {"X-TeleDrive-CSRF": "1"}
 
 
 @pytest.fixture
 def admin(monkeypatch, tmp_path):
-    monkeypatch.setattr(webapp, "WEB_USER", "testadmin")
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", "long-secure-test-password")
     monkeypatch.setattr(webapp, "ALLOWED_HOSTS", ["localhost", "127.0.0.1", "[::1]"])
     monkeypatch.setattr(webapp, "AUTH_DIR", tmp_path / "auth")
     db_path = tmp_path / "test.db"
     from teledrive.db import connect_database
     monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(db_path)))
+    from tests import seed_local_user
+    seed_local_user(lambda: connect_database(str(db_path)),
+                    "testadmin", "long-secure-test-password", "admin")
     webapp.AUTH_FAILURES.clear()
     from fastapi.testclient import TestClient
     client = TestClient(webapp.app, base_url="http://localhost:8080")
+    # This suite exercises the browser cookie flow, so keep the cookie.
+    login = client.post("/api/v1/auth/login", headers=CSRF,
+                        json={"username": ADMIN[0], "password": ADMIN[1]})
+    assert login.status_code == 200, login.text
     return client
 
 
@@ -29,7 +34,7 @@ def test_channels_crud(admin):
     client = admin
     # Create
     r = client.post("/api/v1/admin/storage/channels",
-                    auth=AUTH, headers=CSRF,
+                    headers=CSRF,
                     json={"name": "ch1", "channel_id": "TeleDriveStorage",
                           "strategy": "single", "scratch_dir": "/data/tmp"})
     assert r.status_code == 201, r.text
@@ -37,30 +42,30 @@ def test_channels_crud(admin):
     assert cid is not None
 
     # List
-    r = client.get("/api/v1/admin/storage/channels", auth=AUTH)
+    r = client.get("/api/v1/admin/storage/channels")
     assert r.status_code == 200
     channels = r.json()["channels"]
     assert any(c["id"] == cid for c in channels)
 
     # Activate
     r = client.post(f"/api/v1/admin/storage/channels/{cid}/activate",
-                    auth=AUTH, headers=CSRF)
+                    headers=CSRF)
     assert r.status_code == 200, r.text
 
     # Active channel
-    r = client.get("/api/v1/admin/storage/active-channel", auth=AUTH)
+    r = client.get("/api/v1/admin/storage/active-channel")
     assert r.status_code == 200
     assert r.json()["active"]["id"] == cid
 
     # Delete
     r = client.delete(f"/api/v1/admin/storage/channels/{cid}",
-                      auth=AUTH, headers=CSRF)
+                      headers=CSRF)
     assert r.status_code == 200, r.text
 
 
 def test_telegram_session_status(admin):
     client = admin
-    r = client.get("/api/v1/admin/storage/telegram-session", auth=AUTH)
+    r = client.get("/api/v1/admin/storage/telegram-session")
     assert r.status_code == 200
     data = r.json()
     assert "configured" in data
@@ -70,11 +75,11 @@ def test_request_code_validation(admin):
     client = admin
     # Missing fields
     r = client.post("/api/v1/admin/storage/telegram-session/request-code",
-                    auth=AUTH, headers=CSRF, json={})
+                    headers=CSRF, json={})
     assert r.status_code in (400, 422)
 
     r = client.post("/api/v1/admin/storage/telegram-session/request-code",
-                    auth=AUTH, headers=CSRF,
+                    headers=CSRF,
                     json={"api_id": 0, "api_hash": "", "phone": ""})
     assert r.status_code in (400, 422)
 
@@ -82,7 +87,7 @@ def test_request_code_validation(admin):
 def test_verify_code_requires_pending(admin):
     client = admin
     r = client.post("/api/v1/admin/storage/telegram-session/verify-code",
-                    auth=AUTH, headers=CSRF,
+                    headers=CSRF,
                     json={"token": "nonexistent", "code": "12345"})
     assert r.status_code == 404
 
@@ -90,7 +95,7 @@ def test_verify_code_requires_pending(admin):
 def test_delete_session(admin):
     client = admin
     r = client.delete("/api/v1/admin/storage/telegram-session",
-                      auth=AUTH, headers=CSRF)
+                      headers=CSRF)
     assert r.status_code == 200
 
 

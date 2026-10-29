@@ -289,7 +289,133 @@ python -m pytest -q
 The suite is parallel-safe after the deterministic-parametrise fixes. If a
 machine has no xdist, the serial command still works.
 
-## 7. Post-upgrade checks
+## 7. HTTP Basic is a local user; configuration is not a credential
+
+HTTP Basic no longer means "admin if the config password matches". A
+`Basic` header is now verified against the `users` table exactly like the
+login form: username lookup, PBKDF2 verification, `enabled` check and the
+user's real role. The outer role gate and the per-route permission map
+apply to Basic exactly as they do to a session cookie, and failed
+attempts share the login throttle.
+
+The two ways to authenticate are:
+
+- HTTP Basic with a real local username/password, or the login form
+  (`POST /api/v1/auth/login`) and its httpOnly session cookie;
+- API keys (`Authorization: Bearer td_live_...`) for automation.
+
+**Deliberately broken:** every client that relied on
+`Authorization: Basic base64(<web.user>:<web.password>)` being an
+unconditional admin. There is no compatibility fallback and no opt-in
+switch: an unknown username, a wrong password, a disabled account, or the
+old configuration password is refused with `401`.
+
+**Configuration is no longer a credential.** `web.user`, `web.password`,
+`web.password_file` and `web.allow_insecure` were removed from the
+service settings. The startup requirement for a 16-character
+`web.password` is gone with them. Upgraded config files and SQL settings
+documents are scrubbed of those keys on read; the next settings save
+persists the cleaned document. An older file may still contain them on
+disk until then, but they cannot authenticate anything and are not
+exposed by the config API.
+
+### First boot and the bootstrap admin
+
+At startup the service creates a **hardcoded** local account if — and
+only if — no row named `admin` exists:
+
+| Username | Password | Role | Enabled |
+| --- | --- | --- | --- |
+| `admin` | `admin` | `admin` | yes |
+
+It is not configurable: no YAML key, environment variable or UI setting
+can change either value, and the password is not read from any file.
+
+An existing `admin` row is **never overwritten**. Its password hash, role
+and `enabled` flag are left exactly as they are, so changing the password
+survives restarts. Deleting the row is the documented lockout recovery:
+the next start re-creates `admin`/`admin`. The WebUI's
+`must_change_password` flag pushes the operator to replace the default
+password immediately after the first login.
+
+### Migration
+
+1. **Browsers:** no change; log in with the form. After upgrading a fresh
+   install, log in as `admin`/`admin` and change the password at once.
+2. **Scripts that used `<web.user>:<web.password>` over Basic:** pick one
+   of these.
+   - **Create a real local user with the role the script needs** and use
+     that username/password over Basic (or through the login form). A
+     `viewer` credential gets `403` on storage and admin writes, exactly
+     like a viewer session:
+
+     ```bash
+     curl -fsS -X POST http://127.0.0.1:8080/api/v1/admin/users \
+       -H "Authorization: Bearer $ADMIN_SESSION_TOKEN" \
+       -H 'X-TeleDrive-CSRF: 1' \
+       -H 'Content-Type: application/json' \
+       -d '{"username":"backup-script","password":"A-LONG-UNIQUE-PASSWORD","role":"operator"}'
+     ```
+
+   - **Issue an API key** with exactly the endpoint permissions the
+     script needs (API Management → REST keys, or
+     `POST /api/v1/admin/keys`) and send:
+
+     ```bash
+     curl -fsS http://127.0.0.1:8080/api/v1/buckets \
+       -H "Authorization: Bearer td_live_..."
+     ```
+
+   Existing keys and legacy scopes keep their current meaning unchanged.
+3. **Scripts that need a human-style session:** log in through
+   `POST /api/v1/auth/login` with the CSRF header and use the returned
+   token as `Authorization: Bearer td_sess_...` (or keep the cookie).
+4. **Remove `web.user` / `web.password` / `web.password_file` /
+   `web.allow_insecure` from mounted config files** if you manage them
+   outside the WebUI. They are ignored and will be stripped, but leaving
+   a dead credential in a file invites confusion.
+
+### If you are locked out
+
+An existing deployment keeps its `users` rows, so the normal admin login
+keeps working. If nobody knows an admin password and no API key exists,
+either delete the `admin` row and restart (this re-creates
+`admin`/`admin`; do this only on a host you control), or run the local
+recovery command:
+
+```bash
+python scripts/ops/reset_local_password.py --config config/config.yaml \
+  --username admin --role admin
+```
+
+It prompts for the new password, updates or creates the local user,
+enables it and revokes its existing sessions.
+
+### One permission map for sessions and Basic
+
+A session's authority is no longer "any GET". Every API route has one
+permission derived from the live route table, and the user's role decides
+which permissions it holds:
+
+| Role | Effective permissions |
+| --- | --- |
+| `admin` | every permission in the registry |
+| `operator` | every permission except admin-only surfaces: users, API keys, S3 credentials, physical GC, bucket quota, website publishing, config writes |
+| `viewer` | read (`GET`/`HEAD`) permissions outside those admin-only surfaces |
+
+Both the path gate and this map must pass, for sessions and for Basic
+alike. **Deliberately narrowed:** a `viewer` or `operator` session that
+used to read `GET /api/v1/admin/users`, `GET /api/v1/admin/keys`,
+`GET .../quota`, `GET .../website` or the GC and credential listings now
+gets `403`. Normal data reads (buckets, objects, versions, storage
+health, jobs, logs, redacted config) are unchanged. Roles with neither
+`admin` nor a known name (for example a row edited by hand to an unknown
+role) now get `403` everywhere instead of read access.
+
+Bearer API keys are unaffected: their authority is exactly the scopes
+they were issued with, including every legacy scope.
+
+## 8. Post-upgrade checks
 
 1. `docker compose ps` reports the container healthy. The healthcheck uses
    the same port and TLS variables as the listeners.

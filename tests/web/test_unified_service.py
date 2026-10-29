@@ -47,8 +47,6 @@ def unified(tmp_path, monkeypatch):
         encoding="ascii",
     )
     monkeypatch.setattr(web, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(web,"WEB_USER","testadmin")
-    monkeypatch.setattr(web,"WEB_PASSWORD","long-secure-test-password")
     # Force the lifespan to read the config file (not the env-default path).
     os.environ["TELEDRIVE_CONFIG"] = str(config_path)
     _ = config_path
@@ -94,19 +92,11 @@ def unified(tmp_path, monkeypatch):
         db.close()
     web_client=TestClient(app,base_url="http://localhost:8080")
     s3_client=TestClient(app,base_url="http://localhost:9000")
-    # Create default admin user directly (bypass lifespan)
-    import hashlib as _hl, secrets as _sec, time as _t
-    _db = connect()
-    try:
-        _db.connection.execute(__import__("sqlalchemy").text(
-            "INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at) "
-            "VALUES (:u, :ph, 'admin', 1, :now, :now)"
-        ), {"u": "admin", "ph": web._hash_password("admin"), "now": int(_t.time())})
-        _db.connection.commit()
-    except Exception:
-        pass
-    finally:
-        _db.close()
+    # Create the local users directly (bypass lifespan). The first-boot
+    # admin plus the named admin used by the Basic calls below.
+    from tests import seed_local_user as _seed_local_user
+    _seed_local_user(connect, "admin", "admin", "admin")
+    _seed_local_user(connect, "testadmin", "long-secure-test-password", "admin")
     try:
         # Login with default admin
         login_r = web_client.post("/api/auth/login",
@@ -181,13 +171,11 @@ def test_rest_s3_and_local_file_publish_one_catalog_and_shared_generations(unifi
     folder_data=b"local-queue-same-storage"*19
     original.write_bytes(folder_data)
     enq=ui.post("/api/v1/admin/storage/jobs",
-                auth=("testadmin","long-secure-test-password"),
                 headers={"X-TeleDrive-CSRF":"1"},
                 json={"bucket":"unified-bucket","key":"folder/file.bin",
                       "source_path":str(original)})
     assert enq.status_code==201,enq.text
     processed=ui.post("/api/v1/admin/storage/jobs/run-next",
-                auth=("testadmin","long-secure-test-password"),
                 headers={"X-TeleDrive-CSRF":"1"})
     assert processed.status_code==200,processed.text
     assert processed.json()["job"]["state"]=="done"

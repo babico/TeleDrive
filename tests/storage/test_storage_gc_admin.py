@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import time
 
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.copy import copy_object
@@ -38,7 +38,7 @@ def test_admin_gc_audit_requires_auth_and_never_deletes_referenced_media(admin):
 
     path = "/api/v1/admin/storage/gc-audit"
     assert client.get(path).status_code in (401, 403)
-    result = client.get(path + "?limit=1", auth=("testadmin", "secure-auth-password"))
+    result = client.get(path + "?limit=1", headers=admin_headers(client))
     assert result.status_code == 200, result.text
     record = result.json()
     assert record["dry_run"] is True
@@ -66,7 +66,7 @@ def test_gc_audit_invalid_limits_blocked_by_validation(admin):
     for value in ("0", "1001", "-1", "abc"):
         response = client.get(
             "/api/v1/admin/storage/gc-audit?limit=" + value,
-            auth=("testadmin", "secure-auth-password"),
+            headers=admin_headers(client),
         )
         assert response.status_code == 422
 
@@ -97,7 +97,7 @@ def test_admin_gc_audit_counts_unjournaled_receipt_and_ambiguous_mtproto_send(ad
         db.close()
 
     path = "/api/v1/admin/storage/gc-audit"
-    reply = client.get(path, auth=("testadmin", "secure-auth-password"))
+    reply = client.get(path, headers=admin_headers(client))
     assert reply.status_code == 200, reply.text
     inventory = reply.json()
     assert inventory["total_telegram_messages"] == 1
@@ -130,7 +130,7 @@ def test_gc_audit_reports_active_upload_jobs_and_never_deletes(admin):
     finally:
         db.close()
     response = client.get("/api/v1/admin/storage/gc-audit",
-                          auth=("testadmin", "secure-auth-password"))
+                          headers=admin_headers(client))
     assert response.status_code == 200, response.text
     report = response.json()
     assert report["active_upload_jobs"] == 1

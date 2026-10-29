@@ -1,7 +1,7 @@
 """Unified per-endpoint permissions: every API route is individually
 permissionable and bearer keys work on ANY route, not just the REST
-object surface. Session/Basic behavior must stay byte-for-byte
-identical (covered by test_auth_rbac.py)."""
+object surface. Session role behaviour is covered by test_auth_rbac.py
+and test_auth_single_model.py."""
 from __future__ import annotations
 
 import pytest
@@ -16,18 +16,23 @@ from web.permissions import CURATED_PERMISSIONS, PermissionRegistry
 def api(tmp_path, monkeypatch):
     path = tmp_path / "per-route.sqlite"
     monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
-    monkeypatch.setattr(webapp, "WEB_USER", "ci-admin")
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", "ci-local-password-1234")
+    from tests import seed_local_user
+    seed_local_user(lambda: connect_database(str(path)),
+                    "ci-admin", "ci-local-password-1234", "admin")
     webapp.AUTH_FAILURES.clear()
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client, path
     client.close()
 
 
+def _admin_headers(client):
+    from tests import login_headers
+    return login_headers(client, "ci-admin", "ci-local-password-1234")
+
+
 def create_key(client, scopes):
     res = client.post("/api/v1/admin/keys",
-        auth=("ci-admin", "ci-local-password-1234"),
-        headers={"x-teledrive-csrf": "1"},
+        headers={**_admin_headers(client), "x-teledrive-csrf": "1"},
         json={"name": "per-route", "scopes": scopes})
     assert res.status_code == 201, res.text
     return res.json()
@@ -63,7 +68,7 @@ def test_bearer_key_hits_admin_route_only_with_its_permission(api):
     key = create_key(client, ["get:/api/v1/admin/keys"])
     headers = {"Authorization": f"Bearer {key['token']}"}
 
-    # Granted route passes without any session or Basic credentials.
+    # Granted route passes without any session credential.
     listed = client.get("/api/v1/admin/keys", headers=headers)
     assert listed.status_code == 200, listed.text
     assert any(k["prefix"] == key["prefix"] for k in listed.json()["keys"])
@@ -107,8 +112,7 @@ def test_write_route_key_still_needs_the_csrf_header(api):
 def _mint(client, scopes):
     res = client.post(
         "/api/v1/admin/keys",
-        auth=("ci-admin", "ci-local-password-1234"),
-        headers={"x-teledrive-csrf": "1"},
+        headers={**_admin_headers(client), "x-teledrive-csrf": "1"},
         json={"name": "delegator", "scopes": scopes},
     )
     assert res.status_code == 201, res.text
@@ -152,7 +156,7 @@ def test_api_key_rotation_cannot_steal_a_more_privileged_key(api):
     # A privileged key exists (minted by the session admin).
     privileged = _mint(client, ["admin:*"])
     listed = client.get("/api/v1/admin/keys",
-                        auth=("ci-admin", "ci-local-password-1234")).json()
+                        headers=_admin_headers(client)).json()
     target = next(k for k in listed["keys"]
                   if k["prefix"] == privileged["prefix"])
 
@@ -169,7 +173,7 @@ def test_api_key_cannot_revoke_above_its_own_authority(api):
     client, _ = api
     privileged = _mint(client, ["get:/api/v1/admin/keys"])
     listed = client.get("/api/v1/admin/keys",
-                        auth=("ci-admin", "ci-local-password-1234")).json()
+                        headers=_admin_headers(client)).json()
     target = next(k for k in listed["keys"]
                   if k["prefix"] == privileged["prefix"])
     delegator = _mint(client, ["delete:/api/v1/admin/keys/{identifier}"])
@@ -186,7 +190,7 @@ def test_api_key_cannot_revoke_above_its_own_authority(api):
 def test_catalog_endpoint_exposes_the_full_registry(api):
     client, _ = api
     catalog = client.get("/api/v1/admin/keys/permissions",
-                         auth=("ci-admin", "ci-local-password-1234"))
+                         headers=_admin_headers(client))
     assert catalog.status_code == 200
     body = catalog.json()
     names = {entry["name"] for entry in body["routes"]}

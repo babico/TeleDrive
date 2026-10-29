@@ -72,8 +72,7 @@ def web(service, loopback, monkeypatch, tmp_path):
     monkeypatch.setattr(webapp, "storage_transport", lambda db: telegram)
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR",
                         str(tmp_path / "governance-staging"))
-    monkeypatch.setattr(webapp, "WEB_USER", ADMIN[0])
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", ADMIN[1])
+    _seed_user(connection, ADMIN[0], ADMIN[1], "admin")
     webapp.AUTH_FAILURES.clear()
     client = TestClient(webapp.app, base_url="http://localhost:8080")
     try:
@@ -107,15 +106,16 @@ def _login(client, username: str, password: str) -> dict:
     response = client.post("/api/auth/login", headers=CSRF,
                            json={"username": username, "password": password})
     assert response.status_code == 200, response.text
-    return {"Authorization": "Bearer " + response.json()["token"], **CSRF}
+    return {"Authorization": "Bearer " + response.json()["token"]}
 
 
 def _admin_get(client, path):
-    return client.get(path, auth=ADMIN)
+    return client.get(path, headers=_login(client, *ADMIN))
 
 
 def _admin_put(client, path, payload):
-    return client.put(path, auth=ADMIN, headers=CSRF, json=payload)
+    headers = {**_login(client, *ADMIN), **CSRF}
+    return client.put(path, headers=headers, json=payload)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ def test_page_is_served_for_admin_and_redirects_anonymous(web):
     anonymous = client.get("/s3/governance", follow_redirects=False)
     assert anonymous.status_code == 302
     assert anonymous.headers["location"] == "/login"
-    served = client.get("/s3/governance", auth=ADMIN)
+    served = client.get("/s3/governance", headers=_login(client, *ADMIN))
     assert served.status_code == 200
     assert "S3 governance" in served.text
     assert 'href="/s3/governance"' in served.text
@@ -198,7 +198,8 @@ def test_write_without_csrf_header_is_rejected(web):
     client, connection, _ = web
     _make_bucket(connection)
     response = client.put(f"{BASE}/{BUCKET}/ownership",
-                          auth=ADMIN, json={"model": "ObjectWriter"})
+                          headers=_login(client, *ADMIN),
+                          json={"model": "ObjectWriter"})
     assert response.status_code == 403
     assert "CSRF" in response.json()["detail"]
 
@@ -286,7 +287,8 @@ def test_router_signed_requests_round_trip_through_the_gateway(
 
     # Delete flows through the same signer and is observable on the gateway.
     removed = client.delete(
-        f"{BASE}/{BUCKET}/policy", auth=ADMIN, headers=CSRF)
+        f"{BASE}/{BUCKET}/policy",
+        headers={**_login(client, *ADMIN), **CSRF})
     assert removed.status_code == 200, removed.text
     direct = signed(service, "GET", f"/{BUCKET}?policy")
     assert direct.status_code == 404
@@ -397,7 +399,7 @@ def test_notifications_tiering_and_reports_round_trip(web, monkeypatch):
 
     deleted = client.delete(
         f"{BASE}/{BUCKET}/reports/inventory/inventory-1",
-        auth=ADMIN, headers=CSRF)
+        headers={**_login(client, *ADMIN), **CSRF})
     assert deleted.status_code == 200
     reports = _admin_get(client, f"{BASE}/{BUCKET}/reports").json()["reports"]
     assert reports["inventory"] == []

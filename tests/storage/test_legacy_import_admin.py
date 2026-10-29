@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.jobs import StorageUploadJobs
@@ -14,13 +14,13 @@ from teledrive.storage.manifest import ManifestStore
 import web.app as webapp
 
 
-AUTH = ("testadmin", "secure-auth-password")
 CSRF = {"x-teledrive-csrf": "1"}
 URL = "/api/v1/admin/storage/jobs/import-legacy"
 
 
 def test_admin_preview_and_execute_legacy_import_without_telegram(admin, tmp_path, monkeypatch):
     client, db_path, _ = admin
+    AUTH = admin_headers(client)
     root = tmp_path / "uploads"
     root.mkdir()
     folder = root / "legacy"
@@ -38,38 +38,39 @@ def test_admin_preview_and_execute_legacy_import_without_telegram(admin, tmp_pat
         db.close()
     body = {"bucket": "import-ci", "prefix": "legacy", "max_files": 10}
     assert client.post(URL, json=body).status_code in (401, 403)
-    assert client.post(URL, auth=AUTH, json=body).status_code == 403
+    assert client.post(URL, headers=AUTH, json=body).status_code == 403
 
-    preview = client.post(URL, auth=AUTH, headers=CSRF, json=body)
+    preview = client.post(URL, headers={**AUTH, **CSRF}, json=body)
     assert preview.status_code == 200, preview.text
     assert preview.json()["dry_run"] is True
     assert preview.json()["would_queue"] == 1
     assert preview.json()["queued"] == 0
     assert preview.json()["uploads_started"] == 0
-    assert client.get("/api/v1/admin/storage/jobs", auth=AUTH).json()["jobs"] == []
+    assert client.get("/api/v1/admin/storage/jobs", headers=AUTH).json()["jobs"] == []
 
-    executed = client.post(URL, auth=AUTH, headers=CSRF,
+    executed = client.post(URL, headers={**AUTH, **CSRF},
                            json={**body, "execute": True})
     assert executed.status_code == 200, executed.text
     assert executed.json()["queued"] == executed.json()["would_queue"] == 1
     assert executed.json()["excluded"] == 1
-    jobs = client.get("/api/v1/admin/storage/jobs", auth=AUTH).json()["jobs"]
+    jobs = client.get("/api/v1/admin/storage/jobs", headers=AUTH).json()["jobs"]
     assert len(jobs) == 1
     assert jobs[0]["object_key"] == "legacy/first.txt"
     assert jobs[0]["state"] == "queued"
 
-    repeated = client.post(URL, auth=AUTH, headers=CSRF,
+    repeated = client.post(URL, headers={**AUTH, **CSRF},
                            json={**body, "execute": True})
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["queued"] == 0
     assert repeated.json()["already_queued"] == 1
-    assert len(client.get("/api/v1/admin/storage/jobs", auth=AUTH).json()["jobs"]) == 1
+    assert len(client.get("/api/v1/admin/storage/jobs", headers=AUTH).json()["jobs"]) == 1
 
 
 def test_admin_legacy_import_refuses_external_source_and_active_legacy_uploader(
     admin, tmp_path, monkeypatch
 ):
     client, db_path, _ = admin
+    AUTH = admin_headers(client)
     approved = tmp_path / "approved"
     approved.mkdir()
     external = tmp_path / "outside"
@@ -85,9 +86,9 @@ def test_admin_legacy_import_refuses_external_source_and_active_legacy_uploader(
     finally:
         db.close()
     body = {"bucket": "import-ci", "execute": True}
-    refused = client.post(URL, auth=AUTH, headers=CSRF, json=body)
+    refused = client.post(URL, headers={**AUTH, **CSRF}, json=body)
     assert refused.status_code == 403
-    assert len(client.get("/api/v1/admin/storage/jobs", auth=AUTH).json()["jobs"]) == 0
+    assert len(client.get("/api/v1/admin/storage/jobs", headers=AUTH).json()["jobs"]) == 0
 
     (approved / "a.txt").write_bytes(b"approved")
     monkeypatch.setattr(webapp, "effective_config", lambda: SimpleNamespace(
@@ -97,9 +98,9 @@ def test_admin_legacy_import_refuses_external_source_and_active_legacy_uploader(
     try:
         from teledrive.uploader import LEASE_NAME
         assert lease.acquire_lease(LEASE_NAME, "another-live-uploader", int(time.time()), 120)
-        refused = client.post(URL, auth=AUTH, headers=CSRF, json=body)
+        refused = client.post(URL, headers={**AUTH, **CSRF}, json=body)
         assert refused.status_code == 409
-        assert client.get("/api/v1/admin/storage/jobs", auth=AUTH).json()["jobs"] == []
+        assert client.get("/api/v1/admin/storage/jobs", headers=AUTH).json()["jobs"] == []
     finally:
         lease.release_lease(LEASE_NAME, "another-live-uploader")
         lease.close()

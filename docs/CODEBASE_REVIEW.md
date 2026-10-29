@@ -19,10 +19,10 @@ Denetimden sonra kapatılan bulgular — her biri regresyon testiyle:
 | **P11** süresi geçmiş credential reveal + presign kapsamı | ✅ Kapandı | `9c4769d` — `reveal()` expired'ı reddeder, presign `s3:GetObject` ister; `test_reveal_refuses_expired_credential` |
 | **P3** fiziksel GC operator'e açık | ✅ Kapandı | `9c4769d` — GC toggle + collect artık admin-only; `test_physical_gc_is_admin_only` |
 | **P7** audit kimliği spoof edilebilir | ✅ Kapandı | `4365694` — doğrulanmamış Basic adı `unverified-basic` yazılır; canlıda doğrulandı (`[unverified-basic] ... -> 401`) |
+| **P5** Session ↔ bearer yetki asimetrisi | ✅ Kapandı | Rol→izin haritası (`web/permissions.py`): admin tüm izinler, operator tüm veri/depolama, viewer yalnız okuma; session ve Basic aynı haritayı kullanır. `test_auth_single_model.py` |
+| **P6** Legacy Basic = koşulsuz admin | ✅ Kapandı | Basic `users` tablosuna karşı PBKDF2 ile doğrulanır, `enabled` ve gerçek rol uygulanır; yapılandırma parolası kimlik doğrulamaz. İlk açılışta sabit `admin`/`admin` yalnız `admin` satırı yoksa eklenir ve mevcut satır asla ezilmez. `test_auth_single_model.py`, `docs/UPGRADING.md` §7 |
 | O4 şema başlatma yarışı | ⏳ Açık | Ayrı bir migration/kilit refactor'ı gerektiriyor (§3.3) |
-| P1/P2/P5/P6/P10, O1/O5/O12, A1–A4 | ⏳ Açık | Yapısal refactor; §4'teki sıraya göre ele alınmalı |
-
-> Not: P5 (session ile bearer arasındaki yetki asimetrisi) ve P6 (legacy Basic = koşulsuz admin) **tasarım kararı** gerektirir; ikisi de geriye dönük uyumluluk sözleşmesini değiştirir, bu yüzden otomatik düzeltilmedi.
+| P1/P2/P10, O1/O5/O12, A1–A4 | ⏳ Açık | Yapısal refactor; §4'teki sıraya göre ele alınmalı |
 
 ## 0. Yönetici Özeti
 
@@ -150,8 +150,8 @@ Mevcut 5 index: `files(status)`, `files(tg_account)`, `published_versions(bucket
 
 | Katman | Giriş noktası | Kimlik | Yetki kontrolü | CSRF | Not |
 |--------|---------------|--------|----------------|------|-----|
-| Browser session (cookie veya `td_sess_` bearer) | `web/app.py:518` `require_auth` → `_get_current_user` (`:423`) | `user_sessions` tablosu, SHA-256 digest | Yalnızca `_required_roles` (`:469`) path sezgisi | Handler içinde `_same_origin` (`:298`), 51 çağrı | Route bazlı izin yok; viewer tüm GET'leri okur. |
-| Legacy HTTP Basic | `web/app.py:556-573` | Tek `WEB_USER`/`WEB_PASSWORD` sabiti | Başarılıysa **role=admin** | Handler `_same_origin` | DB kullanıcısı değil; tüm RBAC'ı bypass eder. |
+| Browser session (cookie veya `td_sess_` bearer) | `require_auth` → `_get_current_user` | `user_sessions` tablosu, SHA-256 digest | Dış kapı `_required_roles` + iç kapı `PermissionRegistry.role_allows` | Handler içinde `_same_origin`, 51 çağrı | Rol→izin haritası; viewer yalnız okuma izinleri (P5 kapandı). |
+| HTTP Basic | `require_auth` → `_verify_basic_credentials` | `users` tablosu, PBKDF2 + `enabled` | Oturumla aynı dış rol kapısı + iç izin haritası | Handler `_same_origin` | Yapılandırma parolası kimlik sayılmaz; koşulsuz admin yolu yok (P6 kapandı). |
 | REST API key (9 eski endpoint) | `require_api_scope` (`:1272`) | `td_live_` + `api_credentials.digest` | `ApiKeyStore.authorize(token, required)` (`api_keys.py:145`) | Yok (cookie değil) | `required` string'i handler'da sabit yazılı. |
 | Genel API key (admin dahil tüm route'lar) | `require_auth` (`:523-547`) | aynı store | `PermissionRegistry.permission_for` (`permissions.py:186`) + `authorize` | Handler `_same_origin` | Role policy uygulanmaz; anahtarın izni neyse o. |
 | S3 SigV4 header | `verify_header_signature` (`sigv4.py:279`) | `access_key` | `S3CredentialStore.resolve(access_key, action)` (`credentials.py:120`) | N/A | `action` `web/s3.py:2836-3050` dev if/elif'te seçilir. |
@@ -183,11 +183,11 @@ Ayrıca S3 action listesi `teledrive/s3/credentials.py:31-54` ve `web/s3.py:2836
 `POST /api/v1/admin/keys` (`web/app.py:1556-1575`) gelen `payload.scopes`'u, isteği yapan anahtarın kendi izinleriyle karşılaştırmadan `ApiKeyStore.create(..., extra_allowed=route_permissions)`'a veriyor. `require_auth` bearer yolunda role policy yok (`:519-547`).
 Sonuç: yalnızca `post:/api/v1/admin/keys` izni olan bir anahtar, kendisine **herhangi bir route izni** (ör. `delete:/api/v1/admin/users`, `post:/api/v1/admin/s3/credentials`) olan yeni bir anahtar üretebilir. Aynı şekilde `POST .../keys/{identifier}/rotate` (`:1590-1602`) path parametresiyle **başka bir anahtarı** rotate edip yeni secret'ı alabilir; hedef anahtarın izinleri daha yüksekse tam ele geçirme olur. `tests/web/test_per_route_permissions.py:85` mint'i test ediyor ama escalation'ı değil.
 
-**P5 — Session ile bearer arasında asimetri (yüksek).**
-Viewer session'ı tüm GET API'lerini okur (config redacted, loglar, tüm bucket/object metadata, GC audit). Aynı kullanıcı için üretilen API key ise **her route için ayrı izin** ister. Yani "viewer" kavramı iki farklı yetki modeline karşılık geliyor. Bu, hem dokümantasyon hem test açısından kafa karıştırıcı; ayrıca session çalınması durumunda saldırganın okuma yüzeyi çok geniş.
+**P5 — Session ile bearer arasında asimetri (yüksek). ✅ Kapandı.**
+Viewer session'ı tüm GET API'lerini okuyabiliyordu; aynı kullanıcı için üretilen API key ise her route için ayrı izin istiyordu. Artık her API route'unun bir izni var ve session/Basic principal'ının izinleri rolünden türetiliyor (`web/permissions.py`): admin tümü, operator tüm veri/depolama ama kullanıcı/anahtar/credential/GC/quota/website/config yazımı yok, viewer yalnız okuma. API key'lerin kendi per-route scope semantiği değişmedi.
 
-**P6 — Legacy Basic = koşulsuz admin (yüksek).**
-`web/app.py:557-572`: `WEB_PASSWORD` eşleşirse `role="admin"` atanıyor. Bu, DB'deki kullanıcı/rol sistemini tamamen atlar. `WEB_PASSWORD` zorunlu olduğu için pratikte her deployment'ta ikinci bir "root" yolu var. Basic'in test/CLI uyumluluğu için kalması savunulabilir; fakat audit'te ayrı principal olarak işaretlenmeli ve admin-only route'larda ek guard görmeli.
+**P6 — Legacy Basic = koşulsuz admin (yüksek). ✅ Kapandı.**
+Basic artık `users` tablosuna karşı doğrulanıyor (PBKDF2, `enabled`, gerçek rol); bilinmeyen kullanıcı ve yapılandırma parolası reddedilir. `web.user`/`web.password` servis ayarı olmaktan çıkarıldı; ilk açılışta sabit `admin`/`admin` yalnız `admin` adlı satır yoksa oluşturulur ve mevcut satırın hash/rol/enabled değerleri korunur. Kırıcı değişiklik ve migrasyon `docs/UPGRADING.md` §7'de.
 
 **P7 — Audit kimliği spoof edilebilir (orta-yüksek).**
 `_extract_user` (`web/app.py:181-228`) Basic header'ı **şifreyi doğrulamadan** decode edip kullanıcı adını döndürüyor (`:205-213`). `_audit_log_middleware` (`:1044-1045`) bu değeri log'a yazıyor. Yani `Authorization: Basic YWRtaW46eA==` gönderen herkes, başarısız bir istekte bile audit log'a "admin" yazdırabilir. Ayrıca `name_for_token` revoked/expired kontrolü yapmadığı için iptal edilmiş anahtar adı da log'da görünür. Adli izlenebilirliği bozar.

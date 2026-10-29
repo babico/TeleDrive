@@ -15,13 +15,14 @@
 # values.
 
 # ---------------------------------------------------------------------------
-# Web service: authentication, listeners and request limits.
+# Web service: listeners and request limits.
 # ---------------------------------------------------------------------------
+# Authentication is NOT configured here. The first start creates a
+# hardcoded admin/admin account (role admin) and never overwrites an
+# existing one; change that password in the WebUI after logging in.
+# Scripts authenticate with API keys issued from the WebUI.
 web:
-  user: "admin"
-  password: "CHANGE_ME_AT_LEAST_16_CHARACTERS"
   allowed_hosts: "localhost,127.0.0.1,[::1]"
-  allow_insecure: false          # true only for explicitly trusted local setups
   rest_max_upload_bytes: 2147483648      # 2 GiB
   auth_failure_limit: 5
   auth_failure_window_seconds: 300
@@ -37,8 +38,6 @@ web:
   #   TELEDRIVE_TRUSTED_PROXY=1                (TLS terminates in front)
   # A combined .pem (chain + private key) needs only the CERTFILE entry;
   # certificates live under ./config (e.g. /config/ssl/server.pem).
-  # Read the admin password from a file instead of the plaintext field above:
-  # password_file: "/config/web-password"
   # Maximum accepted HTTP request body size (32 MiB default):
   # max_request_bytes: 33554432
   # Directory for login session tokens (the Docker image sets this path):

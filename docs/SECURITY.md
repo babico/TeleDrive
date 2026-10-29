@@ -57,10 +57,12 @@ The unified server dispatches by its actual socket-local listener port, **not** 
 | --- | --- | --- | --- |
 | Read listings, redacted config and logs | Yes | Yes | Yes |
 | Storage/job operations, channels, versions, recovery | Yes | Yes | No |
-| User management, API keys, S3 credentials, config writes, quotas | Yes | No | No |
+| User management, API keys, S3 credentials, config writes, quotas, website publishing, physical GC | Yes | No | No |
 
-- **CSRF protection:** state-changing endpoints (login/logout, configuration, user, credential, storage-job and session management) require the `X-TeleDrive-CSRF: 1` header plus a same-origin `Origin` check, regardless of whether the caller authenticated with the session cookie or the legacy HTTP Basic fallback.
-- **Default administrator:** first start creates `admin`/`admin`; change it immediately (the default is public knowledge). HTTP Basic (`web.user`/`web.password`) exists only as a backward-compat fallback for scripts and always maps to the admin role.
+- **CSRF protection:** state-changing endpoints (login/logout, configuration, user, credential, storage-job and session management) require the `X-TeleDrive-CSRF: 1` header plus a same-origin `Origin` check, whether the caller authenticated with the session cookie or with HTTP Basic. API keys are scoped per route and need the header only where documented.
+- **One permission model:** every API route has exactly one permission, derived from the live route table. A session and HTTP Basic both resolve to a local `users` row, and that row's role grants a fixed set of permissions: **admin** holds every permission; **operator** holds all data/storage permissions but not user, key, credential, GC, quota, website or config-write administration; **viewer** holds read (`GET`/`HEAD`) permissions only. The path gate and the permission map must both pass. Bearer API keys keep their own independently issued per-route scopes.
+- **HTTP Basic is a local-user credential:** it verifies username + PBKDF2 password against the `users` table, honours `enabled` and applies the user's real role — there is no unconditional admin path. Unknown users and the retired configuration password are refused with `401`, and failed attempts share the login throttle.
+- **Default administrator:** the first start inserts the hardcoded local account `admin`/`admin` only when no `admin` row exists; change it immediately (the default is public knowledge, and the WebUI forces the change). An existing `admin` row — password hash, role and enabled flag — is never overwritten. Configuration is not an authentication source: `web.user`/`web.password` are no longer service settings and never authorise a request.
 
 ## 6. Database, files and runtime defenses
 

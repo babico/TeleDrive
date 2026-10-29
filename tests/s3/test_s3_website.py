@@ -51,9 +51,14 @@ def put_object(service, bucket, key, body, content_type=None):
 
 def admin_config(web, bucket, *, index="index.html", error=None,
                  public_read=True):
+    login = web.post("/api/v1/auth/login", headers=CSRF,
+                     json={"username": ADMIN_AUTH[0],
+                           "password": ADMIN_AUTH[1]})
+    assert login.status_code == 200, login.text
+    headers = {"Authorization": "Bearer " + login.json()["token"], **CSRF}
     return web.put(
         f"/api/v1/admin/storage/buckets/{bucket}/website",
-        auth=ADMIN_AUTH, headers=CSRF,
+        headers=headers,
         json={"index_document": index, "error_document": error,
               "public_read": public_read},
     )
@@ -79,8 +84,7 @@ def site(service, monkeypatch, tmp_path):
     monkeypatch.setattr(webapp, "storage_transport", lambda db: telegram)
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR",
                         str(tmp_path / "website-staging"))
-    monkeypatch.setattr(webapp, "WEB_USER", ADMIN_AUTH[0])
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", ADMIN_AUTH[1])
+    seed_user(connection, ADMIN_AUTH[0], ADMIN_AUTH[1], "admin")
     webapp.AUTH_FAILURES.clear()
     web = TestClient(webapp.app, base_url="http://localhost:8080")
     try:
@@ -305,9 +309,7 @@ def test_operator_cannot_enable_public_read(service, site):
     assert denied.status_code == 403, denied.text
     assert web.get("/site/site-bucket/").status_code == 404
 
-    # Admin (Basic auth) can make the same decision. Drop the operator
-    # session cookie so Basic auth is evaluated on its own.
-    web.cookies.clear()
+    # An admin session can make the same decision.
     assert admin_config(web, "site-bucket").status_code == 200
     assert web.get("/site/site-bucket/").status_code == 404  # no index object
 

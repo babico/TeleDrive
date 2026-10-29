@@ -59,8 +59,6 @@ def authenv(tmp_path, monkeypatch):
         encoding="ascii",
     )
     monkeypatch.setattr(web, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(web, "WEB_USER", "testadmin")
-    monkeypatch.setattr(web, "WEB_PASSWORD", "long-secure-test-password")
     monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
     monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
     (tmp_path / "scratch").mkdir()
@@ -442,12 +440,14 @@ def test_admin_can_create_user(authenv):
     assert r.json()["role"] == "operator"
 
 
-def test_config_redacts_web_password(authenv):
+def test_config_never_exposes_or_keeps_retired_auth_keys(authenv):
     client = authenv["client"]
     auth = _bearer(client, "admin", "admin-password-1")
     r = client.get("/api/config", headers=auth)
     assert r.status_code == 200
-    assert r.json()["web"]["password"] == web.REDACTED
+    # The upgrade-era password is neither exposed nor kept as a setting.
+    assert "password" not in r.json()["web"]
+    assert "user" not in r.json()["web"]
 
 
 # ---------------------------------------------------------------- user mgmt
@@ -1448,18 +1448,11 @@ def test_replication_endpoints(authenv):
     assert status["account"] is None
 
 
-def test_audit_identity_is_not_spoofable_via_a_forged_basic_header(authenv):
-    """P7: the audit log must not record a claimed-but-unverified name.
-
-    Before this fix any request carrying `Authorization: Basic
-    YWRtaW46eA==` wrote "admin" into the log even though the password was
-    wrong, which destroys the forensic value of the trail.
-    """
-    import base64
-    import web.app as webapp
-
+def test_basic_header_is_ignored_by_the_audit_identity(authenv):
+    """A Basic header is no longer a credential claim at all."""
     from starlette.requests import Request
-    forged = base64.b64encode(b"admin:definitely-not-the-password").decode()
+
+    from tests import basic_header
 
     def build(header: str) -> Request:
         return Request({"type": "http", "method": "GET", "path": "/api/v1/x",
@@ -1468,9 +1461,12 @@ def test_audit_identity_is_not_spoofable_via_a_forged_basic_header(authenv):
                         "query_string": b"", "server": ("127.0.0.1", 80),
                         "scheme": "http", "client": ("127.0.0.1", 1)})
 
-    assert webapp._extract_user(build(f"Basic {forged}")) == "unverified-basic"
-    # With the real configured password the name is trusted.
-    import base64 as b64
-    real = b64.b64encode(
-        f"{webapp.WEB_USER}:{webapp.WEB_PASSWORD}".encode()).decode()
-    assert webapp._extract_user(build(f"Basic {real}")) == webapp.WEB_USER
+    # Even a valid local username/password over Basic is anonymous.
+    header = basic_header("admin", "admin-password-1")["Authorization"]
+    assert web._extract_user(build(header)) == "anonymous"
+
+    # A real session still resolves to the username.
+    login = _login(authenv["client"], "admin", "admin-password-1")
+    assert login.status_code == 200, login.text
+    assert web._extract_user(
+        build("Bearer " + login.json()["token"])) == "admin"

@@ -8,7 +8,7 @@ from hashlib import sha256
 import pytest
 from sqlalchemy import text
 
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.gc_collect import RetainedMediaGC
@@ -161,40 +161,35 @@ def test_collect_executes_journals_and_hides_versions(store):
 
 def test_web_endpoints_fence_the_toggle_and_confirm(admin):
     client, _, _ = admin
-    auth = ("testadmin", "secure-auth-password")
-    status = client.get("/api/v1/admin/storage/gc", auth=auth)
+    auth = admin_headers(client)
+    status = client.get("/api/v1/admin/storage/gc", headers=auth)
     assert status.status_code == 200, status.text
     body = status.json()
     assert body["state"]["enabled"] is False
     assert "logical_bytes" in body["metrics"]
 
     # Enabling requires the typed confirmation.
-    denied = client.put("/api/v1/admin/storage/gc", auth=auth,
-                        headers={"x-teledrive-csrf": "1"},
+    denied = client.put("/api/v1/admin/storage/gc", headers={**auth, **{"x-teledrive-csrf": "1"}},
                         json={"enabled": True})
     assert denied.status_code == 422
-    allowed = client.put("/api/v1/admin/storage/gc", auth=auth,
-                         headers={"x-teledrive-csrf": "1"},
+    allowed = client.put("/api/v1/admin/storage/gc", headers={**auth, **{"x-teledrive-csrf": "1"}},
                          json={"enabled": True, "confirm": "PHYSICAL-GC"})
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["state"]["enabled"] is True
 
     # Dry-run preview works without touching Telegram.
-    preview = client.post("/api/v1/admin/storage/gc/collect", auth=auth,
-                          headers={"x-teledrive-csrf": "1"},
+    preview = client.post("/api/v1/admin/storage/gc/collect", headers={**auth, **{"x-teledrive-csrf": "1"}},
                           json={"scope": "deleted", "dry_run": True})
     assert preview.status_code == 200, preview.text
     assert preview.json()["dry_run"] is True
 
     # Execution demands its own confirmation even with GC enabled.
-    unconfirmed = client.post("/api/v1/admin/storage/gc/collect", auth=auth,
-                              headers={"x-teledrive-csrf": "1"},
+    unconfirmed = client.post("/api/v1/admin/storage/gc/collect", headers={**auth, **{"x-teledrive-csrf": "1"}},
                               json={"scope": "deleted", "dry_run": False})
     assert unconfirmed.status_code == 422
 
     # Restore the OFF state for other suites.
-    client.put("/api/v1/admin/storage/gc", auth=auth,
-               headers={"x-teledrive-csrf": "1"},
+    client.put("/api/v1/admin/storage/gc", headers={**auth, **{"x-teledrive-csrf": "1"}},
                json={"enabled": False})
 
 
@@ -265,7 +260,7 @@ def test_lifecycle_expiration_creates_markers_and_enqueues(admin):
     """Expiration rules: due current objects get delete markers and,
     with GC enabled, their media joins the collection queue."""
     client, url, _ = admin
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     from tests.s3.test_s3_gateway import service as _svc  # noqa: F401
     db = connect_database(url)
     try:

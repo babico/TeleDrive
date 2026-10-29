@@ -2,7 +2,7 @@
 from __future__ import annotations
 import time
 from hashlib import sha256
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.gc import StorageGCInventory
@@ -32,9 +32,9 @@ def test_failed_age_plan_protects_live_pending_and_ready(admin):
         db.close()
     endpoint = "/api/v1/admin/storage/gc-candidates"
     assert client.get(endpoint).status_code in (401, 403)
-    assert client.get(endpoint, auth=("testadmin", "secure-auth-password"),
+    assert client.get(endpoint, headers=admin_headers(client),
                       params={"min_age_seconds": 60}).status_code == 422
-    response = client.get(endpoint, auth=("testadmin", "secure-auth-password"))
+    response = client.get(endpoint, headers=admin_headers(client))
     assert response.status_code == 200, response.text
     assert response.json()["dry_run"] is True
     assert response.json()["physical_deletion_enabled"] is False

@@ -23,7 +23,7 @@
 ### P0: implementation boundaries
 
 - **State and durability:** SQLAlchemy with SQLite/PostgreSQL/MySQL integration testing, immutable object/chunk manifests, SHA-256 verification, ranged reads, fencing and persistent job history. Engines are cached per database URL in a bounded LRU cache; a WAL checkpoint on shared-engine close keeps SQLite files self-contained.
-- **Authentication and RBAC:** token-based login (`POST /api/v1/auth/login`) with an httpOnly `teledrive_session` cookie for the browser UI (no token in browser storage), SHA-256-hashed session tokens, salted PBKDF2 password hashes with transparent legacy-hash migration, login throttling, and a central admin/operator/viewer role policy enforced on `/api/v1/admin/*`. HTTP Basic (`web.user`/`web.password`) remains only a backward-compat fallback for scripts.
+- **Authentication and RBAC:** token-based login (`POST /api/v1/auth/login`) with an httpOnly `teledrive_session` cookie for the browser UI (no token in browser storage), SHA-256-hashed session tokens, salted PBKDF2 password hashes with transparent legacy-hash migration, login throttling, and a central admin/operator/viewer role policy enforced on `/api/v1/admin/*`. HTTP Basic verifies the same local `users` row (never a configuration password), so it obeys the same role and per-route permission rules. The first boot creates a non-configurable `admin`/`admin` account only when no `admin` row exists.
 - **API namespace:** canonical `/api/v1/auth/*`, `/api/v1/config`, `/api/v1/logs` and `/api/v1/admin/*` endpoints; the legacy `/api/auth/*`, `/api/config` and `/api/logs` paths keep working as undocumented aliases. `GET /api/logs` returns only structured `entries` (no `lines` duplicate).
 - **Quotas:** optional per-bucket quotas (`max_size_bytes`/`max_objects`) enforced server-side on REST and S3 uploads (simple PUT, POST policy and multipart completion), managed via the admin quota API or the WebUI S3 page.
 - **API and credentials:** separately scoped REST Bearer credentials and S3 SigV4 credentials, signed request checks, conditional writes, restricted administrative operations and fail-closed unsupported inputs.
@@ -46,7 +46,7 @@ The default [`docker-compose.yml`](../docker-compose.yml) creates **one `teledri
 
 | Interface | Local endpoint | Auth model | Storage |
 | --- | --- | --- | --- |
-| WebUI and REST v1 | `http://127.0.0.1:8080` | Token login with admin/operator/viewer RBAC (httpOnly cookie or Bearer token; HTTP Basic is a script-only backward-compat fallback) + scoped REST Bearer keys | Shared SQL catalog and Telegram object engine |
+| WebUI and REST v1 | `http://127.0.0.1:8080` | Token login with admin/operator/viewer RBAC (httpOnly cookie, Bearer session or scoped API key; HTTP Basic verifies a local user) + scoped REST Bearer keys | Shared SQL catalog and Telegram object engine |
 | S3-compatible API | `http://127.0.0.1:9000` | Scoped S3 credentials with SigV4 | **Same** SQL catalog and Telegram object engine |
 | Local-folder durable jobs | Admin job API on 8080 | Authenticated session + CSRF | **Same** catalog; files under allowed read-only mount are explicitly queued |
 

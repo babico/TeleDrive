@@ -64,8 +64,6 @@ jobs:
       - name: Dependency audit
         run: pip-audit -r requirements.txt
       - name: Docker Compose config
-        env:
-          TELEDRIVE_WEB_PASSWORD: ci-only-not-a-real-secret
         run: |
           docker compose config --quiet
           
@@ -236,6 +234,7 @@ jobs:
             tests/web/test_settings_persistence.py \
             tests/web/test_website_admin.py \
             tests/web/test_auth_rbac.py \
+            tests/web/test_auth_single_model.py \
             tests/web/test_per_route_permissions.py \
             tests/web/test_s3_governance_ui.py \
             tests/meta/test_host_soak.py \

@@ -5,7 +5,7 @@ import time
 
 from sqlalchemy import select
 
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.manifest import ManifestStore, writer_fences
 
@@ -29,9 +29,9 @@ def test_pending_recovery_is_authenticated_csrf_protected_and_dry_run(admin):
     live, live_token = create(url, age=10, ttl=300)
     legacy, _ = create(url, leased=False)
     uri = "/api/v1/admin/storage/pending-stale"
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     assert client.get(uri).status_code in (401, 403)
-    result = client.get(uri, auth=auth)
+    result = client.get(uri, headers=auth)
     assert result.status_code == 200, result.text
     data = result.json()
     assert data["dry_run"] is True
@@ -39,13 +39,13 @@ def test_pending_recovery_is_authenticated_csrf_protected_and_dry_run(admin):
     assert [item["id"] for item in data["uploads"]] == [stale]
     assert "token" not in result.text
     assert data["uploads"][0]["journaled_chunks"] == 0
-    assert client.get(uri, auth=auth, params={"min_age_seconds": 10}).status_code == 422
+    assert client.get(uri, headers=auth, params={"min_age_seconds": 10}).status_code == 422
 
     endpoint = f"{uri}/{stale}/abandon"
     assert client.post(endpoint, json={"execute": True}).status_code in (401, 403)
-    assert client.post(endpoint, auth=auth, json={"execute": True}).status_code == 403
+    assert client.post(endpoint, headers=auth, json={"execute": True}).status_code == 403
     headers = {"X-TeleDrive-CSRF": "1"}
-    preview = client.post(endpoint, auth=auth, headers=headers, json={})
+    preview = client.post(endpoint, headers={**auth, **headers}, json={})
     assert preview.status_code == 200
     assert preview.json() == {
         "object_id": stale, "eligible": True, "abandoned": False, "dry_run": True,
@@ -58,13 +58,13 @@ def test_pending_recovery_is_authenticated_csrf_protected_and_dry_run(admin):
     finally:
         db.close()
 
-    executed = client.post(endpoint, auth=auth, headers=headers,
+    executed = client.post(endpoint, headers={**auth, **headers},
                            json={"execute": True})
     assert executed.status_code == 200
     assert executed.json() == {
         "object_id": stale, "eligible": True, "abandoned": True, "dry_run": False,
     }
-    retry = client.post(endpoint, auth=auth, headers=headers, json={"execute": True})
+    retry = client.post(endpoint, headers={**auth, **headers}, json={"execute": True})
     assert retry.json()["abandoned"] is False
     db = connect_database(url)
     try:
@@ -97,8 +97,8 @@ def test_competing_heartbeat_survives_and_second_worker_cannot_reanimate(admin):
 
     endpoint = f"/api/v1/admin/storage/pending-stale/{target}/abandon"
     out = client.post(endpoint, json={"execute": True},
-                      auth=("testadmin", "secure-auth-password"),
-                      headers={"X-TeleDrive-CSRF": "1"})
+                      headers={**admin_headers(client),
+                               "X-TeleDrive-CSRF": "1"})
     assert out.status_code == 200
     assert out.json()["abandoned"] is False
     db = connect_database(url)

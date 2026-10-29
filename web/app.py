@@ -1,7 +1,20 @@
+"""TeleDrive web application.
+
+There is exactly one authentication mechanism for people: ``POST
+/api/v1/auth/login`` verifies a row in the local ``users`` table and sets
+an httpOnly session cookie. The user's role is mapped to endpoint
+permissions by ``web.permissions``. HTTP Basic is not implemented at all;
+a ``Basic`` header is treated like no credential.
+
+The first boot creates a hardcoded ``admin``/``admin`` account if (and
+only if) no user named ``admin`` exists. It is never configurable and an
+existing admin row is never overwritten, so changing that password
+survives restarts. Programmatic clients use API keys, which keep their
+existing per-route scope semantics unchanged. See ``docs/UPGRADING.md``.
+"""
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import copy
@@ -55,6 +68,7 @@ from teledrive.storage.user_mode import (
 )
 from teledrive.storage.history_inventory import inventory_channel
 from teledrive.storage.mtproto_rate_guard import MtprotoRateGuard
+from web.permissions import READ_METHODS, is_admin_only
 mtproto_storage_runtime = UserSessionRuntime()
 
 CONFIG_PATH = Path(os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml"))
@@ -64,10 +78,6 @@ REDACTED = "__REDACTED__"
 # Service settings come ONLY from config/config.yaml (owner policy); the
 # TELEDRIVE_CONFIG env var just points at the file. Tests override the
 # module attributes below directly.
-WEB_USER = "admin"
-WEB_PASSWORD = ""
-WEB_PASSWORD_FILE = ""
-ALLOW_INSECURE = False
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
 AUTH_DIR = Path("/data/auth")
@@ -118,7 +128,6 @@ def settings_s3_port() -> int:
 
 def _reload_service_settings() -> None:
     """Read service settings from the deployment config into module attrs."""
-    global WEB_USER, WEB_PASSWORD, WEB_PASSWORD_FILE, ALLOW_INSECURE
     global MAX_REQUEST_BYTES, ALLOWED_HOSTS, AUTH_DIR, STORAGE_SCRATCH_DIR
     global REST_MAX_UPLOAD_BYTES, JOB_SOURCE_ROOT, JOB_AUTO_RUN
     global ALLOWED_SQLITE_ROOTS, AUTH_FAILURE_WINDOW_SECONDS, AUTH_FAILURE_LIMIT
@@ -129,10 +138,6 @@ def _reload_service_settings() -> None:
     from teledrive.settings import load_settings
     cfg = uploader.load_config(str(CONFIG_PATH))
     settings = load_settings(cfg, str(CONFIG_PATH))
-    WEB_USER = settings.web_user
-    WEB_PASSWORD = settings.web_password
-    WEB_PASSWORD_FILE = settings.web_password_file
-    ALLOW_INSECURE = settings.allow_insecure
     MAX_REQUEST_BYTES = settings.max_request_bytes
     ALLOWED_HOSTS = list(settings.allowed_hosts)
     AUTH_DIR = Path(settings.auth_dir)
@@ -182,25 +187,6 @@ class RotatingCompressedFileHandler(RotatingFileHandler):
         os.remove(source)
 
 
-def _verify_basic_credentials(username: str, password: str) -> bool:
-    """Cheap, constant-time check used ONLY for audit labelling.
-
-    Deliberately no password-hash work here: the audit middleware runs on
-    every request, so a PBKDF2 verification would be a CPU-exhaustion
-    vector. The configured credential is compared in constant time; any
-    other claimed name is recorded as unverified rather than trusted.
-
-    This never authorises anything — require_auth makes the real decision,
-    including the throttled, hash-verified path for local users.
-    """
-    if not isinstance(username, str) or not isinstance(password, str):
-        return False
-    if not WEB_PASSWORD:
-        return False
-    return (hmac.compare_digest(username, WEB_USER)
-            and hmac.compare_digest(password, WEB_PASSWORD))
-
-
 def _extract_user(request: Request) -> str:
     """Extract the authenticated user identity from the request (best-effort)."""
     auth = request.headers.get("authorization", "")
@@ -225,20 +211,6 @@ def _extract_user(request: Request) -> str:
                 conn.close()
         except Exception:
             pass
-    # Basic auth. The header is only a CLAIM until the password verifies:
-    # logging an unverified username lets anyone write "admin" into the
-    # audit trail, which destroys forensic value.
-    if auth.lower().startswith("basic "):
-        try:
-            decoded = base64.b64decode(auth[6:]).decode("utf-8", "replace")
-            username, _, password = decoded.partition(":")
-        except Exception:
-            return "anonymous"
-        if _verify_basic_credentials(username, password):
-            return username
-        # A claimed identity we cannot cheaply verify is recorded as such,
-        # never as the name in the header.
-        return "unverified-basic"
     # Bearer token (API key) — resolve to the key name if possible.
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
@@ -382,68 +354,106 @@ def _session_token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-_DEFAULT_ADMIN_PW_CACHE: dict = {"in_use": None}
+_DEFAULT_ADMIN_PW_CACHE: dict[str, bool] = {}
 
 
-def _default_admin_password_in_use() -> bool:
-    """True while the shipped admin/admin credential still verifies.
+def _default_admin_password_in_use(username: str = "admin") -> bool:
+    """True while the seeded account still uses the shipped 'admin' password.
 
-    The PBKDF2 comparison is cached per process; every password change
+    The PBKDF2 comparison is cached per username; every password change
     invalidates the cache via _invalidate_default_admin_cache().
     """
-    if _DEFAULT_ADMIN_PW_CACHE["in_use"] is None:
+    cached = _DEFAULT_ADMIN_PW_CACHE.get(username)
+    if cached is None:
         try:
             conn = db_connect()
             try:
                 from sqlalchemy import text as _text
                 row = conn.connection.execute(_text(
-                    "SELECT password_hash FROM users WHERE username = 'admin'"
-                )).fetchone()
+                    "SELECT password_hash FROM users WHERE username = :u"
+                ), {"u": username}).fetchone()
             finally:
                 conn.close()
-            _DEFAULT_ADMIN_PW_CACHE["in_use"] = bool(
+            cached = bool(
                 row is not None and _verify_password("admin", row[0]))
         except Exception:
-            _DEFAULT_ADMIN_PW_CACHE["in_use"] = False
-    return _DEFAULT_ADMIN_PW_CACHE["in_use"]
+            cached = False
+        _DEFAULT_ADMIN_PW_CACHE[username] = cached
+    return cached
 
 
 def _invalidate_default_admin_cache() -> None:
-    _DEFAULT_ADMIN_PW_CACHE["in_use"] = None
+    _DEFAULT_ADMIN_PW_CACHE.clear()
 
 
-def _auth_throttle_check(key: str) -> None:
-    """Reject authentication attempts after repeated failures (brute-force guard)."""
+def _auth_throttle_blocked(key: str) -> bool:
+    """True while a client has exhausted its authentication failures."""
     now = time.time()
     window = max(1, int(AUTH_FAILURE_WINDOW_SECONDS))
     limit = max(1, int(AUTH_FAILURE_LIMIT))
     failures = AUTH_FAILURES.get(key)
-    if failures:
-        while failures and failures[0] <= now - window:
-            failures.popleft()
-        if len(failures) >= limit:
-            raise HTTPException(429, "Too many failed attempts; try again later")
+    if not failures:
+        return False
+    while failures and failures[0] <= now - window:
+        failures.popleft()
+    return len(failures) >= limit
+
+
+def _auth_throttle_check(key: str) -> None:
+    """Reject authentication attempts after repeated failures (brute-force guard)."""
+    if _auth_throttle_blocked(key):
+        raise HTTPException(429, "Too many failed attempts; try again later")
 
 
 def _auth_failure_record(key: str) -> None:
     AUTH_FAILURES.setdefault(key, deque()).append(time.time())
 
 
+def _migrate_users_enabled_column() -> None:
+    """Add ``users.enabled`` to a pre-``enabled`` database (idempotent)."""
+    try:
+        conn = db_connect()
+        try:
+            from sqlalchemy import text as _text, inspect as _inspect
+            cols = {c['name'] for c in _inspect(conn.engine).get_columns('users')}
+            if 'enabled' not in cols:
+                conn.connection.execute(_text(
+                    "ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL "
+                    "DEFAULT 1"))
+                conn.connection.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 def _create_default_admin() -> None:
-    """Ensure at least one admin user exists."""
+    """Create the hardcoded first-boot admin if no ``admin`` row exists.
+
+    The account is always ``admin``/``admin`` (role ``admin``, enabled).
+    It is deliberately NOT configurable: no config key and no environment
+    variable can change the username or password. If a row named ``admin``
+    already exists it is left completely untouched — password hash, role
+    and enabled flag included — so an operator who changes the password
+    does not get it reset on the next start. Deleting the row re-creates
+    the bootstrap account, which is the documented lockout recovery.
+    """
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
-        count = conn.connection.execute(_text("SELECT COUNT(*) FROM users")).scalar() or 0
-        if count == 0:
+        exists = conn.connection.execute(_text(
+            "SELECT 1 FROM users WHERE username = 'admin'"
+        )).fetchone()
+        if exists is None:
             now = int(time.time())
             conn.connection.execute(_text(
-                "INSERT INTO users (username, password_hash, role, created_at, updated_at) "
-                "VALUES (:u, :ph, 'admin', :now, :now)"
-            ), {"u": "admin", "ph": _hash_password("admin"), "now": now})
+                "INSERT INTO users (username, password_hash, role, enabled, "
+                "created_at, updated_at) "
+                "VALUES ('admin', :ph, 'admin', 1, :now, :now)"
+            ), {"ph": _hash_password("admin"), "now": now})
             conn.connection.commit()
-            _log("default admin account 'admin' created with password 'admin' — "
-                 "change this password immediately", "startup")
+            _log("bootstrap admin account 'admin' created with the default "
+                 "password — change it immediately", "startup")
     except Exception as exc:
         _log(f"default admin creation failed: {type(exc).__name__}", "startup")
     finally:
@@ -494,51 +504,53 @@ def _get_current_user(request: Request) -> dict | None:
 
 _ROLE_ADMIN = frozenset({"admin"})
 _ROLE_WRITE = frozenset({"admin", "operator"})
+_ROLE_READ = frozenset({"admin", "operator", "viewer"})
 
 
-def _required_roles(method: str, path: str) -> frozenset[str] | None:
-    """Central role policy for the admin API. None = any authenticated role.
+def _required_roles(method: str, path: str) -> frozenset[str]:
+    """Outer role gate for the API, before the permission map is applied.
 
-    - viewer: read-only access to listings, config (redacted) and logs
-    - operator: additionally all storage operations (jobs, channels, versions, recovery)
-    - admin: additionally user management, API keys, S3 credentials, config and quotas
+    - admin-only surfaces (users, keys, credentials, physical GC, bucket
+      quota, website publishing, config writes) require admin for every
+      method. These are checked first: a GET is never a bypass.
+    - other reads require a known role; the per-route permission map is
+      the inner gate that decides whether a viewer/operator actually has
+      that permission.
+    - other writes require operator or admin; the map narrows further.
+
+    ``web.permissions.is_admin_only`` is the single classification used
+    both here and by the role->permission map, so the two cannot drift.
     """
-    # Canonicalize legacy aliases (/api/auth/*, /api/config, /api/logs)
-    # onto the /api/v1/* namespace before policy matching.
-    if path.startswith("/api/") and not path.startswith("/api/v1/") \
-            and not path.startswith("/api/health"):
-        path = "/api/v1/" + path[len("/api/"):]
-    if path.startswith("/api/v1/admin/users"):
+    if is_admin_only(method, path):
         return _ROLE_ADMIN
-    if method == "GET":
-        return None
-    if path == "/api/v1/config":
-        return _ROLE_ADMIN
-    if path.startswith("/api/v1/admin/keys"):
-        return _ROLE_ADMIN
-    if (path.startswith("/api/v1/admin/s3/credentials")
-            or path.startswith("/api/v1/admin/s3-credentials")):
-        return _ROLE_ADMIN
-    if path.startswith("/api/v1/admin/storage/buckets") and path.endswith("/quota"):
-        return _ROLE_ADMIN
-    # Phase I: turning on public_read publishes the bucket's current
-    # objects anonymously. That is an owner decision, not an operator one.
-    if (path.startswith("/api/v1/admin/storage/buckets")
-            and path.endswith("/website")):
-        return _ROLE_ADMIN
-    # Physical media deletion is an owner decision, not an operator one:
-    # the GC toggle and the collect/queue-drain kick off irreversible
-    # Telegram deletions, so they stay admin-only (matching the documents).
-    if path.startswith("/api/v1/admin/storage/gc"):
-        return _ROLE_ADMIN
+    if str(method).upper() in READ_METHODS:
+        return _ROLE_READ
     return _ROLE_WRITE
 
 
 def _enforce_role_policy(request: Request, user: dict) -> None:
     roles = _required_roles(request.method, request.url.path)
-    if roles is not None and user.get("role") not in roles:
+    if user.get("role") not in roles:
         _log(f"denied: user={user.get('username')} role={user.get('role')} "
              f"{request.method} {request.url.path}", "auth")
+        raise HTTPException(403, "Insufficient permissions for this action")
+
+
+def _enforce_user_permission(request: Request, user: dict) -> None:
+    """Inner gate: the route's permission must be granted by the role.
+
+    HTML pages and public routes have no permission and pass through.
+    API keys are handled earlier in require_auth with their own scope
+    semantics and never reach this function.
+    """
+    registry = permission_registry()
+    permission = registry.permission_for(request.method, request.url.path)
+    if permission is None:
+        return
+    if not registry.role_allows(user.get("role"), permission):
+        _log(f"denied: user={user.get('username')} role={user.get('role')} "
+             f"permission={permission} {request.method} {request.url.path}",
+             "auth")
         raise HTTPException(403, "Insufficient permissions for this action")
 
 
@@ -596,26 +608,8 @@ def require_auth(request: Request) -> None:
     if user is not None:
         request.state.user = user
         _enforce_role_policy(request, user)
+        _enforce_user_permission(request, user)
         return
-
-    # Fall back to HTTP Basic auth (backward compat for tests/API clients).
-    if WEB_PASSWORD:
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("basic "):
-            client = request.client.host if request.client else "-"
-            throttle_key = f"basic:{client}"
-            _auth_throttle_check(throttle_key)
-            try:
-                decoded = base64.b64decode(auth[6:]).decode("utf-8", "replace")
-                u, p_ = decoded.split(":", 1)
-            except Exception:
-                u, p_ = "", ""
-            if (hmac.compare_digest(u, WEB_USER)
-                    and hmac.compare_digest(p_, WEB_PASSWORD)):
-                request.state.user = {"id": 0, "username": u, "role": "admin"}
-                _enforce_role_policy(request, request.state.user)
-                return
-            _auth_failure_record(throttle_key)
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -627,10 +621,7 @@ def require_auth(request: Request) -> None:
 def default_config() -> dict[str, Any]:
     return {
         "web": {
-            "user": "admin",
-            "password": "",
             "allowed_hosts": "localhost,127.0.0.1,[::1]",
-            "allow_insecure": False,
             "bind_address": "0.0.0.0",  # nosec B104
             "port": 8080,
             "s3_port": 9000,
@@ -717,6 +708,23 @@ def _read_config_file() -> dict[str, Any]:
     return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
 
 
+# Authentication is no longer configured: the first-boot admin is
+# hardcoded and sessions/API keys are the only mechanisms. These keys are
+# stripped from config.yaml (and from the SQL settings document) so an
+# upgraded deployment does not keep a credential-looking field that does
+# nothing. The next settings save persists the stripped document.
+_RETIRED_AUTH_KEYS = ("user", "password", "password_file", "allow_insecure")
+
+
+def _drop_retired_auth_settings(document: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(document)
+    web_cfg = result.get("web")
+    if isinstance(web_cfg, dict):
+        for key in _RETIRED_AUTH_KEYS:
+            web_cfg.pop(key, None)
+    return result
+
+
 def _settings_store() -> "SettingsStore | None":
     """A store bound to the database named by the BOOTSTRAP FILE.
 
@@ -754,7 +762,7 @@ def read_raw_config() -> dict[str, Any]:
     used and the next save re-seeds the database.
     """
     from teledrive.settings_store import SettingsStoreError
-    file_document = _read_config_file()
+    file_document = _drop_retired_auth_settings(_read_config_file())
     store = _settings_store()
     if store is None:
         return file_document
@@ -770,9 +778,10 @@ def read_raw_config() -> dict[str, Any]:
         # database becomes authoritative from now on.
         _seed_settings_document(file_document)
         return file_document
-    _SETTINGS_CACHE["document"] = stored.document
+    document = _drop_retired_auth_settings(stored.document)
+    _SETTINGS_CACHE["document"] = document
     _SETTINGS_CACHE["generation"] += 1
-    return copy.deepcopy(stored.document)
+    return copy.deepcopy(document)
 
 
 def _seed_settings_document(document: dict[str, Any]) -> None:
@@ -790,9 +799,6 @@ def _seed_settings_document(document: dict[str, Any]) -> None:
 
 def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(raw)
-    web_cfg = result.get("web", {})
-    if isinstance(web_cfg, dict) and web_cfg.get("password"):
-        web_cfg["password"] = REDACTED
     tg = result.get("telegram", {})
     if tg.get("api_hash"):
         tg["api_hash"] = REDACTED
@@ -808,11 +814,7 @@ def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(candidate)
-    new_web = result.setdefault("web", {})
-    old_web = current.get("web", {})
-    if isinstance(new_web, dict) and new_web.get("password") == REDACTED:
-        new_web["password"] = old_web.get("password", "")
+    result = _drop_retired_auth_settings(candidate)
     new_tg = result.setdefault("telegram", {})
     old_tg = current.get("telegram", {})
     if new_tg.get("api_hash") == REDACTED:
@@ -915,6 +917,9 @@ def validate_and_write_config(raw: dict[str, Any], *,
     _CONFIG_CACHE["config"] = None
     _CONFIG_CACHE["mtime"] = None
     _reload_service_settings()
+    # Migrate users table first: the bootstrap INSERT names `enabled`, so
+    # a pre-`enabled` schema must be upgraded before the row is created.
+    _migrate_users_enabled_column()
     _create_default_admin()
     # Core schema (including users.enabled) is brought current by the one
     # schema coordinator when the database engine is first built; there is
@@ -1113,6 +1118,9 @@ async def lifespan(_: FastAPI):
     # because the image pre-creates /data/auth).
     _reload_service_settings()
     ensure_config()
+    # Migrate users table first: the bootstrap INSERT names `enabled`, so
+    # a pre-`enabled` schema must be upgraded before the row is created.
+    _migrate_users_enabled_column()
     _create_default_admin()
     # The schema coordinator runs inside db_connect()/_build_engine(); opening
     # the database here keeps a bad database loud at startup without a second
@@ -1148,13 +1156,6 @@ async def lifespan(_: FastAPI):
     except Exception as exc:
         _log(f"could not set up file logging: {exc}", "startup")
     transport_mode()  # Enforce Telethon USER mode at startup; Bot mode no longer exists.
-    if not WEB_PASSWORD and not ALLOW_INSECURE:
-        raise RuntimeError(
-            "config.yaml web.password is required (or web.allow_insecure for "
-            "explicitly trusted local deployments only)."
-        )
-    if WEB_PASSWORD and len(WEB_PASSWORD) < 16:
-        raise RuntimeError("config.yaml web.password must be at least 16 characters")
     if DB_EXTRA_PACKAGES:
         from teledrive.settings import install_db_extra_packages
         install_db_extra_packages(DB_EXTRA_PACKAGES, "/data/site-packages")
@@ -1496,7 +1497,7 @@ def _byte_range(value: str | None, size: int) -> tuple[int, int, bool]:
 
 
 def require_api_scope(required: str):
-    """HTTP bearer authorization, independent of the browser Basic/CSRF flow."""
+    """HTTP bearer authorization, independent of the browser session/CSRF flow."""
     def check(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth)) -> None:
         if credentials is None or credentials.scheme.lower() != "bearer":
             raise HTTPException(401, "API Bearer token required",
@@ -1640,10 +1641,11 @@ def me(request: Request):
         raise HTTPException(401, "Not authenticated")
     return {
         "user": user,
-        # The WebUI forces a password change screen while the default
-        # admin/admin credential is still in use.
-        "must_change_password": (user["username"] == "admin"
-                                 and _default_admin_password_in_use()),
+        # The WebUI forces a password change screen while the hardcoded
+        # first-boot admin/admin credential is still in use.
+        "must_change_password": bool(
+            user["username"] == "admin"
+            and _default_admin_password_in_use("admin")),
     }
 
 
@@ -2087,17 +2089,14 @@ def revoke_user_sessions(user_id: int, request: Request,
 
 @app.get("/api/v1/admin/roles", tags=["Users"], summary="List available roles and permissions")
 def list_roles(_: None = Depends(require_auth)):
-    return {"roles": [
-        {"name": "admin", "description": "Full access to all features",
-         "permissions": ["settings:read", "settings:manage", "users:read", "users:manage",
-                        "storage:read", "storage:manage", "keys:manage", "logs:read",
-                        "s3:manage", "jobs:manage"]},
-        {"name": "operator", "description": "Manage storage and jobs, view logs",
-         "permissions": ["storage:read", "storage:manage", "jobs:read", "jobs:manage",
-                        "logs:read", "s3:read"]},
-        {"name": "viewer", "description": "Read-only access",
-         "permissions": ["storage:read", "jobs:read", "logs:read", "s3:read"]},
-    ]}
+    """The canonical role -> permission map, resolved against the live routes.
+
+    Reporting from the registry (rather than a hand-written list) is what
+    keeps this endpoint honest: it shows the groups each role actually
+    holds after the admin-only surfaces are excluded.
+    """
+    return {"roles": permission_registry().role_map()}
+
 
 @app.get("/api/v1/admin/storage/gc-candidates", tags=["Storage recovery"],
          summary="Retention-aware dry-run FAILED journal planning, never deletion")
@@ -3367,7 +3366,7 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
     return {"ok": True}
 
 
-# --- S3 bucket browser & quota (WebUI, Basic auth) --------------------------
+# --- S3 bucket browser & quota (WebUI session auth) -------------------------
 
 @app.get("/api/v1/admin/storage/buckets", tags=["Object catalog"],
          summary="List buckets with metadata and quota (WebUI)")

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
-from fastapi.security import HTTPBasicCredentials
 from starlette.requests import Request
 import pytest
 
@@ -37,8 +36,7 @@ def test_docs_routes_return_official_swagger_redoc_html():
     assert "TeleDrive API" in webapp.openapi_schema(None).body.decode()
 
 
-def test_documentation_requires_auth(monkeypatch):
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", "strong-password-for-tests")
+def test_documentation_requires_auth():
     webapp.AUTH_FAILURES.clear()
     with pytest.raises(HTTPException) as exc:
         webapp.require_auth(request())

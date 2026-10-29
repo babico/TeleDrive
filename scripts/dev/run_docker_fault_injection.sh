@@ -14,7 +14,6 @@ PROJECT="tdfault$ID"
 WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/teledrive-fault-disposable.XXXXXXXX")"
 export TELEDRIVE_FAULT_WORKSPACE="$WORKSPACE" TELEDRIVE_FAULT_UID="$(id -u)" TELEDRIVE_FAULT_GID="$(id -g)"
 export TELEDRIVE_FAULT_DB_PASSWORD="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-export TELEDRIVE_FAULT_WEB_PASSWORD="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
 COMPOSE=(docker compose -f "$REPO/.github/ci/fault-injection/compose.yml" -p "$PROJECT")
 REPORT_DIR="${TELEDRIVE_FAULT_REPORT_DIR:-$REPO/.docker-fault-evidence}"
 if [[ -L "$REPORT_DIR" ]]; then echo "Symlink rapor dizini reddedildi" >&2; exit 2; fi
@@ -85,12 +84,9 @@ from pathlib import Path
 import os,sys
 from urllib.parse import quote
 p=quote(os.environ["TELEDRIVE_FAULT_DB_PASSWORD"],safe="")
-w=os.environ["TELEDRIVE_FAULT_WEB_PASSWORD"]
 with Path(sys.argv[1]).open("x", encoding="utf-8") as out:
-    out.write('web:\n  user: "dev-operator"\n'
-              '  password: "%s"\n'
+    out.write('web:\n'
               '  allowed_hosts: "web-a,web-b,localhost,127.0.0.1,[::1]"\n'
-              '  allow_insecure: false\n'
               'storage:\n  channel: ""\n  strategy: "round_robin"\n'
               '  scratch_dir: "/data/tmp"\n  apis: []\n'
               'jobs:\n  source_root: "/uploads"\n  auto_run: false\n'
@@ -108,7 +104,7 @@ with Path(sys.argv[1]).open("x", encoding="utf-8") as out:
               'state:\n  database_url: "postgresql+psycopg://teledrive:%s@postgres:5432/teledrive_dev"\n'
               '  allowed_sqlite_roots: "/data"\n'
               'logging:\n  log_path: "/data/uploader.log"\n  level: "WARNING"\n'
-              'app:\n  auto_run: false\n  run_interval_minutes: 60\n' % (w, p))
+              'app:\n  auto_run: false\n  run_interval_minutes: 60\n' % p)
 PY
 echo "DOCKER FAULT: PostgreSQL 17 + iki sıfır TeleDrive Web container kuruluyor."
 "${COMPOSE[@]}" config -q

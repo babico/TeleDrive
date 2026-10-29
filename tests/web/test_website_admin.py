@@ -39,8 +39,7 @@ def admin_web(service, monkeypatch, tmp_path):
     monkeypatch.setattr(webapp, "storage_transport", lambda db: telegram)
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR",
                         str(tmp_path / "website-admin-staging"))
-    monkeypatch.setattr(webapp, "WEB_USER", ADMIN_AUTH[0])
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", ADMIN_AUTH[1])
+    seed_user(connection, ADMIN_AUTH[0], ADMIN_AUTH[1], "admin")
     webapp.AUTH_FAILURES.clear()
     client = TestClient(webapp.app, base_url="http://localhost:8080")
     try:
@@ -52,6 +51,12 @@ def admin_web(service, monkeypatch, tmp_path):
 def _login(client, username, password):
     return client.post("/api/auth/login", headers=CSRF,
                        json={"username": username, "password": password})
+
+
+def _admin_headers(client):
+    response = _login(client, *ADMIN_AUTH)
+    assert response.status_code == 200, response.text
+    return {"Authorization": "Bearer " + response.json()["token"], **CSRF}
 
 
 def test_only_admin_role_can_flip_public_read(admin_web):
@@ -71,7 +76,6 @@ def test_only_admin_role_can_flip_public_read(admin_web):
     payload = {"index_document": "index.html", "error_document": None,
                "public_read": True}
     assert web.put(PATH, json=payload).status_code == 401
-    assert web.put(PATH, auth=ADMIN_AUTH, json=payload).status_code == 403
     for username, password in (("opuser", "operator-password-1"),
                                ("viewuser", "viewer-password-1")):
         login = _login(web, username, password)
@@ -81,7 +85,7 @@ def test_only_admin_role_can_flip_public_read(admin_web):
         assert denied.status_code == 403, (username, denied.text)
         web.cookies.clear()
 
-    allowed = web.put(PATH, auth=ADMIN_AUTH, headers=CSRF, json=payload)
+    allowed = web.put(PATH, headers=_admin_headers(web), json=payload)
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["public_read"] is True
     assert "publishes" in allowed.json()["notice"]
@@ -98,26 +102,26 @@ def test_payload_validation_and_get_observability(admin_web):
     finally:
         db.close()
 
-    assert web.put(PATH, auth=ADMIN_AUTH, headers=CSRF, json={
+    assert web.put(PATH, headers=_admin_headers(web), json={
         "index_document": "index.html", "error_document": None,
         "public_read": "yes"}).status_code == 422
     for index in ("../index.html", "/index.html", "a\\b.html", "", None):
-        invalid = web.put(PATH, auth=ADMIN_AUTH, headers=CSRF, json={
+        invalid = web.put(PATH, headers=_admin_headers(web), json={
             "index_document": index, "error_document": None,
             "public_read": False})
         assert invalid.status_code == 422, (index, invalid.text)
     missing = web.put(
         "/api/v1/admin/storage/buckets/no-such/website",
-        auth=ADMIN_AUTH, headers=CSRF, json={
+        headers=_admin_headers(web), json={
             "index_document": "index.html", "error_document": None,
             "public_read": False})
     assert missing.status_code == 404
 
-    ok = web.put(PATH, auth=ADMIN_AUTH, headers=CSRF, json={
+    ok = web.put(PATH, headers=_admin_headers(web), json={
         "index_document": "index.html", "error_document": "404.html",
         "public_read": False})
     assert ok.status_code == 200
-    info = web.get(PATH, auth=ADMIN_AUTH)
+    info = web.get(PATH, headers=_admin_headers(web))
     assert info.status_code == 200
     assert info.json() == {
         "configured": True, "index_document": "index.html",

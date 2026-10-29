@@ -73,11 +73,23 @@ async def read_range(engine, identifier: str, a: int, b: int) -> bytes:
     )])
 
 
+def _login(host: str) -> dict:
+    payload = json.dumps({"username": "admin", "password": "admin"}).encode()
+    request = urllib.request.Request(
+        "http://" + host + ":8080/api/v1/auth/login",
+        data=payload,
+        headers={"Content-Type": "application/json",
+                 "X-TeleDrive-CSRF": "1"},
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        token = json.load(response)["token"]
+    return {"Authorization": "Bearer " + token}
+
+
 def health(host: str, *, authorized=True):
-    credential = base64.b64encode(
-        ("dev-operator:" + os.environ["TELEDRIVE_FAULT_WEB_PASSWORD"]).encode()
-    ).decode("ascii")
-    headers = {"Authorization": "Basic " + credential} if authorized else {}
+    # First boot seeds the local admin/admin account; HTTP Basic is gone,
+    # so the fault harness logs in through the real form endpoint.
+    headers = _login(host) if authorized else {}
     req = urllib.request.Request(
         "http://" + host + ":8080/api/v1/admin/storage/health", headers=headers,
     )

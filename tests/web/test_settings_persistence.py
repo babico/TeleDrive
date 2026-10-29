@@ -39,8 +39,8 @@ def app_env(tmp_path, monkeypatch):
     config_path = config_dir / "config.yaml"
     db_path = tmp_path / "app.db"
     config_path.write_text(yaml.safe_dump({
-        "web": {"user": "admin", "password": "supersecret-password-1",
-                "allow_insecure": True,
+        "web": {"allowed_hosts": "localhost",
+                "password": "supersecret-password-1",
                 "auth_dir": str(tmp_path / "auth")},
         "state": {"database_url": f"sqlite:///{db_path}"},
         "upload": {"source_dir": str(tmp_path / "uploads")},
@@ -72,7 +72,7 @@ def app_env(tmp_path, monkeypatch):
 def test_first_read_seeds_the_document_from_the_file(app_env):
     webapp = app_env["webapp"]
     first = webapp.read_raw_config()
-    assert first["web"]["user"] == "admin"
+    assert first["web"]["allowed_hosts"] == "localhost"
 
     db = connect_database(f"sqlite:///{app_env['db_path']}")
     try:
@@ -81,7 +81,7 @@ def test_first_read_seeds_the_document_from_the_file(app_env):
         db.close()
     assert stored is not None
     assert stored.updated_by == "bootstrap:config.yaml"
-    assert stored.document["web"]["user"] == "admin"
+    assert stored.document["web"]["allowed_hosts"] == "localhost"
     # Secrets are stored encrypted, never as readable text.
     raw_row = connect_database(f"sqlite:///{app_env['db_path']}")
     try:
@@ -133,24 +133,26 @@ def test_undecryptable_document_falls_back_to_the_file(app_env):
 
     document = webapp.read_raw_config()
     # It still answers, using the file, and re-seeds under the new key.
-    assert document["web"]["user"] == "admin"
+    assert document["web"]["allowed_hosts"] == "localhost"
     db = connect_database(f"sqlite:///{app_env['db_path']}")
     try:
         stored = SettingsStore(db, rotated).load()
     finally:
         db.close()
-    assert stored is not None and stored.document["web"]["user"] == "admin"
+    assert stored is not None and stored.document["web"][
+        "allowed_hosts"] == "localhost"
 
 
-def test_redacted_secret_round_trip_is_preserved(app_env):
+def test_retired_auth_settings_never_round_trip(app_env):
+    """Upgrade-era auth keys are stripped, not treated as settings."""
     webapp = app_env["webapp"]
     current = webapp.read_raw_config()
-    redacted = webapp._redacted_config(current)
-    assert redacted["web"]["password"] == webapp.REDACTED
-    # Saving the redacted view must not destroy the real secret.
-    webapp.validate_and_write_config(redacted, by="admin")
-    assert webapp.read_raw_config()["web"]["password"] == \
-        "supersecret-password-1"
+    assert "password" not in current.get("web", {})
+    assert "user" not in current.get("web", {})
+    webapp.validate_and_write_config(webapp._redacted_config(current),
+                                     by="admin")
+    webapp.read_raw_config()  # invalidate the cache
+    assert "password" not in webapp.read_raw_config()["web"]
 
 
 def test_store_rejects_oversized_documents(store):

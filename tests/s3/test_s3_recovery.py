@@ -10,7 +10,7 @@ import time
 
 from sqlalchemy import select, update
 
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from tests.s3.test_s3_gateway import service, signed
 from tests.s3.test_s3_multipart import setup, begin, part, complete
 from teledrive.db import connect_database
@@ -37,15 +37,15 @@ def test_expired_completion_requires_explicit_admin_execute(admin):
         db.close()
 
     endpoint = f"/api/v1/admin/s3-multipart/{uid}/recover"
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     assert client.post(endpoint, json={"execute": True}).status_code in (401, 403)
-    assert client.post(endpoint, json={"execute": True}, auth=auth).status_code == 403
-    preview = client.get("/api/v1/admin/s3-multipart/stale", auth=auth)
+    assert client.post(endpoint, json={"execute": True}, headers=auth).status_code == 403
+    preview = client.get("/api/v1/admin/s3-multipart/stale", headers=auth)
     assert preview.status_code == 200
     assert len(preview.json()["uploads"]) == 1
     assert preview.json()["uploads"][0]["id"] == uid
     # POST defaults to dry-run: missing execute cannot reset the lease.
-    check = client.post(endpoint, json={}, auth=auth, headers={"x-teledrive-csrf": "1"})
+    check = client.post(endpoint, json={}, headers={**auth, **{"x-teledrive-csrf": "1"}})
     assert check.status_code == 200
     assert check.json() == {
         "upload_id": uid, "eligible": True, "recovered": False, "dry_run": True
@@ -58,8 +58,7 @@ def test_expired_completion_requires_explicit_admin_execute(admin):
         )).scalar_one() == "completing"
     finally:
         db.close()
-    restored = client.post(endpoint, json={"execute": True}, auth=auth,
-                           headers={"x-teledrive-csrf": "1"})
+    restored = client.post(endpoint, json={"execute": True}, headers={**auth, **{"x-teledrive-csrf": "1"}})
     assert restored.status_code == 200
     assert restored.json()["recovered"] is True
     db, manager = _store(url)
@@ -70,8 +69,7 @@ def test_expired_completion_requires_explicit_admin_execute(admin):
         assert manager.stale_completions() == []
     finally:
         db.close()
-    repeat = client.post(endpoint, json={"execute": True}, auth=auth,
-                         headers={"x-teledrive-csrf": "1"})
+    repeat = client.post(endpoint, json={"execute": True}, headers={**auth, **{"x-teledrive-csrf": "1"}})
     assert repeat.status_code == 200
     assert repeat.json()["recovered"] is False
 

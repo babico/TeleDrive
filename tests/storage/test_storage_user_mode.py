@@ -249,10 +249,18 @@ def test_user_can_read_old_bot_channel_message_without_bot_token(service, monkey
     assert user.next_id == 0, "Bot message was read, never reuploaded"
 
 
-def test_authenticated_admin_can_scan_user_channel_history_without_mutation(monkeypatch):
+def test_authenticated_admin_can_scan_user_channel_history_without_mutation(
+        monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
     import web.app as web
+    from teledrive.db import connect_database
+    from tests import seed_local_user
     from uuid import uuid4
+
+    db_path = tmp_path / "user-mode.sqlite"
+    connect = lambda: connect_database(str(db_path))
+    monkeypatch.setattr(web, "db_connect", connect)
+    seed_local_user(connect, "owner", "secure-test-password-1234", "admin")
 
     runtime, user = configured_runtime()
     uid = str(uuid4())
@@ -273,13 +281,13 @@ def test_authenticated_admin_can_scan_user_channel_history_without_mutation(monk
     })
     monkeypatch.setenv("TELEDRIVE_STORAGE_TRANSPORT", "telethon")
     monkeypatch.setattr(web, "mtproto_storage_runtime", runtime)
-    monkeypatch.setattr(web, "WEB_USER", "owner")
-    monkeypatch.setattr(web, "WEB_PASSWORD", "secure-test-password-1234")
     client = TestClient(web.app, base_url="http://localhost")
     assert client.get("/api/v1/admin/storage/channel-history").status_code == 401
+    from tests import login_headers
+    owner = login_headers(client, "owner", "secure-test-password-1234")
     response = client.get(
         "/api/v1/admin/storage/channel-history?limit=3",
-        auth=("owner", "secure-test-password-1234"),
+        headers=owner,
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -290,13 +298,13 @@ def test_authenticated_admin_can_scan_user_channel_history_without_mutation(monk
     assert response.headers["cache-control"] == "no-store"
     invalid = client.get(
         "/api/v1/admin/storage/channel-history?before_message_id=-10",
-        auth=("owner", "secure-test-password-1234"),
+        headers=owner,
     )
     assert invalid.status_code == 422
     monkeypatch.setenv("TELEDRIVE_STORAGE_TRANSPORT", "bot")
     still_enabled = client.get(
         "/api/v1/admin/storage/channel-history",
-        auth=("owner", "secure-test-password-1234"),
+        headers=owner,
     )
     # The transport is config-only: stale env vars never change behavior.
     assert still_enabled.status_code == 200

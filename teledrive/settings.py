@@ -20,11 +20,7 @@ DEFAULT_BIND_ADDRESS = "0.0.0.0"  # nosec B104
 
 @dataclass
 class ServiceSettings:
-    web_user: str = "admin"
-    web_password: str = ""
-    web_password_file: str = ""
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1", "[::1]")
-    allow_insecure: bool = False
     web_port: int = 8080
     s3_port: int = 9000
     bind_address: str = DEFAULT_BIND_ADDRESS
@@ -123,15 +119,8 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
         raise ValueError("Invalid db_extra_packages configuration")
 
     return ServiceSettings(
-        web_user=str(_cfg_or_env("user", "TELEDRIVE_WEB_USER", "admin")),
-        web_password=str(_cfg_or_env("password", "TELEDRIVE_WEB_PASSWORD", "")),
-        web_password_file=str(_cfg_or_env("password_file", "TELEDRIVE_WEB_PASSWORD_FILE", "")),
         allowed_hosts=_hosts(_cfg_or_env("allowed_hosts", "TELEDRIVE_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]"),
                              ("localhost", "127.0.0.1", "[::1]")),
-        allow_insecure=bool(
-            _cfg_or_env("allow_insecure", "TELEDRIVE_ALLOW_INSECURE", False)
-            in (True, "1", "true", "yes", "True")
-        ),
         # Listeners are deployment plumbing and are ENV-ONLY, by owner
         # policy: ports, bind address and TLS paths come exclusively from
         # the container environment (docker-compose `environment:`), so

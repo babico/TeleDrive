@@ -17,50 +17,53 @@ import web.app as webapp
 def api(tmp_path, monkeypatch):
     path = tmp_path / "rest-api.sqlite"
     monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
-    monkeypatch.setattr(webapp, "WEB_USER", "ci-admin")
-    monkeypatch.setattr(webapp, "WEB_PASSWORD", "ci-local-password-1234")
+    from tests import seed_local_user
+    seed_local_user(lambda: connect_database(str(path)),
+                    "ci-admin", "ci-local-password-1234", "admin")
     webapp.AUTH_FAILURES.clear()
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client, path
     client.close()
 
 
-def admin_headers():
-    return {"x-teledrive-csrf": "1"}
+def admin_headers(client):
+    from tests import login_headers
+    return {**login_headers(client, "ci-admin", "ci-local-password-1234"),
+            "x-teledrive-csrf": "1"}
 
 
 def create_key(client, scopes):
     res = client.post("/api/v1/admin/keys",
-        auth=("ci-admin", "ci-local-password-1234"),
-        headers=admin_headers(), json={"name": "integration", "scopes": scopes})
+        headers=admin_headers(client),
+        json={"name": "integration", "scopes": scopes})
     assert res.status_code == 201, res.text
     return res.json()
 
 
-def test_admin_endpoints_require_basic_and_csrf(api):
+def test_admin_endpoints_require_session_and_csrf(api):
     client, _ = api
     assert client.get("/api/v1/admin/keys").status_code == 401
-    assert client.post("/api/v1/admin/keys",
-        auth=("ci-admin", "ci-local-password-1234"),
+    from tests import login_headers
+    session = login_headers(client, "ci-admin", "ci-local-password-1234")
+    assert client.post("/api/v1/admin/keys", headers=session,
         json={"name": "x", "scopes": ["objects:read"]}).status_code == 403
     assert client.post("/api/v1/admin/keys",
-        auth=("ci-admin", "ci-local-password-1234"),
-        headers={"x-teledrive-csrf": "1", "origin": "http://evil.example"},
+        headers={**session, "x-teledrive-csrf": "1",
+                 "origin": "http://evil.example"},
         json={"name": "x", "scopes": ["objects:read"]}).status_code == 403
 
 
 def test_key_rotation_revoke_and_metadata_never_discloses_secrets(api):
     client, _ = api
     old = create_key(client, ["buckets:read"])
-    response = client.get("/api/v1/admin/keys",
-                          auth=("ci-admin", "ci-local-password-1234"))
+    response = client.get("/api/v1/admin/keys", headers=admin_headers(client))
     assert response.status_code == 200
     assert old["token"] not in response.text
     assert "digest" not in response.text
     assert client.get("/api/v1/buckets",
                       headers={"Authorization": f"Bearer {old['token']}"}).status_code == 200
     rotate = client.post(f"/api/v1/admin/keys/{old['id']}/rotate",
-        auth=("ci-admin", "ci-local-password-1234"), headers=admin_headers())
+        headers=admin_headers(client))
     assert rotate.status_code == 200
     new = rotate.json()
     assert new["token"] != old["token"]
@@ -69,7 +72,7 @@ def test_key_rotation_revoke_and_metadata_never_discloses_secrets(api):
     assert client.get("/api/v1/buckets",
         headers={"Authorization": f"Bearer {new['token']}"}).status_code == 200
     revoked = client.delete(f"/api/v1/admin/keys/{new['id']}",
-        auth=("ci-admin", "ci-local-password-1234"), headers=admin_headers())
+        headers=admin_headers(client))
     assert revoked.status_code == 200
     assert client.get("/api/v1/buckets",
         headers={"Authorization": f"Bearer {new['token']}"}).status_code == 403
@@ -116,7 +119,7 @@ def test_bucket_crud_and_object_metadata_scopes(api):
     assert client.delete("/api/v1/buckets/backups", headers=headers).status_code == 409
 
 
-def test_bearer_token_does_not_unlock_basic_admin(api):
+def test_bearer_token_does_not_unlock_admin_routes(api):
     client, _ = api
     # admin:* is the legacy REST-object wildcard: it must NOT unlock
     # admin routes. The bearer path recognizes the key (403, not 401)
@@ -135,7 +138,7 @@ def test_bearer_token_does_not_unlock_basic_admin(api):
 
 def test_openapi_documents_rest_key_and_bucket_routes(api):
     client, _ = api
-    response = client.get("/openapi.json", auth=("ci-admin", "ci-local-password-1234"))
+    response = client.get("/openapi.json", headers=admin_headers(client))
     assert response.status_code == 200
     paths = response.json()["paths"]
     assert "/api/v1/admin/keys" in paths

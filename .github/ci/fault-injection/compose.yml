@@ -67,7 +67,6 @@ services:
     environment:
       TELEDRIVE_FAULT_DB_URL: postgresql+psycopg://teledrive:${TELEDRIVE_FAULT_DB_PASSWORD:?}@postgres:5432/teledrive_dev
       TELEDRIVE_FAULT_RESTORED_DB_URL: postgresql+psycopg://teledrive:${TELEDRIVE_FAULT_DB_PASSWORD:?}@postgres:5432/teledrive_restore
-      TELEDRIVE_FAULT_WEB_PASSWORD: ${TELEDRIVE_FAULT_WEB_PASSWORD:?}
       TELEDRIVE_FAULT_REMOTE_DIR: /work-data/remote
       TELEDRIVE_FAULT_EVIDENCE_DIR: /work-data/evidence
       TELEDRIVE_FAULT_SOURCES: /work-data/sources

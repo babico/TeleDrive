@@ -8,7 +8,7 @@ import time
 import pytest
 
 from tests.storage.test_storage_engine import MemoryTelegram
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from teledrive.db import connect_database
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.engine import TelegramObjectStorage
@@ -201,7 +201,7 @@ def test_admin_job_endpoints_require_root_auth_csrf_and_do_not_expose_tokens(
     finally:
         conn.close()
     url = "/api/v1/admin/storage/jobs"
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     assert client.get(url).status_code in (401, 403)
     payload = {"bucket": "job-admin", "key": "single.bin",
                "source_path": str(source)}
@@ -211,27 +211,27 @@ def test_admin_job_endpoints_require_root_auth_csrf_and_do_not_expose_tokens(
     forbidden = tmp_path / "forbidden"
     forbidden.mkdir()
     monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(forbidden))
-    assert client.post(url, auth=auth, json=payload).status_code == 403
-    rejected = client.post(url, auth=auth, json=payload,
-                           headers={"x-teledrive-csrf": "1"})
+    assert client.post(url, headers=auth, json=payload).status_code == 403
+    rejected = client.post(url, headers={**auth, "x-teledrive-csrf": "1"},
+                           json=payload)
     assert rejected.status_code == 422, rejected.text
     monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(root))
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
-    start = client.post(url, auth=auth, json=payload,
-                        headers={"x-teledrive-csrf": "1"})
+    start = client.post(url, headers={**auth, "x-teledrive-csrf": "1"},
+                        json=payload)
     assert start.status_code == 201, start.text
-    entry = client.get(url, auth=auth)
+    entry = client.get(url, headers=auth)
     assert entry.status_code == 200 and "lease_token" not in entry.text
     remote = MemoryTelegram()
     monkeypatch.setattr(webapp, "storage_transport", lambda db: remote)
-    run = client.post(url + "/run-next", auth=auth,
-                      headers={"x-teledrive-csrf": "1"})
+    run = client.post(url + "/run-next",
+                      headers={**auth, "x-teledrive-csrf": "1"})
     assert run.status_code == 200, run.text
     assert run.json()["job"]["state"] == "done"
     assert remote.uploads == 1
-    assert client.get(url, auth=auth).json()["jobs"][0]["state"] == "done"
+    assert client.get(url, headers=auth).json()["jobs"][0]["state"] == "done"
     retry = client.post(url + "/" + start.json()["id"] + "/retry",
-                        auth=auth, headers={"x-teledrive-csrf": "1"})
+                        headers={**auth, "x-teledrive-csrf": "1"})
     assert retry.status_code == 409
 
 
@@ -249,24 +249,24 @@ def test_cancel_job_endpoint_requires_root_and_csrf_and_fences_active_jobs(
     finally:
         conn.close()
     monkeypatch.setattr(webapp, "JOB_SOURCE_ROOT", str(root))
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     response = client.post("/api/v1/admin/storage/jobs",
-                           auth=auth, headers={"x-teledrive-csrf": "1"},
+                           headers={**auth, "x-teledrive-csrf": "1"},
                            json={"bucket": "cancel-admin", "key": "one.bin",
                                  "source_path": str(source)})
     assert response.status_code == 201, response.text
     job_id = response.json()["id"]
     url = f"/api/v1/admin/storage/jobs/{job_id}/cancel"
     assert client.post(url).status_code in (401, 403)
-    assert client.post(url, auth=auth).status_code == 403
-    success = client.post(url, auth=auth, headers={"x-teledrive-csrf": "1"})
+    assert client.post(url, headers=auth).status_code == 403
+    success = client.post(url, headers={**auth, "x-teledrive-csrf": "1"})
     assert success.status_code == 200, success.text
     assert success.json() == {"id": job_id, "state": "cancelled"}
-    assert client.post(url, auth=auth,
-                       headers={"x-teledrive-csrf": "1"}).status_code == 409
-    assert client.get("/api/v1/admin/storage/jobs", auth=auth).json()["jobs"][0]["state"] == "cancelled"
+    assert client.post(url,
+                       headers={**auth, "x-teledrive-csrf": "1"}).status_code == 409
+    assert client.get("/api/v1/admin/storage/jobs", headers=auth).json()["jobs"][0]["state"] == "cancelled"
     assert client.post("/api/v1/admin/storage/jobs/" + job_id + "/retry",
-                       auth=auth, headers={"x-teledrive-csrf": "1"}).status_code == 409
+                       headers={**auth, "x-teledrive-csrf": "1"}).status_code == 409
 
 
 def _simulate_crash_after_first_journaled_chunk(manager, root, remote):

@@ -1,4 +1,4 @@
-"""Unified per-endpoint permission registry.
+"""Unified per-endpoint permission registry and role model.
 
 Every /api/v1 route carries exactly one permission, derived from its
 method + path template so the catalog can NEVER drift from the routes:
@@ -6,16 +6,124 @@ the registry is built from the live FastAPI route table. The nine REST
 bearer endpoints keep their curated short names (issued keys depend on
 them); every other route gets a canonical "method:path" name.
 
-Both authorization paths check this registry:
-- browser sessions (require_auth) — role policy, behavior unchanged
-- bearer API keys — granted endpoint permissions, ANY route
+There is ONE permission model for authenticated users. A browser session
+cookie resolves to a local `users` row, and that row's role grants a set
+of endpoint permissions derived here:
 
-A key with a permission for one route gains nothing on any other route;
-there are no groups left to over-grant.
+- admin     every permission in the registry (superset by construction)
+- operator  every permission except the admin-only surfaces below
+- viewer    only read permissions (GET/HEAD, or a curated read name)
+            outside the admin-only surfaces
+
+The admin-only surfaces are listed in ``_ADMIN_ONLY_PREFIXES`` and the
+storage owner-decision routes in ``_ADMIN_ONLY_BUCKETS_SUFFIXES``. They
+are excluded from operator and viewer even though those roles can never
+reach them: the path gate in ``web.app._required_roles`` already blocks
+them, so the role map is defence in depth rather than the only gate.
+
+Bearer API keys are deliberately NOT mapped through a role. A key's
+permissions are exactly the scope names it was issued with (plus the
+legacy expansions), so existing keys keep working unchanged. A key with
+one route's permission gains nothing on any other route.
 """
 from __future__ import annotations
 
 import re
+
+READ_METHODS = frozenset({"GET", "HEAD"})
+
+# ---------------------------------------------------------------------------
+# The canonical role -> permission map. THIS is the only place a session
+# principal gets authority from; there is no "any GET is fine" rule. Read
+# each row as an audit statement:
+#
+#   admin     every API permission in the live registry, including routes
+#             added after this file was written
+#   operator  every permission EXCEPT the admin-only surfaces listed below:
+#             users, roles/API keys, S3 credentials, physical GC, bucket
+#             quota, website publishing and deployment-config writes
+#   viewer    read-only: GET/HEAD routes and the curated REST read names,
+#             again excluding every admin-only surface
+#
+# A role not listed here grants NOTHING (fail closed).
+# ---------------------------------------------------------------------------
+ROLE_PERMISSION_RULES: dict[str, dict] = {
+    "admin": {
+        "description": "Full access: every API permission in the registry.",
+        "read_only": False,
+        "deny_admin_only": False,
+    },
+    "operator": {
+        "description": (
+            "All data and storage permissions. No user, API-key, S3-credential, "
+            "physical-GC, quota, website-publish or deployment-config "
+            "administration."),
+        "read_only": False,
+        "deny_admin_only": True,
+    },
+    "viewer": {
+        "description": (
+            "Read-only: GET/HEAD routes and curated REST read names, outside "
+            "the admin-only surfaces."),
+        "read_only": True,
+        "deny_admin_only": True,
+    },
+}
+
+# Surfaces only the admin role may attempt, for every method. Config is
+# admin-only for writes (viewers may read the redacted document), so it
+# is handled separately below.
+_ADMIN_ONLY_PREFIXES = (
+    "/api/v1/admin/users",
+    "/api/v1/admin/keys",
+    "/api/v1/admin/s3/credentials",
+    "/api/v1/admin/s3-credentials",
+    "/api/v1/admin/storage/gc",
+)
+# Bucket quota and website publishing are owner decisions: quota changes
+# can reject uploads, and public_read publishes objects anonymously.
+_ADMIN_ONLY_BUCKETS_PREFIX = "/api/v1/admin/storage/buckets"
+_ADMIN_ONLY_BUCKETS_SUFFIXES = ("/quota", "/website")
+# Only writes to the deployment configuration are administrative.
+_ADMIN_ONLY_WRITE_EXACT = frozenset({"/api/v1/config"})
+
+# The curated REST names that are read-only even though they do not carry
+# a "get:"/"head:" prefix.
+_CURATED_READ_PERMISSIONS = frozenset({
+    "rest:buckets:list",
+    "rest:objects:list",
+    "rest:objects:list-versions",
+    "rest:objects:get",
+    "rest:objects:head",
+})
+
+
+def canonical_path(path: str) -> str:
+    """Fold the legacy /api/* aliases onto /api/v1/* before matching."""
+    if (path.startswith("/api/")
+            and not path.startswith("/api/v1/")
+            and not path.startswith("/api/health")):
+        return "/api/v1/" + path[len("/api/"):]
+    return path
+
+
+def is_admin_only(method: str, path: str) -> bool:
+    """True when only the admin role may attempt this route."""
+    path = canonical_path(path)
+    if any(path.startswith(prefix) for prefix in _ADMIN_ONLY_PREFIXES):
+        return True
+    if (path.startswith(_ADMIN_ONLY_BUCKETS_PREFIX)
+            and path.endswith(_ADMIN_ONLY_BUCKETS_SUFFIXES)):
+        return True
+    if (str(method).upper() not in READ_METHODS
+            and path in _ADMIN_ONLY_WRITE_EXACT):
+        return True
+    return False
+
+
+def _is_read_permission(permission: str) -> bool:
+    return (permission.startswith(("get:", "head:"))
+            or permission in _CURATED_READ_PERMISSIONS)
 
 # Curated short names for the original REST bearer surface (backward
 # compatibility with issued keys and the S3 credential docs).
@@ -164,6 +272,8 @@ class PermissionRegistry:
     def __init__(self, routes):
         self._entries: list[tuple[str, str, str, re.Pattern, str]] = []
         self._by_key: dict[tuple[str, str], str] = {}
+        self._by_permission: dict[str, tuple[str, str]] = {}
+        self._role_permissions: dict[str, frozenset[str]] = {}
         for route in routes:
             path = getattr(route, "path", None)
             methods = getattr(route, "methods", None) or set()
@@ -182,6 +292,7 @@ class PermissionRegistry:
                     (method, path, permission, _template_pattern(path),
                      summary))
                 self._by_key.setdefault((method, path), permission)
+                self._by_permission.setdefault(permission, (method, path))
         # The curated names must all correspond to real routes.
         for (method, path), name in CURATED_PERMISSIONS.items():
             assert (method, path) in self._by_key, (method, path)
@@ -192,6 +303,55 @@ class PermissionRegistry:
             if entry_method == method and pattern.match(concrete_path):
                 return permission
         return None
+
+    def permissions_for_role(self, role: str | None) -> frozenset[str]:
+        """The effective endpoint permissions granted by a user's role.
+
+        The rule comes from ``ROLE_PERMISSION_RULES``; unknown/absent roles
+        grant nothing. The sets are resolved against the live route table
+        once per registry instance, so a new route is automatically
+        admin-visible and can never silently appear in a lower role.
+        """
+        key = role or ""
+        cached = self._role_permissions.get(key)
+        if cached is not None:
+            return cached
+        rule = ROLE_PERMISSION_RULES.get(key)
+        if rule is None:
+            granted = frozenset()
+        else:
+            selected: set[str] = set()
+            for permission, (method, template) in self._by_permission.items():
+                if rule["deny_admin_only"] and is_admin_only(method, template):
+                    continue
+                if rule["read_only"] and not _is_read_permission(permission):
+                    continue
+                selected.add(permission)
+            granted = frozenset(selected)
+        self._role_permissions[key] = granted
+        return granted
+
+    def role_allows(self, role: str | None, permission: str) -> bool:
+        return permission in self.permissions_for_role(role)
+
+    def role_map(self) -> list[dict]:
+        """The auditable role map: description, mode and granted groups."""
+        rows = []
+        for role, rule in sorted(ROLE_PERMISSION_RULES.items()):
+            granted = self.permissions_for_role(role)
+            groups = sorted({
+                group_for(template)
+                for permission in granted
+                for (_method, template) in [self._by_permission[permission]]
+            })
+            rows.append({
+                "name": role,
+                "description": rule["description"],
+                "read_only": rule["read_only"],
+                "permission_count": len(granted),
+                "groups": groups,
+            })
+        return rows
 
     def catalog(self) -> list[dict]:
         return [

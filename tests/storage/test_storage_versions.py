@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import time
 
-from tests.s3.test_s3_admin import admin
+from tests.s3.test_s3_admin import admin, admin_headers
 from tests.s3.test_s3_gateway import service, signed
 from tests.s3.test_s3_multipart import begin, part, complete
 from teledrive.db import connect_database
@@ -42,16 +42,14 @@ def test_catalog_history_records_only_published_versions_and_restore_alias(admin
         conn.close()
 
     url = f"/api/v1/admin/storage/versions/{one}/restore"
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     payload = {"bucket": "published", "key": "file.bin", "expected_generation": 2}
     assert client.post(url, json=payload).status_code in (401, 403)
-    assert client.post(url, auth=auth, json=payload).status_code == 403
-    wrong = client.post(url, auth=auth,
-                        headers={"x-teledrive-csrf": "1"},
+    assert client.post(url, headers=auth, json=payload).status_code == 403
+    wrong = client.post(url, headers={**auth, **{"x-teledrive-csrf": "1"}},
                         json={**payload, "expected_generation": 1})
     assert wrong.status_code == 409
-    restored = client.post(url, auth=auth,
-                           headers={"x-teledrive-csrf": "1"}, json=payload)
+    restored = client.post(url, headers={**auth, **{"x-teledrive-csrf": "1"}}, json=payload)
     assert restored.status_code == 200, restored.text
     fresh = restored.json()
     assert fresh["generation"] == 3
@@ -72,8 +70,7 @@ def test_catalog_history_records_only_published_versions_and_restore_alias(admin
     finally:
         conn.close()
 
-    again = client.post(url, auth=auth,
-                        headers={"x-teledrive-csrf": "1"},
+    again = client.post(url, headers={**auth, **{"x-teledrive-csrf": "1"}},
                         json={"bucket": "published", "key": "file.bin",
                               "expected_generation": 0})
     assert again.status_code == 200, again.text
@@ -133,13 +130,13 @@ def test_legacy_backfill_only_indexes_live_proven_heads(admin):
         db.close()
 
     endpoint = "/api/v1/admin/storage/versions/index-current"
-    auth = ("testadmin", "secure-auth-password")
+    auth = admin_headers(client)
     headers = {"x-teledrive-csrf": "1"}
-    assert client.post(endpoint, auth=auth, json={"execute":True}).status_code == 403
-    preview = client.post(endpoint, auth=auth, headers=headers, json={})
+    assert client.post(endpoint, headers=auth, json={"execute":True}).status_code == 403
+    preview = client.post(endpoint, headers={**auth, **headers}, json={})
     assert preview.status_code == 200
     assert preview.json()["dry_run"] and prior in preview.json()["ids"]
-    done = client.post(endpoint, auth=auth, headers=headers,
+    done = client.post(endpoint, headers={**auth, **headers},
                        json={"execute":True})
     assert done.status_code == 200
     assert done.json()["count"] == 1

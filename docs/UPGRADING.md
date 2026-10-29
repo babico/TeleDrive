@@ -305,7 +305,93 @@ python -m pytest -q
 The suite is parallel-safe after the deterministic-parametrise fixes. If a
 machine has no xdist, the serial command still works.
 
-## 7. Post-upgrade checks
+## 7. Security-surface changes that break existing behaviour
+
+Six decisions tightened what an authenticated caller may do. Each one is
+deliberate: the previous behaviour was reproducible as a takeover, a data
+exposure or a silent data loss, and every one of them has a regression test.
+
+### 7.1 HTTP Basic and the config password are gone
+
+There is no authenticated identity other than the login-form session (cookie
+or `td_sess_` bearer) and an API key. `web.user`, `web.password`,
+`web.password_file` and `web.allow_insecure` are not settings any more; they
+are stripped from an existing config file or SQL document when it is read.
+
+First boot creates `admin` / `admin` in code, unconditionally and only when
+no `admin` row exists — an existing row is never overwritten, and the account
+cannot be renamed. **Change that password immediately on any instance that is
+reachable from outside the host.**
+
+If your only credential was the config password, you are locked out until you
+run `scripts/ops/reset_local_password.py`, or delete the `admin` row and
+restart.
+
+### 7.2 S3 credentials are an interactive-session surface
+
+`POST`/`PUT`/`DELETE` on `/api/v1/admin/s3-credentials` and the `…/secret`
+reveal now answer **403** to an API key. A credential is itself a secret, so
+letting a key mint, edit or read one bypassed the delegation ceiling: a key
+scoped to only that route could create a credential holding every permission
+and receive its secret. A human session is interactive, CSRF-fenced and
+revocable, which is why it is the only principal allowed here.
+
+Also:
+- Creating a credential **without** a `permissions` list now grants a
+  READ-ONLY set (list, location, get, attributes). It used to grant every
+  known permission.
+- `PUT` enforces the same expiry bounds as `POST` and refuses to edit an
+  expired credential (editing one back to life was real access, because
+  expiry is checked at signature time).
+- The identifier may be the id **or** the access key, on every operation.
+
+### 7.3 Presigned URLs and config writes are interactive-session only
+
+A presigned URL is durable anonymous authority: it keeps working for up to
+seven days after your session or API key is revoked. Delegating that from an
+API key would let a key plant access that outlives its own revocation. Same
+reasoning for `PUT /api/v1/config`, which can change allowed hosts,
+filesystem roots and the job watcher.
+
+### 7.4 Share links pin the object version they were issued for
+
+`share_links` gained `object_id` (schema step 24). A new link serves exactly
+the version that existed when it was created: overwriting the key no longer
+changes what the URL returns, and an unlink followed by a re-upload does not
+revive it. A link that can no longer resolve its pinned version answers the
+same uniform 404 as an expired one.
+
+A failed request — a 404, a link-preview fetch, a broken transfer — no longer
+consumes a download slot. Only a request that actually streams counts.
+
+Links created before this release have `object_id = NULL` and stay key-bound;
+re-issue them if you need the pinning guarantee.
+
+### 7.5 The audit trail is admin-only, and it is now durable
+
+`GET /api/logs` and the live log websocket are admin-only: the buffer carries
+object keys, request paths and failure detail, which is how a share token
+became readable by a read-only account.
+
+Security events are also recorded in a `security_audit_events` table (schema
+step 25) and exposed at `GET /api/v1/admin/audit`. That covers credential
+issue/edit/revoke/reveal, API-key issue/rotate, config writes, user
+create/update/delete, physical GC start/finish, presign and share creation —
+with the actor, target and a scrubbed detail blob. The table is append-only
+and the module refuses to store anything shaped like a credential.
+
+### 7.6 S3 operations that now refuse instead of pretending
+
+- `PUT ?retention` / `?legal-hold` with a streaming payload must carry a
+  verifiable `x-amz-checksum-sha256`; otherwise the body is unbound to the
+  signature and the change is refused.
+- A `Range` header longer than 20 digits is `416`, not `500`.
+- A REST read of an archived object is `403 InvalidObjectState`, and of an
+  SSE-C object is `400` naming SSE-C — including on the public website and
+  the WebUI download button, which previously returned `200` with zero bytes.
+- An unlink of an object under legal hold or retention is `403`.
+
+## 8. Post-upgrade checks
 
 1. `docker compose ps` reports the container healthy. The healthcheck uses
    the same port and TLS variables as the listeners.

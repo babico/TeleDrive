@@ -14,24 +14,26 @@ dependency. The registry caches on first use, so a route added after the cache
 is built never appears in the permission catalog — meaning `admin:*` would not
 cover it and no role would be granted it.
 
-## Step 0 — pin the surface before moving anything
+## Step 0 — DONE (`558453a`)
 
-Write a test that snapshots the authorization surface and assert on it:
+`tests/meta/test_route_surface.py` holds the frozen surface: all 133
+`(method, path, permission, admin_only)` tuples, asserted in both directions
+(a route cannot disappear and a route cannot appear unreviewed). The second
+test pins the other half — every route with no permission must be
+deliberately public (`web.permissions._is_public`) or one of eleven HTML page
+shells that authenticate inside the handler and redirect to `/login`; those
+are listed explicitly so a new unpermissioned route FAILS instead of passing
+implicitly.
+
+It was committed before any move, so it is provably the pre-refactor surface.
+Run it first thing and again after every step:
 
 ```
-python - <<'PY'
-import web.app as a
-rows = sorted((m, p, getattr(r.endpoint, "__module__", ""))
-              for r in a.app.routes
-              for m in (getattr(r, "methods", ()) or ()))
-PY
+pytest tests/meta/test_route_surface.py -q
 ```
 
-Capture `(method, path, permission, admin_only)` for every route into
-`tests/meta/test_route_surface.py` as a literal. That file is the contract:
-the refactor may change which module a handler lives in, and must not change
-the set of `(method, path, permission)` triples. Do this **before** the first
-move so the snapshot is provably the pre-refactor surface.
+If it fails, a route moved with a changed gate. Stop and fix that before
+continuing — everything else in this document assumes it passes.
 
 ## Target layout
 

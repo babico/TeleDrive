@@ -62,6 +62,7 @@ from sqlalchemy import select as _sa_select
 from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.stores import pins as _pin_store
+from teledrive.stores import sessions as _session_store
 from teledrive.stores import shares as _share_store
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
@@ -203,13 +204,10 @@ def _extract_user(request: Request) -> str:
         try:
             conn = db_connect()
             try:
-                from sqlalchemy import text as _text
-                row = conn.connection.execute(_text(
-                    "SELECT u.username FROM user_sessions s "
-                    "JOIN users u ON u.id = s.user_id WHERE s.token = :t"
-                ), {"t": _session_token_digest(token)}).fetchone()
-                if row:
-                    return row[0]
+                username = _session_store.username_for_token(
+                    conn, _session_token_digest(token))
+                if username:
+                    return username
             finally:
                 conn.close()
         except Exception:
@@ -518,29 +516,7 @@ def _get_current_user(request: Request) -> dict | None:
     digest = _session_token_digest(token)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT u.id, u.username, u.role, s.expires_at, u.enabled "
-            "FROM user_sessions s JOIN users u ON u.id = s.user_id "
-            "WHERE s.token = :token"
-        ), {"token": digest}).fetchone()
-        if row is None:
-            return None
-        if not row[4]:
-            # Disabled users must not hold live sessions.
-            conn.connection.execute(_text(
-                "DELETE FROM user_sessions WHERE user_id = :uid"
-            ), {"uid": row[0]})
-            conn.connection.commit()
-            return None
-        if int(time.time()) > int(row[3]):
-            # Expired — clean up.
-            conn.connection.execute(_text(
-                "DELETE FROM user_sessions WHERE token = :token"
-            ), {"token": digest})
-            conn.connection.commit()
-            return None
-        return {"id": row[0], "username": row[1], "role": row[2]}
+        return _session_store.resolve(conn, digest, int(time.time()))
     except Exception:
         return None
     finally:
@@ -1726,15 +1702,13 @@ def login(payload: dict, request: Request):
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "INSERT INTO user_sessions (token, user_id, created_at, expires_at) "
-            "VALUES (:token, :uid, :now, :exp)"
-        ), {"token": _session_token_digest(token), "uid": row[0],
-            "now": now, "exp": expires})
+        # Same transaction: sessions.create commits once, after both writes.
         conn.connection.execute(_text(
             "UPDATE users SET last_login = :now WHERE id = :id"
         ), {"now": now, "id": row[0]})
-        conn.connection.commit()
+        _session_store.create(
+            conn, token=_session_token_digest(token), user_id=row[0],
+            created_at=now, expires_at=expires)
     finally:
         conn.close()
     _log(f"login: username={username}", "auth")
@@ -1764,11 +1738,7 @@ def logout(request: Request):
         # Revoke the server-side session for BOTH Bearer and cookie clients.
         conn = db_connect()
         try:
-            from sqlalchemy import text as _text
-            conn.connection.execute(_text(
-                "DELETE FROM user_sessions WHERE token = :token"
-            ), {"token": _session_token_digest(token)})
-            conn.connection.commit()
+            _session_store.delete_token(conn, _session_token_digest(token))
         finally:
             conn.close()
     _log(f"logout: user={user['username'] if user else 'unknown'}", "auth")
@@ -2166,10 +2136,9 @@ def change_user_password(user_id: int, request: Request, payload: dict,
         conn.connection.execute(_text(
             "UPDATE users SET password_hash = :ph, updated_at = :now WHERE id = :id"
         ), {"ph": pw_hash, "now": now, "id": user_id})
-        # Revoke all sessions for this user (force re-login)
-        conn.connection.execute(_text(
-            "DELETE FROM user_sessions WHERE user_id = :uid"
-        ), {"uid": user_id})
+        # Revoke all sessions for this user (force re-login) in the same
+        # transaction as the password change.
+        _session_store.delete_for_user(conn, user_id, commit=False)
         conn.connection.commit()
         _invalidate_default_admin_cache()
         _log(f"change password: user_id={user_id}", "users")
@@ -2220,16 +2189,14 @@ def get_user_detail(user_id: int, _: None = Depends(require_auth)):
         ), {"id": user_id}).fetchone()
         if row is None:
             raise HTTPException(404, "user not found")
-        sessions = conn.connection.execute(_text(
-            "SELECT token, created_at, expires_at FROM user_sessions "
-            "WHERE user_id = :uid ORDER BY created_at DESC"
-        ), {"uid": user_id}).fetchall()
+        sessions = _session_store.list_for_user(conn, user_id)
         return {
             "id": row[0], "username": row[1], "role": row[2],
             "enabled": bool(row[3]), "created_at": row[4],
             "updated_at": row[5], "last_login": row[6],
-            "sessions": [{"token_prefix": s[0][:12] + "...", "created_at": s[1],
-                          "expires_at": s[2]} for s in sessions],
+            "sessions": [{"token_prefix": s["token"][:12] + "...",
+                          "created_at": s["created_at"],
+                          "expires_at": s["expires_at"]} for s in sessions],
         }
     finally:
         conn.close()
@@ -2288,10 +2255,8 @@ def update_user(user_id: int, request: Request, payload: dict,
                 "UPDATE users SET enabled = :en, updated_at = :now WHERE id = :id"
             ), {"en": 1 if enabled else 0, "now": int(time.time()), "id": user_id})
             if not enabled:
-                # Revoke sessions for disabled users
-                conn.connection.execute(_text(
-                    "DELETE FROM user_sessions WHERE user_id = :uid"
-                ), {"uid": user_id})
+                # Revoke sessions for disabled users in the same transaction.
+                _session_store.delete_for_user(conn, user_id, commit=False)
 
         conn.connection.commit()
         _log(f"update user: id={user_id} username={username} role={role} enabled={enabled}", "users")
@@ -2310,15 +2275,11 @@ def revoke_user_sessions(user_id: int, request: Request,
     _same_origin(request)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        result = conn.connection.execute(_text(
-            "DELETE FROM user_sessions WHERE user_id = :uid"
-        ), {"uid": user_id})
-        conn.connection.commit()
-        _log(f"revoke sessions: user_id={user_id} count={result.rowcount}", "users")
+        revoked = _session_store.delete_for_user(conn, user_id)
+        _log(f"revoke sessions: user_id={user_id} count={revoked}", "users")
     finally:
         conn.close()
-    return {"ok": True, "revoked": result.rowcount}
+    return {"ok": True, "revoked": revoked}
 
 
 @app.get("/api/v1/admin/roles", tags=["Users"], summary="List available roles and permissions")
@@ -3631,10 +3592,9 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
         # orphan session row could be inherited by a later account -- the
         # review proved a deleted viewer's token authenticating as a newly
         # created admin. Deleting the sessions in the same transaction makes
-        # that impossible.
-        conn.connection.execute(_text(
-            "DELETE FROM user_sessions WHERE user_id = :id"
-        ), {"id": user_id})
+        # that impossible: the store does not commit here, the user delete
+        # below does it once.
+        _session_store.delete_for_user(conn, user_id, commit=False)
         conn.connection.execute(_text(
             "DELETE FROM users WHERE id = :id"
         ), {"id": user_id})

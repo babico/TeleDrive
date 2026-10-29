@@ -9,7 +9,7 @@ import pytest
 
 from teledrive.db import connect_database
 from teledrive.storage import quota
-from teledrive.stores import pins, shares
+from teledrive.stores import pins, sessions, shares
 
 
 @pytest.fixture
@@ -89,3 +89,71 @@ def test_bucket_quota_set_update_and_list(db):
     assert quota.bucket_quota(db, "b1") == (None, 3)
     assert quota.all_bucket_quotas(db) == [
         ("b1", None, 3), ("b2", 200, None)]
+
+
+def _add_user(db, username="alice", role="admin", enabled=1):
+    from sqlalchemy import insert
+
+    from teledrive.db import users
+
+    db.connection.execute(insert(users).values(
+        username=username, password_hash="x", role=role, enabled=enabled,
+        created_at=1, updated_at=1,
+    ))
+    db.commit()
+    from sqlalchemy import select
+
+    return int(db.connection.execute(
+        select(users.c.id).where(users.c.username == username)).scalar_one())
+
+
+def _session(db, token, user_id, created_at=10, expires_at=1000):
+    sessions.create(db, token=token, user_id=user_id,
+                    created_at=created_at, expires_at=expires_at)
+
+
+def test_session_create_resolve_username_and_list(db):
+    uid = _add_user(db)
+    _session(db, "tok-a", uid, created_at=10)
+    _session(db, "tok-b", uid, created_at=20)
+
+    assert sessions.username_for_token(db, "tok-a") == "alice"
+    assert sessions.username_for_token(db, "missing") is None
+    assert sessions.resolve(db, "tok-a", now=100) == {
+        "id": uid, "username": "alice", "role": "admin"}
+    assert [s["token"] for s in sessions.list_for_user(db, uid)] == [
+        "tok-b", "tok-a"]
+
+
+def test_session_resolve_deletes_expired_token(db):
+    uid = _add_user(db)
+    _session(db, "tok-exp", uid, expires_at=100)
+    assert sessions.resolve(db, "tok-exp", now=101) is None
+    assert sessions.username_for_token(db, "tok-exp") is None
+
+
+def test_session_resolve_treats_disabled_user_as_unauthenticated(db):
+    uid = _add_user(db, enabled=0)
+    _session(db, "tok-disabled", uid)
+    assert sessions.resolve(db, "tok-disabled", now=100) is None
+    # All of that user's sessions are gone, not just the one presented.
+    assert sessions.list_for_user(db, uid) == []
+
+
+def test_session_delete_scopes(db):
+    uid = _add_user(db)
+    other = _add_user(db, username="bob")
+    _session(db, "tok-1", uid)
+    _session(db, "tok-2", uid)
+    _session(db, "tok-3", other, expires_at=50)
+    _session(db, "tok-4", other, expires_at=5000)
+
+    assert sessions.delete_token(db, "tok-1") == 1
+    assert sessions.delete_token(db, "tok-1") == 0
+    assert sessions.delete_for_user(db, uid) == 1
+    assert sessions.list_for_user(db, uid) == []
+    # bob's expired token is purged; his live token survives.
+    assert sessions.purge_expired(db, now=100) == 1
+    assert [s["token"] for s in sessions.list_for_user(db, other)] == ["tok-4"]
+    assert sessions.delete_all(db) == 1
+    assert sessions.list_for_user(db, other) == []

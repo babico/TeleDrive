@@ -9,7 +9,9 @@ import pytest
 
 from teledrive.db import connect_database
 from teledrive.storage import quota
-from teledrive.stores import pins, sessions, shares, telegram_pending, users
+from teledrive.stores import (
+    content_index as content_store, pins, sessions, shares, telegram_pending,
+    users)
 
 
 @pytest.fixture
@@ -266,4 +268,45 @@ def test_pending_attempts_bump_and_purge(db):
     assert telegram_pending.purge_older_than(db, 5000, commit=False) == 1
     db.commit()
     assert telegram_pending.get(db, "new") is None
+
+
+def _indexed_object(db, key="notes.txt"):
+    from teledrive.storage.manifest import ManifestStore
+
+    store = ManifestStore(db)
+    object_id = store.begin("b1", key, 0, 1)
+    store.finish(object_id, "a" * 64, 1)
+    return object_id
+
+
+def test_content_index_ensure_get_and_delete(db):
+    object_id = _indexed_object(db)
+
+    assert content_store.get(db, object_id) is None
+    assert content_store.ensure_row(db, object_id, indexed_at=100) is True
+    row = content_store.get(db, object_id)
+    assert row["text"] == "" and row["indexed_at"] == 100
+
+    # Idempotent: an existing row is neither duplicated nor overwritten.
+    assert content_store.ensure_row(db, object_id, indexed_at=200) is False
+    assert content_store.get(db, object_id)["indexed_at"] == 100
+
+    assert content_store.delete_for_object(db, object_id) == 1
+    assert content_store.get(db, object_id) is None
+    assert content_store.delete_for_object(db, object_id) == 0
+
+
+def test_content_index_search_delegates_and_delete_clears_fts(db, tmp_path):
+    from teledrive.storage.content_index import index_object_content
+
+    object_id = _indexed_object(db, key="doc.txt")
+    path = tmp_path / "doc.txt"
+    path.write_text("searchable body", encoding="utf-8")
+    assert index_object_content(db, object_id, path, "doc.txt")
+
+    assert [hit[0] for hit in content_store.search(db, "searchable")] == [
+        object_id]
+    content_store.delete_for_object(db, object_id)
+    assert content_store.search(db, "searchable") == []
+
 

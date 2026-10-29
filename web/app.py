@@ -61,6 +61,7 @@ from teledrive.storage.manifest import ManifestStore, objects
 from sqlalchemy import select as _sa_select
 from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
+from teledrive.stores import content_index as _content_store
 from teledrive.stores import pins as _pin_store
 from teledrive.stores import sessions as _session_store
 from teledrive.stores import shares as _share_store
@@ -4259,8 +4260,7 @@ def admin_search_objects(q: str = Query(..., min_length=1, max_length=256),
     try:
         from teledrive.storage.catalog import heads as _heads
         if mode == "content":
-            from teledrive.storage.content_index import search_content
-            matches = search_content(conn, q, limit)
+            matches = _content_store.search(conn, q, limit)
             if not matches:
                 return {"query": q, "mode": "content", "objects": []}
             by_id = {object_id: snippet for object_id, snippet in matches}
@@ -4361,24 +4361,11 @@ async def reindex_object_contents(request: Request,
                             out.write(piece)
                 if extract_text(target, key) is None:
                     # Mark non-text objects as examined so they are not
-                    # retried forever: an empty index row.
-                    # Portable idempotent insert: the row may already exist
-                    # (reindex of an unchanged object). "INSERT OR IGNORE" is
-                    # SQLite-only; check first, and let the primary key catch
-                    # a concurrent insert.
-                    already = conn.connection.execute(_text(
-                        "SELECT 1 FROM object_content_index "
-                        "WHERE object_id = :i"), {"i": object_id}).first()
-                    if already is None:
-                        try:
-                            conn.connection.execute(_text(
-                                "INSERT INTO object_content_index "
-                                "(object_id, text, indexed_at) "
-                                "VALUES (:i, '', :n)"),
-                                {"i": object_id, "n": int(time.time())})
-                        except Exception:
-                            conn.connection.rollback()
-                    conn.commit()
+                    # retried forever: an empty index row. The store does the
+                    # portable SELECT-then-INSERT (INSERT OR IGNORE is
+                    # SQLite-only) and commits.
+                    _content_store.ensure_row(
+                        conn, object_id, int(time.time()))
                     continue
                 if index_object_content(conn, object_id, target, key):
                     indexed += 1

@@ -815,14 +815,37 @@ def _seed_settings_document(document: dict[str, Any]) -> None:
         store.db.close()
 
 
+# Field names whose VALUE is a credential, matched at any depth across the
+# whole document. A two-key denylist (api_hash) leaked the live Telethon
+# StringSession -- full control of the storage account -- to a viewer.
+_SECRET_FIELD_NAMES = frozenset({
+    "api_hash", "api_id", "session_string", "session", "session_file",
+    "password", "secret", "secret_key", "token", "access_key",
+    "private_key", "master_key", "webhook_secret", "client_secret",
+})
+
+
+def _redact_tree(node):
+    """Redact every credential-looking field, at any depth."""
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            normalised = str(key).lower().replace("-", "_")
+            if normalised in _SECRET_FIELD_NAMES and value:
+                node[key] = REDACTED
+            else:
+                _redact_tree(value)
+    elif isinstance(node, list):
+        for item in node:
+            _redact_tree(item)
+    return node
+
+
 def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(raw)
-    tg = result.get("telegram", {})
-    if tg.get("api_hash"):
-        tg["api_hash"] = REDACTED
-    for account in tg.get("accounts", []) or []:
-        if isinstance(account, dict) and account.get("api_hash"):
-            account["api_hash"] = REDACTED
+    # One recursive pass instead of an enumerated denylist: the previous
+    # version only knew about telegram.api_hash, so storage.apis[*]
+    # .session_string and account api_hash went out verbatim.
+    _redact_tree(result)
     state_cfg = result.get("state", {})
     db_url = state_cfg.get("database_url") or state_cfg.get("db_path")
     if db_url:
@@ -831,24 +854,29 @@ def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _restore_tree(node, previous):
+    """Put back any REDACTED value the client echoed from the GET.
+
+    Symmetric with _redact_tree, and positional in the same way: a list is
+    matched by index and a dict by key, so an entry the client added has no
+    previous value and keeps whatever it sent.
+    """
+    if isinstance(node, dict) and isinstance(previous, dict):
+        for key, value in list(node.items()):
+            if value == REDACTED and key in previous:
+                node[key] = previous[key]
+            else:
+                _restore_tree(value, previous.get(key))
+    elif isinstance(node, list) and isinstance(previous, list):
+        for index, item in enumerate(node):
+            if index < len(previous):
+                _restore_tree(item, previous[index])
+    return node
+
+
 def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     result = _drop_retired_auth_settings(candidate)
-    new_tg = result.setdefault("telegram", {})
-    old_tg = current.get("telegram", {})
-    if new_tg.get("api_hash") == REDACTED:
-        new_tg["api_hash"] = old_tg.get("api_hash", "")
-
-    old_accounts = {
-        str(a.get("name")): a
-        for a in (old_tg.get("accounts") or [])
-        if isinstance(a, dict) and a.get("name")
-    }
-    for account in new_tg.get("accounts", []) or []:
-        if not isinstance(account, dict):
-            continue
-        if account.get("api_hash") == REDACTED:
-            account["api_hash"] = old_accounts.get(str(account.get("name")), {}).get("api_hash", "")
-
+    _restore_tree(result, current)
     new_state = result.setdefault("state", {})
     old_state = current.get("state", {})
     old_url = old_state.get("database_url") or old_state.get("db_path")
@@ -935,10 +963,10 @@ def validate_and_write_config(raw: dict[str, Any], *,
     _CONFIG_CACHE["config"] = None
     _CONFIG_CACHE["mtime"] = None
     _reload_service_settings()
-    # Migrate users table first: the bootstrap INSERT names `enabled`, so
-    # a pre-`enabled` schema must be upgraded before the row is created.
-    _migrate_users_enabled_column()
-    _create_default_admin()
+    # The administrator bootstrap belongs to startup only. Running it here
+    # meant that a save pointing at a fresh database would silently create
+    # admin/admin in it; the save path can no longer change the database, but
+    # startup-only is the correct place for it regardless.
     # Core schema (including users.enabled) is brought current by the one
     # schema coordinator when the database engine is first built; there is
     # deliberately no DDL here any more.
@@ -1841,16 +1869,54 @@ def get_config(_: None = Depends(require_auth)):
     return _redacted_config(read_raw_config())
 
 
+# Settings that can only be changed by editing config.yaml on disk, as a
+# deployment decision made by someone with filesystem access. Exposing them
+# over HTTP is a takeover primitive, not a feature:
+#
+#   state.database_url   redirects the whole application at a fresh database,
+#                        after which the startup bootstrap creates
+#                        admin/admin there -- verified end to end: a session
+#                        save, then /api/v1/auth/login with admin/admin on the
+#                        new DB. It also orphans the real data.
+#   state.db_extra_packages
+#                        is pip-installed at every boot (settings.py), so it
+#                        is arbitrary code execution that survives restarts.
+_FILE_ONLY_STATE_KEYS = ("database_url", "db_path", "db_extra_packages")
+
+
+def _reject_file_only_settings(payload: dict[str, Any]) -> None:
+    submitted = (payload or {}).get("state") or {}
+    if not isinstance(submitted, dict):
+        raise HTTPException(400, "state must be an object")
+    current = (read_raw_config() or {}).get("state") or {}
+    for key in _FILE_ONLY_STATE_KEYS:
+        if key not in submitted:
+            continue
+        if submitted[key] == REDACTED:
+            continue
+        if submitted[key] != current.get(key):
+            raise HTTPException(
+                400,
+                f"state.{key} cannot be changed from the API; edit "
+                f"config.yaml on the server instead")
+
+
 @app.put("/api/v1/config", tags=["Configuration"], response_model=OKResponse, summary="Validate and save configuration")
 @app.put("/api/config", tags=["Configuration"], include_in_schema=False)
 def put_config(request: Request, payload: dict[str, Any] = Body(...), _: None = Depends(require_auth)):
     _same_origin(request)
-    _log("settings save requested", "config")
+    # A configuration write can change allowed hosts, filesystem roots and
+    # the job watcher, so it is a human/operator decision -- never something
+    # a stored API key performs on its holder's behalf.
+    actor = _require_interactive_session(request, "change the deployment "
+                                                   "configuration")
+    _log(f"settings save requested by {actor}", "config", user=actor)
+    _reject_file_only_settings(payload)
     try:
-        user = getattr(request.state, "user", {}) or {}
-        validate_and_write_config(
-            payload, by=str(user.get("username") or "system"))
-        _log("settings saved successfully", "config")
+        validate_and_write_config(payload, by=actor)
+        _log("settings saved successfully", "config", user=actor)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(400, _scrub_text(str(exc))) from exc
     except Exception as exc:
@@ -3898,13 +3964,27 @@ def admin_presign_object(bucket: str, request: Request,
     """Server-side SigV4 query signing; the credential secret never
     leaves the process, only the signed URL is returned."""
     _same_origin(request)
+    # A presigned URL is durable, anonymous authority: it keeps working for
+    # up to seven days after the caller's session, API key or role is gone,
+    # and only revoking the SIGNING credential ends it. Delegating that from
+    # an API key would let a key plant access that outlives its own
+    # revocation, so it is an interactive action like share links and
+    # credential reveal.
+    actor = _require_interactive_session(request, "presign")
     key = str(payload.get("key", "")).strip()
+    if len(key.encode("utf-8")) > 1024:
+        raise HTTPException(422, "Object key must contain 1..1024 UTF-8 bytes")
     if not key:
         raise HTTPException(422, "key is required")
     try:
         expires = int(payload.get("expires") or 3600)
     except (TypeError, ValueError):
         raise HTTPException(422, "expires must be an integer") from None
+    # SigV4 caps a presigned URL at seven days; validate before signing so
+    # an out-of-range value is a 422 rather than an unhandled 500.
+    if not 1 <= expires <= 604800:
+        raise HTTPException(
+            422, "expires must be between 1 and 604800 seconds (7 days)")
     credential_id = payload.get("credential_id")
     conn = db_connect()
     try:
@@ -3931,6 +4011,9 @@ def admin_presign_object(bucket: str, request: Request,
                 revealed = store.reveal(candidates[0]["id"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        _log(f"presigned GET: bucket={bucket} key={key} "
+             f"expires={expires}s credential={revealed['access_key']}",
+             "storage", user=actor)
     finally:
         conn.close()
     from teledrive.s3.sigv4 import presign_get_url
@@ -3982,7 +4065,7 @@ def admin_create_share(bucket: str, request: Request,
         if bucket not in catalog.list_buckets():
             raise HTTPException(404, "Bucket not found")
         try:
-            catalog.get(bucket, key)
+            shared = catalog.get(bucket, key).item
         except FileNotFoundError as exc:
             raise HTTPException(404, "Object not found") from exc
         from sqlalchemy import insert as _insert
@@ -3994,6 +4077,9 @@ def admin_create_share(bucket: str, request: Request,
             salt, digest = _hash_share_password(password)
         conn.connection.execute(_insert(share_links).values(
             token=token, bucket=bucket, object_key=key,
+            # Pin the exact version. A key-bound link would serve whatever
+            # the key pointed at later, and recover after an unlink + re-upload.
+            object_id=shared.id,
             created_by=(request.state.user or {}).get("username", "-"),
             created_at=now,
             expires_at=now + expires_in if expires_in else None,
@@ -4085,9 +4171,16 @@ def admin_copy_object(bucket: str, request: Request,
             raise HTTPException(404, "Destination bucket not found")
         if destination_bucket == bucket and payload.destination_key == key:
             raise HTTPException(400, "Destination equals source")
-        # Enforce the destination bucket's object-count quota for new keys.
+        # The copy ADDS the source's full size to the destination, so the
+        # quota must be checked with that size -- not 0, which only ever
+        # enforced the object count and let a 50-byte bucket accept a
+        # 100-byte copy.
+        try:
+            source_item = catalog.get(bucket, key).item
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Object not found") from exc
         _enforce_bucket_quota(conn, destination_bucket,
-                              payload.destination_key, 0)
+                              payload.destination_key, source_item.size)
         try:
             dest_head = catalog.get(destination_bucket, payload.destination_key)
             dest_generation = dest_head.generation
@@ -4106,7 +4199,10 @@ def admin_copy_object(bucket: str, request: Request,
         except (CopyConflict, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
         _log(f"copy object: {bucket}/{key} -> "
-             f"{destination_bucket}/{payload.destination_key}", "storage")
+             f"{destination_bucket}/{payload.destination_key} "
+             f"id={restored.object_id}", "storage",
+             user=(getattr(request.state, "user", None) or {}).get(
+                 "username") or "system")
         return {"id": restored.object_id, "bucket": destination_bucket,
                 "key": payload.destination_key, "etag": restored.etag,
                 "size": restored.size,
@@ -5674,8 +5770,8 @@ def _load_active_share(token: str):
     try:
         from sqlalchemy import text as _text
         row = conn.connection.execute(_text(
-            "SELECT token, bucket, object_key, password_salt, password_hash "
-            "FROM share_links WHERE token = :t AND revoked = 0 "
+            "SELECT token, bucket, object_key, password_salt, password_hash, "
+            "object_id FROM share_links WHERE token = :t AND revoked = 0 "
             "AND (expires_at IS NULL OR expires_at > :now) "
             "AND (max_downloads IS NULL OR download_count < max_downloads)"
         ), {"t": token, "now": int(time.time())}).first()
@@ -5687,23 +5783,40 @@ def _load_active_share(token: str):
 
 
 async def _stream_share(row) -> StreamingResponse:
-    """Consume one download slot atomically, then stream the object."""
+    """Stream the PINNED version, and charge a slot only if it will be sent.
+
+    Two defects the review proved: (1) the counter was incremented BEFORE
+    the object was resolved or read, so every 404, every link-preview fetch
+    and every failed transfer permanently burned a download slot; (2) the
+    link followed the live head by key, so it served replaced content and
+    came back to life after an unlink plus a re-upload.
+    """
     token, bucket, key = row[0], row[1], row[2]
+    pinned_id = row[5]
     conn = db_connect()
     try:
         from sqlalchemy import text as _text
+        manifests = ManifestStore(conn)
+        catalog = BucketCatalog(manifests)
+        # Resolve BEFORE claiming, and refuse anything that cannot be served.
+        try:
+            item = (manifests.get(pinned_id) if pinned_id
+                    else catalog.get(bucket, key).item)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Link not found or expired") from exc
+        # A pinned version must still describe the bucket/key it was issued
+        # for: if the row no longer does, the link is dead, not re-targeted.
+        if item.bucket != bucket or item.key != key:
+            raise HTTPException(404, "Link not found or expired")
         claimed = conn.connection.execute(_text(
             "UPDATE share_links SET download_count = download_count + 1 "
             "WHERE token = :t AND revoked = 0 "
+            "AND (expires_at IS NULL OR expires_at > :now) "
             "AND (max_downloads IS NULL OR download_count < max_downloads)"
-        ), {"t": token}).rowcount
+        ), {"t": token, "now": int(time.time())}).rowcount
         conn.connection.commit()
         if claimed != 1:
             raise HTTPException(404, "Link not found or expired")
-        try:
-            item = BucketCatalog(ManifestStore(conn)).get(bucket, key).item
-        except FileNotFoundError as exc:
-            raise HTTPException(404, "Link not found or expired") from exc
         transport = storage_transport(conn)
         root = Path(STORAGE_SCRATCH_DIR)
         _secure_mkdir(root)
@@ -5729,6 +5842,9 @@ async def _stream_share(row) -> StreamingResponse:
                                  "Content-Disposition":
                                      f"attachment; filename*=UTF-8''{quoted}",
                                  "X-Content-Type-Options": "nosniff",
+                                 # A cache could otherwise serve the bytes
+                                 # again without consuming a slot.
+                                 "Cache-Control": "no-store",
                              })
 
 

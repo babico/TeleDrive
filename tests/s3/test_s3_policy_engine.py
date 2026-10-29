@@ -497,3 +497,59 @@ def test_policy_denies_batch_delete_per_entry(service):
     assert b"AccessDenied" in reply.content
     assert signed(service, "GET", f"/{BUCKET}/a").status_code == 200
     assert signed(service, "GET", f"/{BUCKET}/b").status_code == 404
+
+
+def test_deny_on_prefix_covers_a_bare_listing(service):
+    """A Deny must apply to the DEFAULT request, not only to a spelled-out one.
+
+    "Deny s3:ListBucket with StringLike {s3:prefix: *}" answered 403 for
+    ?prefix=a but 200 for a bare GET /bucket, which enumerated the entire
+    bucket. Cause: a missing context key fails a positive condition, so
+    omitting the query parameter silently skipped the Deny. ListBucket has
+    documented defaults (prefix "", delimiter "", max-keys 1000) and they are
+    now always present in the policy context.
+    """
+    main = service[1]
+    assert signed(service, "PUT", f"/{BUCKET}").status_code == 200
+    store = _store(service)
+    reader = store.create("list-reader", ["s3:ListBucket"])
+    body = _document(_statement(
+        effect="Deny", action="s3:ListBucket", resource="",
+        principal=_principal(reader.access_key),
+        condition={"StringLike": {"s3:prefix": ["*"]}},
+        sid="DenyPrefixListing"))
+    assert signed(service, "PUT", f"/{BUCKET}?policy", body).status_code == 204
+
+    # Both spellings must be denied.
+    assert signed(service, "GET", f"/{BUCKET}?prefix=a",
+                  access=reader.access_key,
+                  secret=reader.secret_key).status_code == 403
+    assert signed(service, "GET", f"/{BUCKET}",
+                  access=reader.access_key,
+                  secret=reader.secret_key).status_code == 403
+
+
+def test_a_hostile_glob_cannot_wedge_the_process(service):
+    """Policy globs are matched linearly; ``*`` must not be ``.*``.
+
+    The engine used to compile every ``*`` to ``.*`` and run it with
+    fullmatch, so a short policy resource against a long key was classic
+    catastrophic backtracking -- measured at over five seconds per request,
+    single-threaded, for a pattern the bucket owner can install.
+    """
+    import time
+
+    from teledrive.s3.policy import _glob_match
+
+    pattern = "*a" * 10
+    started = time.monotonic()
+    assert _glob_match(pattern, "a" * 2000 + "b") is False
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.5, f"glob matching took {elapsed:.2f}s"
+
+    # And the semantics still hold for ordinary globs.
+    assert _glob_match("bucket/*", "bucket/x") is True
+    assert _glob_match("s3:Get*", "s3:GetObject") is True
+    assert _glob_match("a?c", "abc") is True
+    assert _glob_match("a?c", "ac") is False
+    assert _glob_match("*", "") is True

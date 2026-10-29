@@ -2698,14 +2698,24 @@ def _ownership_model(catalog, bucket: str) -> str:
         return "BucketOwnerEnforced"
 
 
+# ListBucket parameters have well-defined DEFAULTS, and omitting them from
+# the policy context made a Deny silently miss the request it was written to
+# block: "Deny s3:ListBucket with StringLike {s3:prefix: *}" answered 403 for
+# ?prefix=a but 200 for a bare GET, which enumerated the entire bucket. A
+# missing context key fails a positive condition, so the defaults MUST be
+# present for the request to be evaluated as AWS would evaluate it.
+_LIST_DEFAULTS = {"prefix": "", "delimiter": "", "max-keys": "1000"}
+
+
 def _policy_context(catalog, store, access_key: str, bucket: str,
-                    key: str | None, request) -> dict:
+                    key: str | None, request, action: str | None = None) -> dict:
     """Context keys the condition engine can honestly evaluate."""
     context: dict = {}
-    for name in ("prefix", "max-keys", "delimiter"):
+    for name, default in _LIST_DEFAULTS.items():
         value = request.query_params.get(name)
-        if value is not None:
-            context["s3:" + name] = value
+        if value is None and action != "s3:ListBucket":
+            continue
+        context["s3:" + name] = default if value is None else value
     client = getattr(request, "client", None)
     if client is not None and client.host:
         context["aws:SourceIp"] = client.host
@@ -2792,7 +2802,8 @@ def _authorize_resource(catalog, store, access_key: str, action: str,
     3. otherwise → the ACL intersection gate (ownership-aware)
     """
     resource_key = bucket if key is None else f"{bucket}/{key}"
-    context = _policy_context(catalog, store, access_key, bucket, key, request)
+    context = _policy_context(catalog, store, access_key, bucket, key,
+                              request, action)
     decision = None
     try:
         compiled = BucketPolicyStore(catalog).get_compiled(bucket)

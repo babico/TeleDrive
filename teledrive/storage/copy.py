@@ -143,6 +143,18 @@ def copy_object(
             ))
             if updated.rowcount != 1:
                 raise CopyConflict("Destination was changed concurrently")
+        # A copy is a publish: the destination bucket's default object lock
+        # applies exactly as it does to an upload. Skipping it let a copy
+        # (and a version restore, which shares this path) place an
+        # unprotected object in a bucket with a GOVERNANCE/COMPLIANCE
+        # default. Written in the SAME transaction as the head insert.
+        lock_config = catalog.object_lock_config(destination_bucket)
+        if lock_config and lock_config.get("default_days"):
+            db.connection.execute(update(objects).where(
+                objects.c.id == identifier).values(
+                retention_mode=lock_config["default_mode"],
+                retention_until_ns=time.time_ns()
+                + int(lock_config["default_days"]) * 86400 * 1_000_000_000))
         catalog._record_published_uncommitted(manifests.get(identifier))
         try:
             from teledrive.s3.notifications import enqueue_event_safely

@@ -528,3 +528,75 @@ def test_rest_get_refuses_an_sse_c_object_instead_of_empty_200(service):
     assert client.head("/api/v1/buckets/backup-bucket/content",
                        params={"key": "enc.bin"}, headers=headers
                        ).status_code == 400
+
+
+def test_share_link_is_bound_to_the_object_it_shared(service):
+    """An unauthenticated link must not re-target replaced content.
+
+    The row stored only (bucket, key) and resolution followed the live head,
+    so a shared URL served NEW bytes after an overwrite, and came back to
+    life after an unlink plus a re-upload. Verified before the fix: the same
+    token returned ``200 NEW-CONTENT``.
+    """
+    client, headers, _, _ = service
+    assert put(client, headers, b"ORIGINAL", key="shared.bin").status_code == 201
+    created = _share(client, {"key": "shared.bin", "expires_in": 3600})
+    assert created.status_code == 200, created.text
+    token = created.json()["token"]
+
+    first = client.get(f"/share/{token}")
+    assert first.status_code == 200 and first.content == b"ORIGINAL"
+
+    # Overwrite the key with different bytes.
+    assert put(client, headers, b"REPLACED", key="shared.bin").status_code == 201
+    after_overwrite = client.get(f"/share/{token}")
+    # The slot budget is the link's, not the key's: serving the NEW bytes
+    # would be the bug, so a 404 (link exhausted of meaning) is expected
+    # only if the object is unreachable -- otherwise it must still be ORIGINAL.
+    if after_overwrite.status_code == 200:
+        assert after_overwrite.content == b"ORIGINAL", "link re-targeted"
+
+    # Unlink and re-upload: the link must never serve the new object.
+    assert client.delete("/api/v1/buckets/backup-bucket/objects",
+                         params={"key": "shared.bin"},
+                         headers=headers).status_code in (200, 409)
+    assert put(client, headers, b"THIRD", key="shared.bin").status_code == 201
+    revived = client.get(f"/share/{token}")
+    if revived.status_code == 200:
+        assert revived.content != b"THIRD", "link revived for a new upload"
+
+
+def test_share_404_does_not_consume_a_download_slot(service):
+    """A failed request must not spend the link's budget.
+
+    The counter was incremented before the object was resolved, so any link
+    preview bot, retry loop or stale bookmark silently exhausted the quota
+    without anyone downloading anything.
+    """
+    from sqlalchemy import text
+    client, headers, _, _ = service
+    assert put(client, headers, b"slot-budget", key="slot.bin").status_code == 201
+    created = _share(client, {"key": "slot.bin", "max_downloads": 5})
+    assert created.status_code == 200, created.text
+    token = created.json()["token"]
+
+    db = connect_database(webapp.db_connect().engine.url.database)
+    try:
+        db.connection.execute(text(
+            "UPDATE share_links SET object_id = 'gone-object-id' "
+            "WHERE token = :t"), {"t": token})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    for _ in range(4):
+        assert client.get(f"/share/{token}").status_code == 404
+
+    db = connect_database(webapp.db_connect().engine.url.database)
+    try:
+        count = db.connection.execute(text(
+            "SELECT download_count FROM share_links WHERE token = :t"),
+            {"t": token}).scalar_one()
+    finally:
+        db.close()
+    assert count == 0, "a 404 consumed download slots"

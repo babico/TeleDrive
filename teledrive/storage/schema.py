@@ -293,6 +293,18 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_share_object_id(ctx: SchemaContext) -> None:
+    """Bind a share link to the object version it was issued for.
+
+    A key-bound link silently re-targeted replaced content and revived after
+    an unlink + re-upload, so an unauthenticated capability served bytes it
+    was never issued for. Nullable: legacy rows stay key-bound.
+    """
+    _add_columns(ctx.engine, "share_links", [
+        ("object_id", "VARCHAR(36)"),
+    ])
+
+
 def _step_gc_indexes(ctx: SchemaContext) -> None:
     """Indexes for the physical-GC candidate query (append-only migration).
 
@@ -423,6 +435,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("content_search", _step_content_search),
     ("hot_indexes", _step_hot_indexes),
     ("gc_indexes", _step_gc_indexes),
+    ("share_object_id", _step_share_object_id),
 ]
 
 # Bump by appending a step; never reorder or remove one.

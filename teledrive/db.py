@@ -134,6 +134,12 @@ share_links = Table(
     Column("token", String(64), primary_key=True),
     Column("bucket", String(63), nullable=False),
     Column("object_key", String(1024), nullable=False),
+    # The exact object VERSION this link was issued for. A link bound only to
+    # a key re-targeted whatever the key pointed at later, so a share URL
+    # silently served replaced bytes, and kept working after an unlink plus a
+    # re-upload. NULL for rows created before this column existed; those
+    # links stay key-bound but are still bounded by expiry/revocation.
+    Column("object_id", String(36)),
     Column("created_by", String(255), nullable=False),
     Column("created_at", BigInteger, nullable=False),
     Column("expires_at", BigInteger),

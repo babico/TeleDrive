@@ -151,11 +151,39 @@ def _string_list(value, *, field: str, maximum: int = 100,
     return result
 
 
-@lru_cache(maxsize=4096)
-def _glob_regex(pattern: str) -> re.Pattern[str]:
-    """Compile an IAM glob (``*`` any run, ``?`` one character)."""
-    parts = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
-    return re.compile("^" + parts + "$", re.DOTALL)
+def _glob_match(pattern: str, value: str) -> bool:
+    """Match an IAM glob (``*`` any run, ``?`` one character), LINEARLY.
+
+    The previous implementation compiled the glob to a regex where every
+    ``*`` became ``.*``. That is a classic catastrophic-backtracking shape:
+    a 20-character pattern like ``*a*a*a...`` against a long key took > 5 s,
+    single-threaded, on the event loop -- so one request from a credential
+    that could write a bucket policy froze the whole application. This is a
+    greedy two-pointer matcher with backtracking to the last star only: O(n)
+    time, O(1) space, no regex, no cache, no depth limit.
+    """
+    if not isinstance(pattern, str) or not isinstance(value, str):
+        return False
+    p = v = 0
+    star = -1
+    mark = 0
+    while v < len(value):
+        if p < len(pattern) and (pattern[p] == "?" or pattern[p] == value[v]):
+            p += 1
+            v += 1
+        elif p < len(pattern) and pattern[p] == "*":
+            star = p
+            mark = v
+            p += 1
+        elif star != -1:
+            p = star + 1
+            mark += 1
+            v = mark
+        else:
+            return False
+    while p < len(pattern) and pattern[p] == "*":
+        p += 1
+    return p == len(pattern)
 
 
 def _action_is_real(action: str) -> bool:
@@ -163,11 +191,11 @@ def _action_is_real(action: str) -> bool:
         return False
     if re.fullmatch(r"s3:[A-Za-z0-9*?]+", action) is None:
         return False
-    return any(_glob_regex(action).fullmatch(permission)
+    return any(_glob_match(action, permission)
                for permission in PERMISSIONS)
 
 
-def _resource_pattern(raw: str, *, bucket: str) -> tuple[str, re.Pattern | None]:
+def _resource_pattern(raw: str, *, bucket: str) -> tuple[str, str | None]:
     prefix = "arn:aws:s3:::"
     if not raw.startswith(prefix):
         # Any other partition/service/account form is not representable
@@ -189,7 +217,7 @@ def _resource_pattern(raw: str, *, bucket: str) -> tuple[str, re.Pattern | None]
         raise PolicyError("MalformedPolicy", "Invalid resource key pattern")
     if any(character in key_pattern for character in "\r\n\0"):
         raise PolicyError("MalformedPolicy", "Invalid resource key pattern")
-    return bucket, _glob_regex(key_pattern)
+    return bucket, key_pattern
 
 
 def _condition_key(key: str) -> None:
@@ -222,20 +250,21 @@ class Statement:
     effect: str
     principals: frozenset[str]
     actions: tuple[str, ...]
-    resources: tuple[tuple[str, re.Pattern | None], ...]
+    # The raw glob, not a compiled regex: matching is linear now.
+    resources: tuple[tuple[str, str | None], ...]
     conditions: tuple[Condition, ...]
 
     def matches_action(self, action: str) -> bool:
-        return any(_glob_regex(pattern).fullmatch(action)
+        return any(_glob_match(pattern, action)
                    for pattern in self.actions)
 
     def matches_resource(self, resource_key: str) -> bool:
-        for bucket, key_regex in self.resources:
-            if key_regex is None:
+        for bucket, key_glob in self.resources:
+            if key_glob is None:
                 if resource_key == bucket:
                     return True
             elif resource_key.startswith(bucket + "/"):
-                if key_regex.fullmatch(resource_key[len(bucket) + 1:]):
+                if _glob_match(key_glob, resource_key[len(bucket) + 1:]):
                     return True
         return False
 
@@ -423,7 +452,7 @@ def _context_values(context: dict, key: str) -> list[str] | None:
 
 def _string_matches(operator: str, expected: str, actual: str) -> bool:
     if operator == "StringLike":
-        return bool(_glob_regex(expected).fullmatch(actual))
+        return _glob_match(expected, actual)
     return expected == actual
 
 

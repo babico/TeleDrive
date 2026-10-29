@@ -5054,22 +5054,59 @@ def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
 
 @app.get("/api/v1/admin/s3/credentials/{identifier}/secret",
          tags=["API keys"],
-         summary="Reveal an S3 credential secret (admin only, audit-logged)")
+         summary="Reveal an S3 credential secret (session only, audit-logged)")
 @app.get("/api/v1/admin/s3-credentials/{identifier}/secret",
          tags=["API keys"], include_in_schema=False)
-def reveal_s3_credential_secret(identifier: str,
+def reveal_s3_credential_secret(request: Request, identifier: str,
                                 _: None = Depends(require_auth)):
+    """Hand out a decrypted S3 secret. Interactive sessions only.
+
+    Why API keys are refused here: an API key is itself a credential, so
+    letting one reveal another credential's secret creates a chain of secret
+    holders and bypasses the delegation ceiling that blocks minting or
+    rotating a more privileged key. A key scoped to just this route could
+    otherwise read the secret of a credential holding s3:PutBucketPolicy,
+    which is a privilege escalation with no audit trail tying it to a person.
+    A human session is interactive, CSRF-fenced and revocable, so it is the
+    only principal allowed to see a secret.
+    """
+    if getattr(request.state, "api_key_scopes", None) is not None:
+        _log("denied: api-key attempted to reveal an S3 credential secret",
+             "security")
+        raise HTTPException(
+            403,
+            "Credential secrets can only be revealed from an interactive "
+            "session, never with an API key",
+        )
+    if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
+        raise HTTPException(422, "Invalid credential identifier")
+    actor = (getattr(request.state, "user", None) or {}).get("username") \
+        or "unknown"
     conn = db_connect()
     try:
         try:
             revealed = S3CredentialStore(
                 conn, load_master_key()).reveal(identifier)
         except RuntimeError as exc:
-            raise HTTPException(503, str(exc)) from exc
+            # Never echo a path or key state; the audit line carries the
+            # reason class only.
+            _log(f"s3 credential secret reveal failed: id={identifier} "
+                 f"reason=runtime", "security", user=actor)
+            raise HTTPException(
+                503, "Credential secrets are unavailable: the master key "
+                     "cannot be loaded") from exc
+        except OSError as exc:
+            _log(f"s3 credential secret reveal failed: id={identifier} "
+                 f"reason=master-key-io", "security", user=actor)
+            raise HTTPException(
+                503, "Credential secrets are unavailable: the master key "
+                     "cannot be loaded") from exc
         except ValueError as exc:
+            _log(f"s3 credential secret reveal failed: id={identifier} "
+                 f"reason=invalid-target", "security", user=actor)
             raise HTTPException(422, str(exc)) from exc
         _log(f"s3 credential secret revealed: id={identifier} "
-             f"access={revealed['access_key']}", "security")
+             f"access={revealed['access_key']}", "security", user=actor)
         return revealed
     finally:
         conn.close()

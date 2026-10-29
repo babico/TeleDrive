@@ -25,8 +25,8 @@ import json
 import time
 
 from sqlalchemy import (BigInteger, Boolean, Column, Integer, String,
-                        Table, Text, delete, func, insert, inspect, not_,
-                        select, text, update)
+                        Table, Text, and_, delete, func, insert, inspect, not_,
+                        or_, select, text, update)
 
 from .catalog import heads, published_versions, removed_versions
 from .manifest import (ChunkReference, chunks, metadata,
@@ -251,12 +251,28 @@ class RetainedMediaGC:
                     "chunk_count": int(chunk_count), "bytes": int(size),
                 })
             return result
+        # Age is measured from the LATER of the upload and the revocation.
+        # objects.updated_at only advances on chunk append/finish, so a
+        # version revoked a second ago looked "48 hours old" if it had been
+        # uploaded then -- the safety window silently did not apply to the
+        # delete it was supposed to protect. removed_ns is nullable (the
+        # object may still be live-but-unreachable), hence the COALESCE.
+        revocation_ns = (
+            select(removed_versions.c.removed_ns)
+            .where(removed_versions.c.object_id == objects.c.id)
+            .scalar_subquery()
+        )
         rows = db.execute(
             select(objects.c.id, objects.c.bucket, objects.c.object_key,
                    objects.c.updated_at)
             .where(
                 objects.c.status == "ready",
-                objects.c.updated_at < cutoff,
+                # newest of (upload, revocation) must be older than cutoff
+                and_(
+                    objects.c.updated_at < cutoff,
+                    or_(revocation_ns.is_(None),
+                        revocation_ns <= cutoff * 1_000_000_000),
+                ),
                 # Not a current head anywhere.
                 not_(exists(heads.c.object_id, objects.c.id)),
                 # Never delete media a dedup alias still points at.
@@ -412,8 +428,18 @@ class RetainedMediaGC:
         if not remaining:
             # Hide the physically-gone object from version history and
             # future dedup; the GC journal keeps the audit trail.
-            db.execute(insert(removed_versions).values(
-                object_id=object_id, removed_ns=time.time_ns()))
+            #
+            # The row usually ALREADY exists: delete_version/unlink inserts
+            # it when the version is revoked, and inserting a second time
+            # raised a UNIQUE violation -- caught as a per-object failure,
+            # whose rollback ran AFTER the Telegram messages were deleted.
+            # The media was then gone while SQL still said "ready", which is
+            # the worst possible state. Insert only when absent.
+            existing = db.execute(select(removed_versions.c.object_id).where(
+                removed_versions.c.object_id == object_id)).first()
+            if existing is None:
+                db.execute(insert(removed_versions).values(
+                    object_id=object_id, removed_ns=time.time_ns()))
             db.execute(update(objects).where(
                 objects.c.id == object_id).values(
                 status="gc-collected"))

@@ -2,6 +2,7 @@
 owner-gated execution, journaling and alias protection."""
 from __future__ import annotations
 
+import asyncio
 import time
 from hashlib import sha256
 
@@ -52,6 +53,16 @@ def store(admin):
         db.close()
 
 
+def _backdate_revocation(cat, object_id, when_seconds):
+    """Move a removed_versions row back in time (test-only helper)."""
+    from sqlalchemy import text
+    cat.manifests.db.connection.execute(text(
+        "UPDATE storage_removed_versions SET removed_ns = :ns "
+        "WHERE object_id = :oid"),
+        {"ns": int(when_seconds) * 1_000_000_000, "oid": object_id})
+    cat.manifests.db.connection.commit()
+
+
 def test_metrics_and_candidates_split_scopes(store):
     cat = store
     old = int(time.time()) - 48 * 3600
@@ -66,6 +77,11 @@ def test_metrics_and_candidates_split_scopes(store):
     # Explicitly revoked version: candidate in revoked AND deleted.
     revoked, _ = _publish(cat, "revoked.txt", size=130, now=old)
     cat.delete_version("gcx", "revoked.txt", revoked)
+    # Age is measured from the LATER of upload and REVOCATION, so a version
+    # revoked just now is deliberately NOT eligible yet: the safety window
+    # must protect the delete too, not only the original upload. Backdate
+    # the revocation to simulate a version that has been gone for 48h.
+    _backdate_revocation(cat, revoked, old)
     # Unlinked head (REST delete): candidate only in scope=deleted.
     unlinked, _ = _publish(cat, "unlinked.txt", size=140, now=old)
     cat.remove_current("gcx", "unlinked.txt")
@@ -306,3 +322,74 @@ def test_lifecycle_expiration_creates_markers_and_enqueues(admin):
             scope="queued")] == [expiring]
     finally:
         db.close()
+
+
+def test_revoked_scope_collects_and_records_without_colliding(store):
+    """The default scope must account for what it deletes.
+
+    Found by the API review. ``delete_version`` already writes a
+    ``storage_removed_versions`` row, and the collector inserted a second
+    one unconditionally. The UNIQUE violation was caught as a per-object
+    failure and rolled back -- AFTER the Telegram messages were deleted. The
+    media was gone while SQL still said ``ready``, which is the worst state
+    a storage system can reach: nothing records the loss.
+
+    This pins the whole outcome: one collected object, no failures, chunks
+    physically gone, exactly one journal row, and status gc-collected.
+    """
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    oid, _message = _publish(cat, "revoked.bin", size=256, now=old)
+    cat.delete_version("gcx", "revoked.bin", oid)
+    _backdate_revocation(cat, oid, old)
+
+    gcx = RetainedMediaGC(cat.manifests.db)
+    gcx.set_enabled(True, by="test")
+    transport = FakeTransport()
+    report = asyncio.run(gcx.collect(transport, scope="revoked",
+                               min_age_seconds=3600))
+
+    assert report["failed"] == [], report["failed"]
+    assert [c["object_id"] for c in report["collected"]] == [oid]
+    assert transport.deleted, "no Telegram message was deleted"
+
+    db = cat.manifests.db
+    chunks = db.connection.execute(text(
+        "SELECT COUNT(*) FROM storage_chunks WHERE object_id = :o"),
+        {"o": oid}).scalar_one()
+    assert chunks == 0, "chunks remain after a successful collection"
+    journal = db.connection.execute(text(
+        "SELECT COUNT(*) FROM storage_gc_collected WHERE object_id = :o"),
+        {"o": oid}).scalar_one()
+    assert journal == 1
+    removed = db.connection.execute(text(
+        "SELECT COUNT(*) FROM storage_removed_versions WHERE object_id = :o"),
+        {"o": oid}).scalar_one()
+    assert removed == 1, "the revocation row must exist exactly once"
+    status = db.connection.execute(text(
+        "SELECT status FROM storage_objects WHERE id = :o"),
+        {"o": oid}).scalar_one()
+    assert status == "gc-collected"
+
+
+def test_queued_scope_drains_a_version_deleted_object(store):
+    """A queued version-delete must drain without colliding either."""
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    oid, _ = _publish(cat, "queued.bin", size=300, now=old)
+    gcx = RetainedMediaGC(cat.manifests.db)
+    gcx.set_enabled(True, by="test")
+    gcx.enqueue([oid], "version-delete")
+    # Age the queue entry past the grace window.
+    cat.manifests.db.connection.execute(text(
+        "UPDATE storage_gc_queue SET enqueued_ns = enqueued_ns - :d"),
+        {"d": 7 * 86400 * 1_000_000_000})
+    cat.manifests.db.connection.commit()
+    # The object still needs a revocation row to be eligible.
+    cat.delete_version("gcx", "queued.bin", oid)
+    _backdate_revocation(cat, oid, old)
+
+    transport = FakeTransport()
+    report = asyncio.run(gcx.collect(transport, scope="queued"))
+    assert report["failed"] == [], report["failed"]
+    assert [c["object_id"] for c in report["collected"]] == [oid]

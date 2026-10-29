@@ -4133,10 +4133,22 @@ async def reindex_object_contents(request: Request,
                 if extract_text(target, key) is None:
                     # Mark non-text objects as examined so they are not
                     # retried forever: an empty index row.
-                    conn.connection.execute(_text(
-                        "INSERT OR IGNORE INTO object_content_index "
-                        "(object_id, text, indexed_at) VALUES (:i, '', :n)"),
-                        {"i": object_id, "n": int(time.time())})
+                    # Portable idempotent insert: the row may already exist
+                    # (reindex of an unchanged object). "INSERT OR IGNORE" is
+                    # SQLite-only; check first, and let the primary key catch
+                    # a concurrent insert.
+                    already = conn.connection.execute(_text(
+                        "SELECT 1 FROM object_content_index "
+                        "WHERE object_id = :i"), {"i": object_id}).first()
+                    if already is None:
+                        try:
+                            conn.connection.execute(_text(
+                                "INSERT INTO object_content_index "
+                                "(object_id, text, indexed_at) "
+                                "VALUES (:i, '', :n)"),
+                                {"i": object_id, "n": int(time.time())})
+                        except Exception:
+                            conn.connection.rollback()
                     conn.commit()
                     continue
                 if index_object_content(conn, object_id, target, key):
@@ -4232,11 +4244,31 @@ def admin_set_quota(bucket: str, payload: BucketQuotaRequest, request: Request,
     try:
         from sqlalchemy import text as _text
         now = int(time.time())
-        conn.connection.execute(_text(
-            "INSERT INTO bucket_quotas (bucket, max_size_bytes, max_objects, created_at, updated_at) "
-            "VALUES (:b, :ms, :mo, :now, :now) "
-            "ON CONFLICT (bucket) DO UPDATE SET max_size_bytes = :ms, max_objects = :mo, updated_at = :now"
-        ), {"b": bucket, "ms": payload.max_size_bytes, "mo": payload.max_objects, "now": now})
+        values = {"b": bucket, "ms": payload.max_size_bytes,
+                  "mo": payload.max_objects, "now": now}
+        # Portable upsert: UPDATE first, INSERT only when the row is
+        # missing. ``ON CONFLICT (bucket) DO UPDATE`` is PostgreSQL/SQLite
+        # only and raised on MySQL, which this project documents as
+        # supported. The INSERT is guarded by the unique constraint, so a
+        # concurrent creator still ends with one row.
+        changed = conn.connection.execute(_text(
+            "UPDATE bucket_quotas SET max_size_bytes = :ms, "
+            "max_objects = :mo, updated_at = :now WHERE bucket = :b"
+        ), values)
+        if changed.rowcount == 0:
+            try:
+                conn.connection.execute(_text(
+                    "INSERT INTO bucket_quotas (bucket, max_size_bytes, "
+                    "max_objects, created_at, updated_at) "
+                    "VALUES (:b, :ms, :mo, :now, :now)"
+                ), values)
+            except Exception:
+                # Lost the race: the row now exists, so apply the update.
+                conn.connection.rollback()
+                conn.connection.execute(_text(
+                    "UPDATE bucket_quotas SET max_size_bytes = :ms, "
+                    "max_objects = :mo, updated_at = :now WHERE bucket = :b"
+                ), values)
         conn.connection.commit()
         _log(f"set quota: bucket={bucket} max_size={payload.max_size_bytes} max_objects={payload.max_objects}", "storage")
     finally:
@@ -4400,11 +4432,23 @@ def admin_put_bucket_pin(bucket: str, request: Request,
                 "SELECT 1 FROM telegram_sessions WHERE account = :a"),
                 {"a": account}).first():
             raise HTTPException(404, "Unknown Telegram session account")
-        conn.connection.execute(_text(
-            "INSERT INTO bucket_account_pins (bucket, account, updated_at) "
-            "VALUES (:b, :a, :now) ON CONFLICT(bucket) DO UPDATE SET "
-            "account = :a, updated_at = :now"
-        ), {"b": bucket, "a": account, "now": int(time.time())})
+        # Portable upsert (see the quota handler): ON CONFLICT is
+        # PostgreSQL/SQLite only and raised on MySQL.
+        pin_values = {"b": bucket, "a": account, "now": int(time.time())}
+        changed = conn.connection.execute(_text(
+            "UPDATE bucket_account_pins SET account = :a, updated_at = :now "
+            "WHERE bucket = :b"), pin_values)
+        if changed.rowcount == 0:
+            try:
+                conn.connection.execute(_text(
+                    "INSERT INTO bucket_account_pins "
+                    "(bucket, account, updated_at) VALUES (:b, :a, :now)"
+                ), pin_values)
+            except Exception:
+                conn.connection.rollback()
+                conn.connection.execute(_text(
+                    "UPDATE bucket_account_pins SET account = :a, "
+                    "updated_at = :now WHERE bucket = :b"), pin_values)
         conn.connection.commit()
     finally:
         conn.close()

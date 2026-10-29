@@ -43,23 +43,6 @@ def transport_mode() -> str:
     return "telethon"
 
 
-def _session_from_file() -> str:
-    filename = os.environ.get("TELEDRIVE_STORAGE_MTPROTO_SESSION_FILE", "").strip()
-    return _session_from_file_for(filename)
-
-
-def _session_from_file_for(filename: str) -> str:
-    if not filename:
-        raise RuntimeError("Set TELEDRIVE_STORAGE_MTPROTO_SESSION_FILE for user storage")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(filename, flags)
-    with os.fdopen(fd, "r", encoding="ascii") as handle:
-        value = handle.read(8193).strip()
-    if not value or len(value) > 8192:
-        raise RuntimeError("Invalid authorized user session file")
-    return value
-
-
 def _split_list(value: str, name: str) -> list[str]:
     items = [part.strip() for part in value.split(",")]
     if not items or any(not part for part in items):

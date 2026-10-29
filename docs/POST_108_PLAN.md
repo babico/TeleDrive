@@ -55,8 +55,26 @@ exhausted.
       issue/update S3 credential, remove_object_content.
 - [x] Wave 4 (`48e188b`): get_object_content read gate (archive, SSE-C,
       access accounting).
-- [ ] Wave 5 (running): config, /share/{token}, presign + copy, bucket
-      policy. Then waves 6+ until the 101 handlers are covered.
+- [x] Wave 5 (`d7881dd`): config, /share/{token}, presign + copy, bucket
+      policy — 14 findings, two criticals (a config save could redirect the
+      database and seed admin/admin there; GET returned the live Telethon
+      session string).
+- [ ] Wave 6 (running): admin download, CompleteMultipartUpload, SigV4
+      verification, public website hosting. Then waves 7+ until the 101
+      handlers are covered.
+- [x] Cross-cutting: the duplicated read path is gone
+      (`48e8d95`) — `admin_download_object` and `get_object_content` shared
+      their logic by copy, so three fixes landed on one and not the other.
+
+## Findings ledger
+
+`docs/API_REVIEW.md` opens with a fix-status table: every reported finding is
+either **fixed** with the commit that closed it, **disproved** with the
+evidence, or **open** with a reason. Current totals: 20 fixed, 1 disproved
+(the REST path does not bypass the bucket policy — the parser rejects
+`Principal: "*"`, so a policy can only address an S3 credential), 2 open
+(GC-adjacent legal-hold semantics on the REST unlink, and the in-memory audit
+buffer).
 - [ ] Each review is appended to `docs/API_REVIEW.md` in a fixed format:
       route, handler, auth model, inputs, failure modes, findings by severity,
       and the test that should exist.

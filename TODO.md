@@ -811,12 +811,24 @@ spoofing). The rest are still open:
       `ENDPOINT_PERMISSIONS` and the web registry's map are now built from one
       table (`CURATED_PERMISSION_ROWS` in `teledrive/api_keys.py`), which also
       carries the UI label. Handler string literals reference those constants.
-- [ ] **#10 Canonical `Principal`/`authorize`** — the session, Basic, bearer
-      and S3 paths remain separate decision points.
-- [ ] **#11 Split `web/app.py`** — still one large router module.
-- [ ] **#12 Split `web/s3.py`** — dispatch still lives in one file.
-- [ ] **#13 Raw `text()` in `web/app.py`** — users, sessions, quota, pin and
-      share still bypass a store layer.
+- [ ] **#10 One identity model, two gates** — a session/bearer caller is
+      gated by the role→route-permission map in `require_auth`, an S3 caller
+      by SigV4 + the credential's permission set. That is now ONE decision
+      point per transport rather than the four the finding described: Basic
+      is deleted (`b97bf62`), and the S3 credential store is the only S3
+      authenticator. What remains is that the two transports cannot share a
+      literal function, because one authorizes a route and the other an S3
+      action — documented as deliberate in `web/permissions.py`.
+- [ ] **#11 Split `web/app.py`** — plan and per-router checklist in
+      `docs/handoffs/02-split-web-app.md`; must start with a route-surface
+      snapshot test so a moved route cannot silently lose its auth gate.
+- [ ] **#12 Split `web/s3.py`** — in progress: steps 1–3 (context, xml,
+      authorization, checksums, ranges) per `docs/handoffs/01-split-web-s3.md`,
+      which also names steps 4–6 and the file-specific traps.
+- [ ] **#13 Raw `text()` in `web/app.py`** — the three dialect bugs are fixed
+      and the quota logic moved to `teledrive/storage/quota.py`; the plan to
+      turn the rest into seven typed stores (in an order that starts with the
+      security-sensitive one) is `docs/handoffs/03-store-layer.md`.
 - [x] **#14 Missing indexes/FKs** (`a87e1d5`) — `aliases.source_object_id`
       (every GC candidate and dedup lookup), `heads.object_id` (the GC
       "is this a head anywhere?" probe, not covered by that table's primary

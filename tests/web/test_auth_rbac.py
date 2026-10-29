@@ -1470,3 +1470,54 @@ def test_basic_header_is_ignored_by_the_audit_identity(authenv):
     assert login.status_code == 200, login.text
     assert web._extract_user(
         build("Bearer " + login.json()["token"])) == "admin"
+
+
+def test_admin_download_applies_the_same_read_gate_as_rest(authenv):
+    """The admin download was a duplicated copy of the REST read path.
+
+    It shipped without the archive tiering gate, without the SSE-C refusal
+    and without access accounting -- three fixes that had just landed on the
+    sibling handler. Both now delegate to one core.
+    """
+    from sqlalchemy import text
+
+    client = authenv["client"]
+    _publish_object(authenv, "gate-bucket", "cold.bin", b"archived-bytes")
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        oid = db.connection.execute(text(
+            "SELECT object_id FROM storage_object_heads "
+            "WHERE bucket = 'gate-bucket'")).scalar_one()
+        db.connection.execute(text(
+            "UPDATE storage_objects SET storage_class = 'ARCHIVE_ACCESS', "
+            "restore_until_ns = NULL WHERE id = :o"), {"o": oid})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    denied = client.get("/api/v1/admin/storage/buckets/gate-bucket/content",
+                        headers=admin, params={"key": "cold.bin"})
+    assert denied.status_code == 403, denied.text
+    assert "InvalidObjectState" in denied.text
+
+    # SSE-C objects cannot be served by a surface that cannot supply a key.
+    _publish_object(authenv, "gate-bucket", "enc.bin", b"ciphertext")
+    db = authenv["connect"]()
+    try:
+        oid = db.connection.execute(text(
+            "SELECT object_id FROM storage_object_heads "
+            "WHERE bucket = 'gate-bucket' AND key_hash = :kh"),
+            {"kh": __import__("hashlib").sha256(b"enc.bin").hexdigest()}
+        ).scalar_one()
+        db.connection.execute(text(
+            "INSERT INTO storage_object_encryption "
+            "(object_id, mode, key_md5, created_at) "
+            "VALUES (:o, 'SSE-C', :md5, 1)"), {"o": oid, "md5": "b" * 24})
+        db.connection.commit()
+    finally:
+        db.close()
+    refused = client.get("/api/v1/admin/storage/buckets/gate-bucket/content",
+                         headers=admin, params={"key": "enc.bin"})
+    assert refused.status_code == 400, refused.text
+    assert "SSE-C" in refused.text

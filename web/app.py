@@ -3669,17 +3669,54 @@ def admin_delete_object(bucket: str, request: Request,
         conn.close()
 
 
-@app.get("/api/v1/admin/storage/buckets/{bucket}/content",
-         tags=["Object catalog"],
-         summary="Download object bytes through the WebUI session (Range supported)")
-async def admin_download_object(bucket: str, request: Request,
-                                key: str = Query(..., min_length=1, max_length=1024),
-                                _: None = Depends(require_auth)):
-    """Stream verified object bytes for the S3 browser's download button.
+def _rest_read_gate(manifests, catalog, item) -> dict:
+    """The access gate every REST read applies before any byte is produced.
 
-    Session-authenticated twin of the API-key-scoped
-    GET /api/v1/buckets/{bucket}/content; any authenticated role may read.
+    Two things the S3 data plane already enforces were missing here:
+
+    * an archived object (ARCHIVE_ACCESS / DEEP_ARCHIVE_ACCESS) must answer
+      403 InvalidObjectState until a RestoreObject window is open, and
+    * an SSE-C object cannot be read without the customer key, so the REST
+      surface -- which cannot supply one -- must refuse instead of sending
+      200 with Content-Length and an empty body (probe-confirmed: curl -f
+      treated that as a successful empty download).
+
+    Returns the encryption marker when the object is readable.
     """
+    state = catalog.object_read_state(item.id)
+    if state["archived"]:
+        raise HTTPException(
+            403,
+            "Object is archived; restore it first "
+            "(InvalidObjectState)")
+    encryption = manifests.encryption_info(item.id)
+    if encryption is not None:
+        raise HTTPException(
+            400,
+            "This object requires an SSE-C customer key; use the S3 API "
+            "with x-amz-server-side-encryption-customer-* headers")
+    return encryption
+
+
+def _valid_rest_key(key: str) -> str:
+    if not isinstance(key, str) or not (1 <= len(key.encode("utf-8")) <= 1024):
+        raise HTTPException(422, "Object key must contain 1..1024 UTF-8 bytes")
+    return key
+
+
+async def _stream_object_response(bucket: str, key: str, request: Request, *,
+                                  allow_range: bool = True,
+                                  content_disposition: str | None = None,
+                                  count_access: bool = True) -> StreamingResponse:
+    """The ONE object-read implementation for every session/REST surface.
+
+    ``admin_download_object`` and ``get_object_content`` were duplicated
+    copies of this logic, so the archive gate, the SSE-C refusal and the
+    access counter all had to be fixed twice -- and were not: the admin
+    download shipped without any of them. There is one path now, and a new
+    read surface either calls it or is wrong.
+    """
+    _valid_rest_key(key)
     conn = db_connect()
     try:
         manifests = ManifestStore(conn)
@@ -3690,14 +3727,23 @@ async def admin_download_object(bucket: str, request: Request,
             item = catalog.get(bucket, key).item
         except FileNotFoundError as exc:
             raise HTTPException(404, "Object not found") from exc
-        start, end, partial = _byte_range(request.headers.get("range"), item.size)
+        _rest_read_gate(manifests, catalog, item)
+        if count_access:
+            # Without this, tiering's idle clock demotes an object that is
+            # actively read, and the next S3 GET answers 403.
+            catalog.record_object_access(item.id)
+            conn.commit()
+        if allow_range:
+            start, end, partial = _byte_range(
+                request.headers.get("range"), item.size)
+        else:
+            start, end, partial = 0, item.size, False
         transport = storage_transport(conn)
         root = Path(STORAGE_SCRATCH_DIR)
         _secure_mkdir(root)
         engine = TelegramObjectStorage(
             manifests, transport, chunk_size=RECOMMENDED_CHUNK_SIZE,
-            scratch_directory=root,
-        )
+            scratch_directory=root)
     except BaseException:
         conn.close()
         raise
@@ -3709,19 +3755,40 @@ async def admin_download_object(bucket: str, request: Request,
         finally:
             conn.close()
 
-    # Only the final path segment becomes the suggested filename; strip
-    # everything that could break the header or traverse paths.
-    filename = re.sub(r"[^A-Za-z0-9._ -]", "_", key.rsplit("/", 1)[-1]) or "download"
-    headers = {
-        "ETag": '"' + item.sha256 + '"',
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(end - start),
-        "Content-Disposition": f'attachment; filename="{filename}"',
-    }
+    headers = {"ETag": '"' + item.sha256 + '"', "Accept-Ranges": "bytes",
+               "Content-Length": str(end - start),
+               "X-TeleDrive-Object-ID": item.id}
+    if content_disposition:
+        headers["Content-Disposition"] = content_disposition
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
     return StreamingResponse(stream(), status_code=206 if partial else 200,
-                             media_type="application/octet-stream", headers=headers)
+                             media_type="application/octet-stream",
+                             headers=headers)
+
+
+@app.get("/api/v1/admin/storage/buckets/{bucket}/content",
+         tags=["Object catalog"],
+         summary="Download object bytes through the WebUI session (Range supported)")
+async def admin_download_object(bucket: str, request: Request,
+                                key: str = Query(..., min_length=1, max_length=1024),
+                                _: None = Depends(require_auth)):
+    """Stream verified object bytes for the S3 browser's download button.
+
+    Session-authenticated twin of the API-key-scoped
+    GET /api/v1/buckets/{bucket}/content. Both delegate to the same core, so
+    the archive gate, the SSE-C refusal and the access counter cannot drift
+    apart again -- the previous duplicate had none of the three.
+    """
+    # Only the final path segment becomes the suggested filename; strip
+    # everything that could break the header or traverse paths.
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "_", key.rsplit("/", 1)[-1]) or "download"
+    _log(f"download: {bucket}/{key}", "storage",
+         user=(getattr(request.state, "user", None) or {}).get(
+             "username") or "system")
+    return await _stream_object_response(
+        bucket, key, request,
+        content_disposition=f'attachment; filename="{filename}"')
 
 
 @app.put("/api/v1/admin/storage/buckets/{bucket}/content",
@@ -5594,41 +5661,6 @@ async def put_object_content(
     return await _stream_object_upload(bucket, key, request, generation)
 
 
-def _rest_read_gate(manifests, catalog, item) -> dict:
-    """The access gate every REST read applies before any byte is produced.
-
-    Two things the S3 data plane already enforces were missing here:
-
-    * an archived object (ARCHIVE_ACCESS / DEEP_ARCHIVE_ACCESS) must answer
-      403 InvalidObjectState until a RestoreObject window is open, and
-    * an SSE-C object cannot be read without the customer key, so the REST
-      surface -- which cannot supply one -- must refuse instead of sending
-      200 with Content-Length and an empty body (probe-confirmed: curl -f
-      treated that as a successful empty download).
-
-    Returns the encryption marker when the object is readable.
-    """
-    state = catalog.object_read_state(item.id)
-    if state["archived"]:
-        raise HTTPException(
-            403,
-            "Object is archived; restore it first "
-            "(InvalidObjectState)")
-    encryption = manifests.encryption_info(item.id)
-    if encryption is not None:
-        raise HTTPException(
-            400,
-            "This object requires an SSE-C customer key; use the S3 API "
-            "with x-amz-server-side-encryption-customer-* headers")
-    return encryption
-
-
-def _valid_rest_key(key: str) -> str:
-    if not isinstance(key, str) or not (1 <= len(key.encode("utf-8")) <= 1024):
-        raise HTTPException(422, "Object key must contain 1..1024 UTF-8 bytes")
-    return key
-
-
 @app.head("/api/v1/buckets/{bucket}/content", tags=["Uploads"],
           summary="Read object headers without downloading Telegram bytes")
 def head_object_content(
@@ -5662,44 +5694,7 @@ async def get_object_content(
     bucket: str, request: Request, key: str = Query(..., min_length=1, max_length=1024),
     _: None = Depends(require_api_scope("rest:objects:get")),
 ):
-    _valid_rest_key(key)
-    conn = db_connect()
-    try:
-        manifests = ManifestStore(conn)
-        catalog = BucketCatalog(manifests)
-        try:
-            item = catalog.get(bucket, key).item
-        except FileNotFoundError as exc:
-            raise HTTPException(404, "Object not found") from exc
-        _rest_read_gate(manifests, catalog, item)
-        # Count the read, or tiering's idle clock demotes objects that are
-        # actively read over REST, and the next S3 GET answers 403.
-        catalog.record_object_access(item.id)
-        conn.commit()
-        start, end, partial = _byte_range(request.headers.get("range"), item.size)
-        transport = storage_transport(conn)
-        root = Path(STORAGE_SCRATCH_DIR)
-        _secure_mkdir(root)
-        engine = TelegramObjectStorage(manifests, transport,
-                                       chunk_size=RECOMMENDED_CHUNK_SIZE,
-                                       scratch_directory=root)
-    except BaseException:
-        conn.close()
-        raise
-
-    async def stream():
-        try:
-            async for piece in engine.iter_bytes(item.id, start=start, end=end):
-                yield piece
-        finally:
-            conn.close()
-
-    headers = {"ETag": '"' + item.sha256 + '"', "Accept-Ranges": "bytes",
-               "Content-Length": str(end-start), "X-TeleDrive-Object-ID": item.id}
-    if partial:
-        headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
-    return StreamingResponse(stream(), status_code=206 if partial else 200,
-                             media_type="application/octet-stream", headers=headers)
+    return await _stream_object_response(bucket, key, request)
 
 
 # --- Signed public share links -------------------------------------------

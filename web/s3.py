@@ -156,6 +156,14 @@ import web.app as _webapp
 from web.app import (db_connect, storage_transport, _secure_mkdir,
                      _enforce_bucket_quota, _log)
 
+from web.s3_gateway.checksums import (
+    _effective_object_etag, _ssec_response_headers,
+    _verify_bucket_control_payload, _verify_upload_sha256,
+)
+from web.s3_gateway.ranges import (
+    _cursor_decode, _cursor_encode, _page, _range, _virtual_host_bucket,
+)
+
 from web.s3_gateway.authorization import (
     _ABAC_CONTROL_EXEMPT, _LIST_DEFAULTS, _acl_allows, _apply_bucket_owner_preferred,
     _authorize_resource, _ownership_model, _policy_context, _require_source_acl,
@@ -218,23 +226,8 @@ def _headers(item, etag: str | None = None,
     return headers
 
 
-def _ssec_response_headers(key) -> dict[str, str]:
-    """AWS SSE-C response headers.  Never include the key itself."""
-    return {
-        CUSTOMER_ALGORITHM: "AES256",
-        CUSTOMER_KEY_MD5: key.key_md5_b64,
-    }
 
 
-def _effective_object_etag(catalog: BucketCatalog, item) -> str:
-    """S3 ETag: the ciphertext digest for SSE-C, else the layout/plaintext one.
-
-    SSE-C objects must not advertise a plaintext MD5/ETag (AWS never does).
-    """
-    info = catalog.manifests.encryption_info(item.id)
-    if info is not None and info.get("etag"):
-        return str(info["etag"])
-    return MultipartStore(catalog).object_etag(item.id, item.sha256)
 
 
 def _reject_unimplemented_write_options(request: Request) -> None:
@@ -299,102 +292,8 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         )
 
 
-def _verify_upload_sha256(
-    request: Request, digest: bytes, *, md5_digest: bytes | None = None,
-    sha1_digest: bytes | None = None,
-    crc64nvme_value: int | None = None,
-    trailer: dict[str, str] | None = None,
-) -> None:
-    """Verify *every* supplied checksum, not only the first matching digest.
-
-    Signature verification and upload checksum validation are independent.
-    A valid SHA-256 content digest must never permit a contradictory
-    Content-MD5, SHA-1 or x-amz-checksum-sha256 to go unreported.
-    aws-chunked requests carry checksums in the TRAILER instead of
-    headers; the trailer dict is consulted as a header extension.
-    """
-
-    def checksum_header(name: str) -> str | None:
-        value = request.headers.get(name)
-        if value is None and trailer is not None:
-            value = trailer.get(name)
-        return value
-
-    actual = base64.b64encode(digest).decode("ascii")
-    sha256_header = checksum_header("x-amz-checksum-sha256")
-    if sha256_header is not None and not hmac.compare_digest(sha256_header, actual):
-        raise SigV4Error("BadDigest", "SHA-256 checksum mismatch")
-    md5_header = checksum_header("content-md5")
-    if md5_header is not None:
-        if md5_digest is None or not hmac.compare_digest(
-            md5_header, base64.b64encode(md5_digest).decode("ascii")
-        ):
-            raise SigV4Error("BadDigest", "Content-MD5 checksum mismatch")
-    crc64_header = checksum_header("x-amz-checksum-crc64nvme")
-    if crc64_header is not None:
-        if crc64nvme_value is None:
-            # Never acknowledge an unverified CRC64NVME declaration.
-            raise SigV4Error("NotImplemented", "CRC64NVME not verified on this operation")
-        actual_crc64 = base64.b64encode(
-            crc64nvme_value.to_bytes(8, "big")
-        ).decode("ascii")
-        if not hmac.compare_digest(crc64_header, actual_crc64):
-            raise SigV4Error("BadDigest", "CRC64NVME checksum mismatch")
-    sha1_header = checksum_header("x-amz-checksum-sha1")
-    if sha1_header is not None:
-        if sha1_digest is None or not hmac.compare_digest(
-            sha1_header, base64.b64encode(sha1_digest).decode("ascii")
-        ):
-            raise SigV4Error("BadDigest", "SHA-1 checksum mismatch")
-    declared = checksum_header("x-amz-sdk-checksum-algorithm")
-    if declared is not None:
-        allowed = {"SHA1": "x-amz-checksum-sha1", "SHA256": "x-amz-checksum-sha256",
-                   "CRC32": "x-amz-checksum-crc32",
-                   "CRC32C": "x-amz-checksum-crc32c",
-                   "CRC64NVME": "x-amz-checksum-crc64nvme"}
-        if declared not in allowed:
-            raise SigV4Error("NotImplemented", "Unsupported SDK checksum algorithm")
-        if checksum_header(allowed[declared]) is None:
-            raise SigV4Error("BadDigest", "Declared SDK checksum is missing")
-
-    hexdigest = digest.hex()
-    signed_content = request.headers.get("x-amz-content-sha256", "")
-    presigned = "X-Amz-Algorithm" in request.query_params
-    if signed_content == hexdigest:
-        return
-    if signed_content in STREAMING_MODES:
-        # aws-chunked: every chunk signature was verified during decoding
-        # (signed modes) and every supplied header/trailer checksum was
-        # checked above — that IS the payload integrity proof.
-        return
-    if sha256_header is not None and hmac.compare_digest(sha256_header, actual):
-        return
-    if (not presigned and signed_content == "UNSIGNED-PAYLOAD"
-            and md5_header is not None and md5_digest is not None):
-        # Header-mode SigV4 has already authenticated the signed MD5 header.
-        if "content-md5" in signed_header_names(request):
-            return
-    raise SigV4Error("XAmzContentSHA256Mismatch", "Signed upload checksum mismatch")
 
 
-def _verify_bucket_control_payload(request: Request, body: bytes) -> None:
-    """Exact signed checksum policy for small S3 bucket-control XML payloads."""
-    import zlib
-    for header, actual in (
-        ("x-amz-checksum-crc32", zlib.crc32(body) & 0xffffffff),
-        ("x-amz-checksum-crc32c", crc32c(body)),
-    ):
-        declared = request.headers.get(header)
-        if declared is not None and not hmac.compare_digest(
-            declared, base64.b64encode(actual.to_bytes(4, "big")).decode(),
-        ):
-            raise SigV4Error("BadDigest", "Bucket XML checksum mismatch")
-    _verify_upload_sha256(
-        request, hashlib.sha256(body).digest(),
-        md5_digest=hashlib.md5(body, usedforsecurity=False).digest(),
-        sha1_digest=hashlib.sha1(body, usedforsecurity=False).digest(),
-        crc64nvme_value=crc64nvme(body),
-    )
 
 
 def _initial_tags(request: Request, owner: str, credentials: S3CredentialStore):
@@ -452,126 +351,14 @@ async def _tag_request_tags(request: Request, *, bucket: bool = False) -> list[t
     return _parse_tag_xml(bytes(body), bucket=bucket)
 
 
-def _range(value: str | None, size: int) -> tuple[int, int, bool]:
-    if value is None:
-        return 0, size, False
-    import re
-    # Same digit bound as the REST path: an over-long integer raises before
-    # any comparison and would escape as a 500 instead of InvalidRange.
-    match = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", value.strip())
-    if not match or not (match.group(1) or match.group(2)) or size <= 0:
-        raise SigV4Error("InvalidRange", "Unsupported byte range")
-    first, last = match.groups()
-    if first:
-        start = int(first)
-        end = min(int(last) + 1, size) if last else size
-    else:
-        amount = int(last)
-        start, end = max(size - amount, 0), size
-    if start >= size or start >= end or (not first and int(last) <= 0):
-        raise SigV4Error("InvalidRange", "Unsatisfiable byte range")
-    return start, end, True
 
 
-def _cursor_encode(master: bytes, bucket: str, prefix: str, delimiter: str,
-                   after: str, skip_prefix: str) -> str:
-    payload = json.dumps(
-        {"bucket": bucket, "prefix": prefix, "delimiter": delimiter,
-         "after": after, "skip_prefix": skip_prefix},
-        separators=(",", ":"), sort_keys=True,
-    ).encode()
-    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
-    signature = hmac.new(master, encoded.encode(), hashlib.sha256).hexdigest()
-    return f"{encoded}.{signature}"
 
 
-def _cursor_decode(token: str, master: bytes, bucket: str,
-                   prefix: str, delimiter: str) -> tuple[str, str]:
-    try:
-        encoded, signature = token.split(".", 1)
-        if len(token) > 4096 or not hmac.compare_digest(
-            signature, hmac.new(master, encoded.encode(), hashlib.sha256).hexdigest()
-        ):
-            raise ValueError("Signature mismatch")
-        parsed = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        if (not isinstance(parsed, dict) or parsed.get("bucket") != bucket
-                or parsed.get("prefix") != prefix or parsed.get("delimiter") != delimiter
-                or not isinstance(parsed.get("after"), str)
-                or not isinstance(parsed.get("skip_prefix"), str)):
-            raise ValueError("Cursor does not match request")
-        return parsed["after"], parsed["skip_prefix"]
-    except (ValueError, UnicodeError, TypeError, KeyError, binascii.Error) as exc:
-        raise SigV4Error("InvalidArgument", "Invalid continuation token") from exc
 
 
-def _page(catalog: BucketCatalog, bucket: str, prefix: str,
-          delimiter: str, after: str, limit: int,
-          skip_prefix: str) -> tuple[list, list[str], str, str, bool]:
-    """Page over raw keys without splitting a common-prefix across pages.
-
-    The last emitted prefix is carried in the signed continuation cursor
-    so a folder containing >1000 objects is not shown repeatedly.
-    """
-    keys = []
-    common = []
-    seen = {skip_prefix} if skip_prefix else set()
-    position = after
-    last_consumed = after
-    while True:
-        batch = catalog.list_objects(bucket, prefix=prefix, after=position, limit=1000)
-        if not batch:
-            return keys, common, last_consumed, skip_prefix, False
-        for item in batch:
-            key = item.item.key
-            tail = key[len(prefix):]
-            common_name = ""
-            if delimiter and delimiter in tail:
-                common_name = prefix + tail.split(delimiter, 1)[0] + delimiter
-            if common_name and common_name in seen:
-                position = key
-                last_consumed = key
-                continue
-            if len(keys) + len(common) >= limit:
-                return keys, common, last_consumed, skip_prefix, True
-            if common_name:
-                common.append(common_name)
-                seen.add(common_name)
-                skip_prefix = common_name
-            else:
-                keys.append(item)
-                skip_prefix = ""
-            position = key
-            last_consumed = key
-        if len(batch) < 1000:
-            return keys, common, last_consumed, skip_prefix, False
 
 
-def _virtual_host_bucket(request: Request) -> str | None:
-    """Use Host only when a public DNS suffix was explicitly configured.
-
-    SigV4 must authenticate the exact Host afterwards; never trust proxy
-    forwarding headers for bucket selection. The default remains path-style.
-    """
-    suffix = os.environ.get("TELEDRIVE_S3_VHOST_SUFFIX", "").strip().lower().strip(".")
-    if not suffix:
-        return None
-    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-    if len(suffix) > 253 or re.fullmatch(label + r"(?:\." + label + r")+", suffix) is None:
-        raise SigV4Error("InvalidArgument", "Invalid virtual-host DNS suffix")
-    authority = request.headers.get("host", "").lower()
-    if authority.count(":") == 1 and authority.rsplit(":", 1)[1].isdigit():
-        hostname = authority.rsplit(":", 1)[0]
-    else:
-        hostname = authority
-    ending = "." + suffix
-    if not hostname.endswith(ending):
-        return None
-    bucket = hostname[:-len(ending)]
-    try:
-        BucketCatalog.validate_bucket(bucket)
-    except ValueError as exc:
-        raise SigV4Error("InvalidArgument", "Invalid virtual-host bucket") from exc
-    return bucket
 
 
 # --- AWS read-compatibility for optional, unconfigured features -----------

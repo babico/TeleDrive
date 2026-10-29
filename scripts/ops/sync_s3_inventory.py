@@ -70,9 +70,13 @@ TOTALS_RE = re.compile(
     r"\(\d+ by code, \d+ by design\), \d+ unsupported; "
     r"\*\*\d+ AWS S3 operations\*\*\.")
 
+# The counters may be written as a plain dict literal or wrapped in
+# Counter(...) — the latter is required once a status can reach zero,
+# because a Counter has no key for a zero count.
 COUNTER_RE = re.compile(
-    r'"supported":\s*\d+,\s*"partial":\s*\d+,\s*"unsupported":\s*\d+,')
-BY_DESIGN_RE = re.compile(r'== \{"by design": \d+\}')
+    r'"supported":\s*\d+,\s*"partial":\s*\d+,\s*"unsupported":\s*\d+,?')
+BY_DESIGN_RE = re.compile(
+    r'== (?:Counter\()?\{"by design": \d+\}(?:\))?')
 
 META_ASSERT_RE = re.compile(
     r'assert \("\*\*Inventory totals:\*\* \d+ supported, \d+ partial "\n'
@@ -86,7 +90,8 @@ def render_counter(tally: dict[str, int]) -> str:
 
 
 def render_by_design(tally: dict[str, int]) -> str:
-    return f'== {{"by design": {tally["by_design"]}}}'
+    # Counter(...) keeps the assertion meaningful when the count is zero.
+    return f'== Counter({{"by design": {tally["by_design"]}}})'
 
 
 def render_meta_assert(tally: dict[str, int]) -> str:

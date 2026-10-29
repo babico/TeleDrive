@@ -244,7 +244,7 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     # Counter key at all, so a plain dict literal would never match once a
     # status reaches zero (which is the goal for "partial").
     assert Counter(actual.values()) == Counter(
-        {"supported": 114, "partial": 0, "unsupported": 2}
+        {"supported":114, "partial":0, "unsupported":2,}
     )
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
@@ -261,11 +261,11 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     # Zero by-design partials means no Counter keys at all; Counter() on both
     # sides is the only comparison that survives a status reaching zero.
     assert Counter(manifest_gaps.values()) == Counter({"by design": 0})
-    # The remaining two partials are RequestPayment/Accelerate GETs, both
-    # "by design": each reports the single state that exists here and the
-    # write side rejects the state needing absent infrastructure. P2-B
-    # closed with SSE-C, P3-G with tiering/reports and P3-H with the
-    # metadata journal, so those workstream labels are gone.
+    # No partial operations remain: the last two (RequestPayment and
+    # Accelerate GETs) were a wire-shape bug, not a design limit -- the
+    # accelerate renderer emitted the internal enum name so boto3 parsed
+    # nothing. P2-B closed with SSE-C, P3-G with tiering/reports and P3-H
+    # with the metadata journal.
     assert set(item["workstream"] for item in data["operations"]) >= {
         "implemented", "P3-H",
     }

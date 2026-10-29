@@ -119,21 +119,35 @@ def test_bucket_crud_and_object_metadata_scopes(api):
     assert client.delete("/api/v1/buckets/backups", headers=headers).status_code == 409
 
 
-def test_bearer_token_does_not_unlock_admin_routes(api):
+def test_bearer_scope_is_exact_for_single_route_keys(api):
     client, _ = api
-    # admin:* is the legacy REST-object wildcard: it must NOT unlock
-    # admin routes. The bearer path recognizes the key (403, not 401)
-    # but the route permission is missing.
+    # A key scoped to ONE route reaches only that route. This is the exact
+    # boundary that makes least-privilege keys meaningful.
+    scoped = create_key(client, ["get:/api/v1/admin/keys"])
+    token = {"Authorization": f"Bearer {scoped['token']}"}
+    assert client.get("/api/v1/admin/keys", headers=token).status_code == 200
+    assert client.get("/api/v1/admin/users", headers=token).status_code == 403
+
+
+def test_admin_star_is_a_real_wildcard_over_the_route_table(api):
+    """``admin:*`` means full access, not "the nine legacy REST names".
+
+    An earlier build expanded it to only the curated REST endpoints, so an
+    admin:* key -- the UI's "full access" preset -- was rejected on every
+    admin route. That made the preset dead and forced operators to pick
+    dozens of individual scopes.
+    """
+    client, _ = api
     key = create_key(client, ["admin:*"])
     token = {"Authorization": f"Bearer {key['token']}"}
-    assert client.get("/api/v1/admin/keys", headers=token).status_code == 403
-    assert client.post("/api/v1/admin/keys", headers=token,
-                       json={"name": "escalation", "scopes": ["admin:*"]}
-                       ).status_code == 403
-    # Only the explicitly granted route permission unlocks it.
-    scoped = create_key(client, ["get:/api/v1/admin/keys"])
-    assert client.get("/api/v1/admin/keys", headers={
-        "Authorization": f"Bearer {scoped['token']}"}).status_code == 200
+    assert client.get("/api/v1/admin/keys", headers=token).status_code == 200
+    assert client.get("/api/v1/admin/users", headers=token).status_code == 200
+    # It can still mint, and the delegation ceiling keeps working: the child
+    # cannot exceed admin:* because nothing does.
+    minted = client.post("/api/v1/admin/keys",
+                         headers={**token, "x-teledrive-csrf": "1"},
+                         json={"name": "child", "scopes": ["admin:*"]})
+    assert minted.status_code == 201, minted.text
 
 
 def test_openapi_documents_rest_key_and_bucket_routes(api):

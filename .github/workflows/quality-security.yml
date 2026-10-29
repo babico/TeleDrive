@@ -231,6 +231,7 @@ jobs:
             tests/web/test_settings_ui.py \
             tests/web/test_public_s3_origin.py \
             tests/web/test_public_certificate.py \
+            tests/web/test_api_key_delegation.py \
             tests/web/test_settings_persistence.py \
             tests/web/test_website_admin.py \
             tests/web/test_auth_rbac.py \

@@ -555,15 +555,27 @@ def _enforce_user_permission(request: Request, user: dict) -> None:
 
 
 _permission_registry_cache: "PermissionRegistry | None" = None
+_route_provider_installed = False
 
 
 def permission_registry() -> "PermissionRegistry":
     """The per-endpoint permission catalog, built from the live route
     table (lazily: routes are declared while this module loads)."""
-    global _permission_registry_cache
+    global _permission_registry_cache, _route_provider_installed
     if _permission_registry_cache is None:
         from web.permissions import PermissionRegistry
         _permission_registry_cache = PermissionRegistry(app.routes)
+        if not _route_provider_installed:
+            # The API-key store lives in the teledrive package and cannot
+            # import this module, so ``admin:*`` learns the live route table
+            # through this one hook. Without it the wildcard only covered the
+            # nine curated REST names, so an admin:* key was rejected on every
+            # admin route -- a dead "full access" preset.
+            from teledrive.api_keys import set_route_permissions_provider
+            set_route_permissions_provider(
+                lambda: [entry["name"]
+                         for entry in permission_registry().catalog()])
+            _route_provider_installed = True
     return _permission_registry_cache
 
 
@@ -586,6 +598,8 @@ def require_auth(request: Request) -> None:
             # its OWN effective permission set. Recorded here because the
             # management handlers must compare scopes, not just this route.
             scopes = store.scopes_for_token(token) if authorized else None
+            expires_at = (store.expiry_for_token(token) if authorized
+                          else None)
         finally:
             conn.close()
         if authorized:
@@ -595,6 +609,10 @@ def require_auth(request: Request) -> None:
                 "role": "api-key",
             }
             request.state.api_key_scopes = scopes or frozenset()
+            # Delegation also covers LIFETIME: a key must not be able to
+            # plant a descendant that outlives it, which would otherwise
+            # make revocation of the parent meaningless.
+            request.state.api_key_expires_at = expires_at
             return
         _log(f"denied: api-key {request.method} {request.url.path}",
              "auth")
@@ -1856,6 +1874,26 @@ def _require_within_delegation(request: Request,
         )
 
 
+def _require_within_lifetime(request: Request, expires_at: int | None) -> None:
+    """A child key may not outlive the key that minted it.
+
+    Without this a short-lived key scoped to the mint route can create a
+    permanent descendant, so revoking the parent would not end the
+    authority it delegated. Session users are unrestricted (``None``).
+    """
+    parent = getattr(request.state, "api_key_expires_at", None)
+    if parent is None:
+        return
+    if expires_at is None or int(expires_at) > int(parent):
+        _log("denied: api-key attempted to mint a key outliving itself",
+             "auth")
+        raise HTTPException(
+            403,
+            "An API key can only delegate authority that expires no later "
+            "than its own",
+        )
+
+
 @app.post("/api/v1/admin/keys", tags=["API keys"], status_code=201, summary="Issue a scoped API key (secret returned once)")
 def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends(require_auth)):
     _same_origin(request)
@@ -1865,7 +1903,7 @@ def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends
     # stops privilege escalation through minting.
     _require_within_delegation(
         request, expand_scopes(payload.scopes), "key creation")
-    _log(f"issue api key: name={payload.name} scopes={payload.scopes}", "api-keys")
+    _require_within_lifetime(request, payload.expires_at)
     conn = db_connect()
     try:
         try:

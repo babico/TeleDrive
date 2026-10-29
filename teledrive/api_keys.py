@@ -45,7 +45,35 @@ ENDPOINT_PERMISSIONS = {
 
 # Legacy grouped scopes stay valid and expand to endpoint sets, so keys
 # issued before per-endpoint permissions keep working unchanged.
-# Scopes with an empty expansion gate no REST endpoint today.
+#
+# ``admin:*`` is a real wildcard over the WHOLE live route table, not just
+# the nine curated REST names. Expanding it to only those nine (as an
+# earlier build did) made the preset dead: an admin:* key failed the scope
+# check on every admin route, so operators minted "full access" keys that
+# could not rotate, revoke or configure anything.
+#
+# The route table lives in the web layer, so it is injected rather than
+# imported (no dependency cycle). Until it is injected, ``admin:*`` falls
+# back to the curated set, which is what a standalone store can know.
+_route_permissions_provider = None
+
+
+def set_route_permissions_provider(provider) -> None:
+    """Install the live route-permission provider (called once at startup)."""
+    global _route_permissions_provider
+    _route_permissions_provider = provider
+
+
+def route_permissions() -> frozenset[str]:
+    provider = _route_permissions_provider
+    if provider is None:
+        return frozenset(ENDPOINT_PERMISSIONS)
+    try:
+        return frozenset(provider())
+    except Exception:  # noqa: BLE001 - a broken registry must not grant all
+        return frozenset(ENDPOINT_PERMISSIONS)
+
+
 LEGACY_SCOPE_EXPANSION = {
     "buckets:read": ("rest:buckets:list",),
     "buckets:manage": ("rest:buckets:create", "rest:buckets:delete"),
@@ -57,9 +85,13 @@ LEGACY_SCOPE_EXPANSION = {
     "accounts:read": (), "accounts:manage": (),
     "settings:read": (), "settings:manage": (),
     "keys:manage": (),
-    "admin:*": tuple(ENDPOINT_PERMISSIONS),
 }
-ALLOWED_SCOPES = frozenset(ENDPOINT_PERMISSIONS) | frozenset(LEGACY_SCOPE_EXPANSION)
+# ``admin:*`` is deliberately NOT in LEGACY_SCOPE_EXPANSION any more: its
+# expansion is the live route table, resolved in expand_scopes(), so it must
+# stay a distinct accepted scope rather than a static tuple.
+ALLOWED_SCOPES = (frozenset(ENDPOINT_PERMISSIONS)
+                  | frozenset(LEGACY_SCOPE_EXPANSION)
+                  | {"admin:*"})
 
 
 def expand_scopes(scopes) -> frozenset[str]:
@@ -67,7 +99,12 @@ def expand_scopes(scopes) -> frozenset[str]:
     into the concrete set of endpoint permissions they grant."""
     granted: set[str] = set()
     for scope in scopes or ():
-        if scope in ENDPOINT_PERMISSIONS or is_route_permission(scope):
+        if scope == "admin:*":
+            # The wildcard covers the live route table, resolved now so a
+            # later-added route cannot retroactively widen an existing key.
+            granted.update(route_permissions())
+            granted.update(ENDPOINT_PERMISSIONS)
+        elif scope in ENDPOINT_PERMISSIONS or is_route_permission(scope):
             granted.add(scope)
         else:
             granted.update(LEGACY_SCOPE_EXPANSION.get(scope, ()))
@@ -195,6 +232,25 @@ class ApiKeyStore:
         if row is None or row[1] or (row[2] is not None and row[2] <= now):
             return None
         return expand_scopes(json.loads(row[0]))
+
+    def expiry_for_token(self, token: str, *,
+                         now: int | None = None) -> int | None:
+        """Expiry of an ACTIVE key, or None when it never expires.
+
+        Raises ValueError for an unknown/inactive token so the caller cannot
+        confuse "no expiry" with "no such key".
+        """
+        now = int(time.time()) if now is None else now
+        if (not isinstance(token, str) or len(token) > 200
+                or not token.startswith("td_live_")):
+            raise ValueError("Invalid API key")
+        row = self.db.connection.execute(
+            select(api_keys.c.revoked, api_keys.c.expires_at)
+            .where(api_keys.c.digest == self._digest(token))
+        ).first()
+        if row is None or row[0] or (row[1] is not None and row[1] <= now):
+            raise ValueError("Invalid API key")
+        return int(row[1]) if row[1] is not None else None
 
     def scopes_for_identifier(self, identifier: str) -> frozenset[str] | None:
         """Effective permissions of a key by id/prefix (None if absent)."""

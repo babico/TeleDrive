@@ -93,6 +93,10 @@ removed_versions = Table(
     Column("object_id", String(36), primary_key=True),
     Column("removed_ns", BigInteger, nullable=False),
 )
+# Physical GC asks "is this object a head anywhere?" for every candidate,
+# via EXISTS(heads.object_id == objects.id). The heads primary key is
+# (bucket, key_hash), so that probe scanned the whole table.
+Index("ix_storage_object_heads_object", heads.c.object_id)
 Index("ix_storage_published_versions_key",
       published_versions.c.bucket, published_versions.c.key_hash,
       published_versions.c.committed_ns)

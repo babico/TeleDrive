@@ -293,6 +293,23 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_gc_indexes(ctx: SchemaContext) -> None:
+    """Indexes for the physical-GC candidate query (append-only migration).
+
+    The GC "is this a head anywhere?" probe filters storage_object_heads by
+    object_id, which is not part of that table's primary key, and the queued
+    scope filters storage_gc_queue by enqueued_ns.
+    """
+    from teledrive.storage import gc_collect
+    from teledrive.storage.catalog import heads
+    gc_collect.gc_queue.create(ctx.engine, checkfirst=True)
+    for index in gc_collect.gc_queue.indexes:
+        index.create(ctx.engine, checkfirst=True)
+    heads.create(ctx.engine, checkfirst=True)
+    for index in heads.indexes:
+        index.create(ctx.engine, checkfirst=True)
+
+
 def _step_hot_indexes(ctx: SchemaContext) -> None:
     """Indexes for columns the hot paths filter on (append-only migration).
 
@@ -405,6 +422,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("legacy_columns", _step_legacy_columns),
     ("content_search", _step_content_search),
     ("hot_indexes", _step_hot_indexes),
+    ("gc_indexes", _step_gc_indexes),
 ]
 
 # Bump by appending a step; never reorder or remove one.

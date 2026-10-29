@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import time
 
-from sqlalchemy import (BigInteger, Boolean, Column, Integer, String,
+from sqlalchemy import (BigInteger, Boolean, Column, Index, Integer, String,
                         Table, Text, and_, delete, func, insert, inspect, not_,
                         or_, select, text, update)
 
@@ -63,6 +63,8 @@ gc_leases = Table(
     Column("claimed_ns", BigInteger, nullable=False),
     Column("owner", String(64), nullable=False),
 )
+# The queued-scope candidate query filters on the grace window.
+Index("ix_storage_gc_queue_enqueued", gc_queue.c.enqueued_ns)
 gc_collected = Table(
     "storage_gc_collected", metadata,
     Column("object_id", String(36), primary_key=True),

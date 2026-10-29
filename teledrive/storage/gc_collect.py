@@ -478,6 +478,25 @@ class RetainedMediaGC:
             deleted_refs.append({"account": account, "chat_id": chat_id,
                                  "message_id": message_id, "size": size})
             total_bytes += int(size)
+        # Replica copies live in ANOTHER Telegram account and were never
+        # handed to transport.delete: the collector dropped the rows and left
+        # a complete second copy of a "deleted" object on a different account,
+        # permanently unfindable. Delete every replica message too, and only
+        # then drop its coordinates. A replica delete failure is fatal for the
+        # object (it is caught per object), which is correct: silently keeping
+        # unaccounted bytes is the failure this fix exists to stop.
+        replica_rows = db.execute(
+            select(replica_chunks.c.ordinal, replica_chunks.c.account,
+                   replica_chunks.c.chat_id, replica_chunks.c.message_id)
+            .where(replica_chunks.c.object_id == object_id)).all()
+        for r_ordinal, r_account, r_chat, r_message in replica_rows:
+            await transport.delete(ChunkReference(
+                ordinal=r_ordinal, offset=0, size=0, sha256="",
+                account=r_account, chat_id=r_chat,
+                message_id=r_message))
+            deleted_refs.append({"account": r_account, "chat_id": r_chat,
+                                 "message_id": r_message, "size": 0,
+                                 "replica": True})
         # Telegram media is gone for these chunks; commit the SQL side.
         db.execute(delete(chunks).where(
             chunks.c.object_id == object_id,

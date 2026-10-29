@@ -286,7 +286,15 @@ def parse_notification_xml(payload: bytes) -> dict | None:
     }
 
 
-def notification_xml(config: dict | None) -> bytes:
+def notification_xml(config: dict | None, *,
+                     include_secret: bool = False) -> bytes:
+    """Render a NotificationConfiguration document.
+
+    ``include_secret`` is the default False on purpose: this document is the
+    response body of ``GET ?notificationConfiguration``, and S3 never returns
+    a webhook secret. Only a SERVER-SIDE write path (the governance save,
+    which round-trips the document through the gateway) may ask for it.
+    """
     root = ET.Element("NotificationConfiguration", xmlns=NS)
     if config:
         node = ET.SubElement(root, "WebhookConfiguration")
@@ -295,6 +303,13 @@ def notification_xml(config: dict | None) -> bytes:
         ET.SubElement(node, "Endpoint").text = config["destination"]
         for event in config["events"]:
             ET.SubElement(node, "Event").text = event
+        # The parser accepts <Secret> and the store encrypts it, but this
+        # renderer never emitted it -- so the governance UI's save round trip
+        # silently dropped the HMAC secret and left the webhook UNSIGNED,
+        # while answering 200. Serialising it here is what makes the stored
+        # secret survive.
+        if include_secret and config.get("secret"):
+            ET.SubElement(node, "Secret").text = config["secret"]
         if config.get("filter_prefix") or config.get("filter_suffix"):
             s3_key = ET.SubElement(ET.SubElement(node, "Filter"), "S3Key")
             for name, value in (("prefix", config.get("filter_prefix", "")),
@@ -524,7 +539,13 @@ class NotificationStore:
         ).first() is None:
             raise FileNotFoundError("Bucket not found")
 
-    def get_config(self, bucket: str) -> dict | None:
+    def get_config(self, bucket: str, *, include_secret: bool = False) -> dict | None:
+        """Read the configuration.
+
+        ``include_secret`` is for a SERVER-SIDE read-modify-write (the
+        governance save path), never for a response: S3 does not return a
+        webhook secret on GET, and neither does the API.
+        """
         self._bucket_exists(bucket)
         row = self.db.connection.execute(select(
             notification_configs.c.events,
@@ -532,6 +553,7 @@ class NotificationStore:
             notification_configs.c.filter_prefix,
             notification_configs.c.filter_suffix,
             notification_configs.c.enabled,
+            notification_configs.c.encrypted_secret,
         ).where(notification_configs.c.bucket == bucket)).first()
         if row is None:
             return None
@@ -539,6 +561,12 @@ class NotificationStore:
             events = json.loads(row[0])
         except (TypeError, ValueError) as exc:
             raise RuntimeError("Corrupted notification configuration") from exc
+        secret = None
+        if include_secret and row[5] and self.cipher is not None:
+            try:
+                secret = self.cipher.decrypt(row[5].encode("ascii")).decode("utf-8")
+            except (InvalidToken, UnicodeError, ValueError):
+                secret = None
         return {
             "id": "",
             "destination": row[1],
@@ -546,7 +574,7 @@ class NotificationStore:
             "filter_prefix": row[2],
             "filter_suffix": row[3],
             "enabled": bool(row[4]),
-            "secret": None,
+            "secret": secret,
         }
 
     def replace_config(self, bucket: str, config: dict | None) -> None:

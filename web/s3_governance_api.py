@@ -765,10 +765,32 @@ def put_object_lock(bucket: str, request: Request,
         raise HTTPException(
             400, "InvalidArgument: mode must be COMPLIANCE or GOVERNANCE")
     days = payload.get("days")
+    # An omitted `days` used to write a rule with a Mode and NO retention
+    # period, which erased an existing default retention entirely, and a mode
+    # change could downgrade COMPLIANCE to GOVERNANCE -- the one thing a WORM
+    # configuration must never allow. Compare against the stored config.
+    from teledrive.storage.catalog import BucketCatalog
+    from teledrive.storage.manifest import ManifestStore
+    import web.app as _webapp
+    conn = _webapp.db_connect()
+    try:
+        current = BucketCatalog(ManifestStore(conn)).object_lock_config(bucket) \
+            or {}
+    finally:
+        conn.close()
+    if days is None:
+        days = current.get("default_days")
     if days is not None and (not isinstance(days, int)
                              or not 1 <= days <= 3650):
         raise HTTPException(
             400, "InvalidArgument: days must be an integer between 1 and 3650")
+    if current.get("default_mode") == "COMPLIANCE" and mode != "COMPLIANCE":
+        raise HTTPException(
+            409, "Compliance-mode retention cannot be downgraded to GOVERNANCE")
+    if (days is not None and current.get("default_days") is not None
+            and days < int(current["default_days"])):
+        raise HTTPException(
+            409, "A bucket's default retention period cannot be shortened")
     result = call_s3("PUT", bucket, [("object-lock", "")],
                      "s3:PutBucketObjectLockConfiguration",
                      body=_lock_xml(mode, days),
@@ -854,17 +876,29 @@ def put_website(bucket: str, request: Request,
                 payload: dict = Body(...)):
     actor = _actor(request, write=True)
     _bucket_exists(bucket)
-    public_read = payload.get("public_read", False)
-    if not isinstance(public_read, bool):
-        raise HTTPException(422, "public_read must be a boolean")
-    if public_read:
+    # An OMITTED field means "leave it alone", never "turn it off". Defaulting
+    # public_read to False meant that editing the index document silently
+    # unpublished a live site, and an omitted error_document wiped it.
+    current = _website_state(bucket)
+    if "public_read" in payload:
+        public_read = payload["public_read"]
+        if not isinstance(public_read, bool):
+            raise HTTPException(422, "public_read must be a boolean")
+    else:
+        public_read = bool(current.get("public_read"))
+    if public_read and not current.get("public_read"):
         if payload.get("confirm") != PUBLISH_CONFIRM:
             raise HTTPException(
                 400,
                 "public_read publishes every current object in the bucket "
                 f"anonymously; send confirm={PUBLISH_CONFIRM!r} to proceed")
     index_document = payload.get("index_document")
-    error_document = payload.get("error_document") or None
+    if index_document is None:
+        index_document = current.get("index_document")
+    if "error_document" in payload:
+        error_document = payload.get("error_document") or None
+    else:
+        error_document = current.get("error_document")
     try:
         body = website_xml({
             "index_document": index_document,
@@ -976,18 +1010,45 @@ def put_notifications(bucket: str, request: Request,
     if unknown:
         raise HTTPException(
             400, f"InvalidArgument: unsupported events {unknown}")
+    # An omitted secret means "keep the one that is stored", not "remove it":
+    # S3 never returns a secret on GET (there is nothing to echo back), so a UI
+    # that saves the form again would otherwise silently unsign the webhook.
+    # Read the stored secret directly from the store: the S3 GET deliberately
+    # omits it, so there is nothing to preserve through the gateway.
+    secret = payload.get("secret")
+    if secret is None:
+        try:
+            import web.app as _webapp
+            from teledrive.storage.catalog import BucketCatalog
+            from teledrive.storage.manifest import ManifestStore
+            from teledrive.s3.notifications import NotificationStore
+            conn = _webapp.db_connect()
+            try:
+                store = NotificationStore(
+                    BucketCatalog(ManifestStore(conn)),
+                    master_key=_webapp.load_master_key())
+                stored = store.get_config(bucket, include_secret=True)
+                secret = (stored or {}).get("secret") or None
+            finally:
+                conn.close()
+        except Exception:
+            secret = None
+    elif secret == "":
+        secret = None
     config = {
         "id": "",
         "destination": destination,
         "events": events,
         "filter_prefix": str(payload.get("filter_prefix") or ""),
         "filter_suffix": str(payload.get("filter_suffix") or ""),
-        "secret": payload.get("secret") or None,
+        "secret": secret,
         "enabled": True,
     }
+    # include_secret: this is a server-side write, so the HMAC secret must
+    # survive the round trip. The GET response never carries it.
     result = call_s3("PUT", bucket, [("notificationConfiguration", "")],
                      "s3:PutBucketNotification",
-                     body=notification_xml(config),
+                     body=notification_xml(config, include_secret=True),
                      credential_id=payload.get("credential_id"))
     _require_ok(result)
     _audit(request, actor,

@@ -138,7 +138,8 @@ from teledrive.s3.tiering import (
     TieringError, TieringStore, config_xml as tiering_config_xml,
     list_xml as tiering_list_xml, parse_document as parse_tiering_document,
 )
-from teledrive.storage.catalog import BucketCatalog, published_versions
+from teledrive.storage.catalog import BucketCatalog
+from teledrive.storage.gc_collect import RetainedMediaGC
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.manifest import ManifestStore, objects

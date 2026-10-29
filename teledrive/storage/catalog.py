@@ -641,6 +641,22 @@ class BucketCatalog:
             # the marker headers.
             if row is None:
                 return None
+            # A legal hold or an open retention window forbids removing the
+            # version. The explicit-version path enforces this; the suspended
+            # branch did not, so on a lock-enabled bucket whose versioning was
+            # set to Suspended, an ordinary DELETE hid a COMPLIANCE-retained
+            # object -- recoverable bytes, but a real immutability breach.
+            lock_row = self.db.connection.execute(select(
+                objects.c.legal_hold, objects.c.retention_until_ns,
+            ).where(objects.c.id == row[0])).first()
+            if lock_row is not None:
+                if bool(lock_row[0]):
+                    raise PermissionError(
+                        "Object is under legal hold and cannot be deleted")
+                if (lock_row[1] is not None
+                        and int(lock_row[1]) > time.time_ns()):
+                    raise PermissionError(
+                        "Object is under retention and cannot be deleted")
             changed = self.db.connection.execute(delete(heads).where(
                 heads.c.bucket == bucket, heads.c.key_hash == digest,
                 heads.c.object_id == row[0],

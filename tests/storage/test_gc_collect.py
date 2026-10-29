@@ -428,3 +428,44 @@ def test_a_claimed_object_is_skipped_by_a_second_collector(store):
                                      min_age_seconds=3600))
     assert [c["object_id"] for c in report["collected"]] == [oid]
     assert transport.deleted
+
+
+def test_collect_deletes_replica_messages_before_dropping_rows(store):
+    """A "deleted" object must not keep a full copy on another account.
+
+    The collector deleted only primary Telegram messages and then dropped
+    every ``storage_replica_chunks`` row. The replica copy was never passed
+    to transport.delete, so a deleted object stayed on a different Telegram
+    account forever, with no row left to find it -- irreversible and silent.
+    """
+    from sqlalchemy import text
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    oid, _ = _publish(cat, "replicated.bin", size=128, now=old)
+    cat.delete_version("gcx", "replicated.bin", oid)
+    _backdate_revocation(cat, oid, old)
+
+    # A replica chunk in a DIFFERENT account.
+    db = cat.manifests.db
+    db.connection.execute(text(
+        "INSERT INTO storage_replica_chunks "
+        "(object_id, ordinal, account, chat_id, message_id, created_at) "
+        "VALUES (:o, 0, 'acct-replica', -200, 777001, :n)"),
+        {"o": oid, "n": old})
+    db.connection.commit()
+
+    gcx = RetainedMediaGC(db)
+    gcx.set_enabled(True, by="test")
+    transport = FakeTransport()
+    report = asyncio.run(gcx.collect(transport, scope="revoked",
+                                     min_age_seconds=3600))
+    assert report["failed"] == [], report["failed"]
+    assert [c["object_id"] for c in report["collected"]] == [oid]
+
+    deleted_pairs = {(acct, msg) for acct, _chat, msg in transport.deleted}
+    assert ("acct-replica", 777001) in deleted_pairs, (
+        "the replica message was never deleted: unrecoverable orphan")
+    remaining = db.connection.execute(text(
+        "SELECT COUNT(*) FROM storage_replica_chunks WHERE object_id = :o"),
+        {"o": oid}).scalar_one()
+    assert remaining == 0

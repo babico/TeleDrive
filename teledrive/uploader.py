@@ -30,8 +30,13 @@ TELEGRAM_FREE_FILE_LIMIT = 1_900_000_000
 SPLIT_BUFFER_SIZE = 1024 * 1024
 ACCOUNT_STRATEGIES = {"single", "round_robin", "failover", "parallel"}
 RUN_HOLDER = ""
-LEASE_NAME = ""
-LEASE_TTL_SECONDS = 0
+# The lease the legacy import shares with the real legacy uploader. This used
+# to be "" with a TTL of 0, which made the mutual-exclusion gate dead code:
+# the name never collided with the uploader the message talks about, and
+# lease_until == now meant a second request a second later stole it. The first
+# heartbeat at +10 s then always failed, raising a 500 mid-import.
+LEASE_NAME = "legacy-uploader"
+LEASE_TTL_SECONDS = 120
 CLAIM_STALE_SECONDS = int(os.environ.get("TELEDRIVE_CLAIM_STALE_SECONDS", "86400"))
 SPLIT_MIN_FREE_BYTES = int(os.environ.get("TELEDRIVE_SPLIT_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
 

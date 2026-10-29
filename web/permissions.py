@@ -79,6 +79,14 @@ _ADMIN_ONLY_PREFIXES = (
     "/api/v1/admin/s3/credentials",
     "/api/v1/admin/s3-credentials",
     "/api/v1/admin/storage/gc",
+    # The log buffer is an audit trail: it contains object keys, request
+    # paths and failure detail. Every role could read it, which is how a
+    # share token and a credential id ended up readable by a viewer. Logs are
+    # an operator/admin surface, not a read-only one.
+    "/api/v1/logs",
+    "/api/logs",
+    # Durable security trail: names users, buckets, keys and objects.
+    "/api/v1/admin/audit",
     # A share token IS the credential: the anonymous URL needs nothing else.
     # A read-only viewer who can list them becomes an anonymous publisher
     # that outlives their own account, so listing and revoking are admin.

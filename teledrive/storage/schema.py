@@ -293,6 +293,16 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_security_audit(ctx: SchemaContext) -> None:
+    """Durable security-event trail (append-only migration).
+
+    The in-memory log buffer is bounded and lost on restart, so no
+    investigation could answer "who revealed this credential last week".
+    """
+    from teledrive.storage import audit
+    audit.audit_events.create(ctx.engine, checkfirst=True)
+
+
 def _step_share_object_id(ctx: SchemaContext) -> None:
     """Bind a share link to the object version it was issued for.
 
@@ -436,6 +446,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("hot_indexes", _step_hot_indexes),
     ("gc_indexes", _step_gc_indexes),
     ("share_object_id", _step_share_object_id),
+    ("security_audit", _step_security_audit),
 ]
 
 # Bump by appending a step; never reorder or remove one.

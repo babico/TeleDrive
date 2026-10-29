@@ -246,6 +246,28 @@ def _log_safe(value) -> str:
     return _LOG_CONTROL_RE.sub("", text_value)
 
 
+def _audit(request: Request | None, action: str, *, target: str | None = None,
+           outcome: str = "ok", detail: dict | None = None) -> None:
+    """Append a durable security event; never raises, never blocks the action."""
+    try:
+        from teledrive.storage import audit as _audit_store
+        actor = (getattr(getattr(request, "state", None), "user", None) or {}).get(
+            "username") or "system"
+        client_ip = None
+        client = getattr(request, "client", None) if request is not None else None
+        if client is not None:
+            client_ip = getattr(client, "host", None)
+        conn = db_connect()
+        try:
+            _audit_store.record(conn, action=action, actor=actor,
+                                outcome=outcome, target=target,
+                                detail=detail, client_ip=client_ip)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 def _log(msg: str, source: str = "web", user: str = "system") -> None:
     """Append a timestamped, user-tagged, source-tagged entry to LOG_BUFFER."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -1940,6 +1962,8 @@ def put_config(request: Request, payload: dict[str, Any] = Body(...), _: None = 
     try:
         validate_and_write_config(payload, by=actor)
         _log("settings saved successfully", "config", user=actor)
+        _audit(request, "config.write",
+               detail={"sections": sorted(k for k in payload if k != "state")})
     except HTTPException:
         raise
     except ValueError as exc:
@@ -2059,6 +2083,9 @@ def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends
         # Log AFTER the row exists, with the actor and the new key's id:
         # logging before the store call made a rejected request read as a
         # successful issuance, and "system" made the entry unattributable.
+        _audit(request, "api_key.issue", target=key.id,
+               detail={"prefix": key.prefix, "scopes": list(key.scopes),
+                       "expires_at": payload.expires_at})
         _log(f"issue api key: id={key.id} prefix={key.prefix} "
              f"scopes={key.scopes} expires_at={payload.expires_at}",
              "api-keys",
@@ -2104,6 +2131,8 @@ def rotate_api_key(identifier: str, request: Request, _: None = Depends(require_
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        _audit(request, "api_key.rotate", target=key.id,
+               detail={"replaced": str(identifier)})
         _log(f"rotate api key: old={identifier} new={key.id} "
              f"prefix={key.prefix}", "api-keys",
              user=(getattr(request.state, "user", None) or {}).get(
@@ -2264,6 +2293,9 @@ def update_user(user_id: int, request: Request, payload: dict,
 
         conn.connection.commit()
         _log(f"update user: id={user_id} username={username} role={role} enabled={enabled}", "users")
+        _audit(request, "user.update", target=str(user_id),
+               detail={"username": username, "role": role,
+                       "enabled": enabled})
     finally:
         conn.close()
     return {"ok": True}
@@ -3574,6 +3606,8 @@ def create_user(request: Request, payload: UserCreateRequest,
     finally:
         conn.close()
     _log(f"create user: username={payload.username} role={payload.role}", "users")
+    _audit(request, "user.create", target=payload.username,
+           detail={"role": payload.role})
     return {"id": row[0], "username": payload.username, "role": payload.role}
 
 
@@ -3604,6 +3638,8 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
         ), {"id": user_id})
         conn.connection.commit()
         _log(f"delete user: id={user_id} username={row[0]}", "users")
+        _audit(request, "user.delete", target=str(user_id),
+               detail={"username": row[0]})
     finally:
         conn.close()
     return {"ok": True}
@@ -4119,6 +4155,9 @@ def admin_presign_object(bucket: str, request: Request,
                 revealed = store.reveal(candidates[0]["id"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        _audit(request, "object.presign", target=f"{bucket}/{key}",
+               detail={"expires": expires,
+                       "credential": revealed["access_key"]})
         _log(f"presigned GET: bucket={bucket} key={key} "
              f"expires={expires}s credential={revealed['access_key']}",
              "storage", user=actor)
@@ -4197,6 +4236,10 @@ def admin_create_share(bucket: str, request: Request,
         conn.connection.commit()
     finally:
         conn.close()
+    _audit(request, "share.create", target=f"{bucket}/{key}",
+           detail={"max_downloads": max_downloads,
+                   "expires_in": expires_in,
+                   "password": password is not None})
     _log(f"share link created: bucket={bucket} key={key} token={token[:6]}… "
          f"expires_in={expires_in} max_downloads={max_downloads} "
          f"password={'yes' if password is not None else 'no'}", "share")
@@ -4873,6 +4916,12 @@ async def gc_collect(request: Request, payload: GCCollectRequest,
                 409, "Physical GC is disabled; enable it first (owner gate)")
         transport = storage_transport(conn)
         user = getattr(request.state, "user", {}) or {}
+        # A physical collection is the one irreversible action in the
+        # product: it gets a durable trail with the candidate count, the
+        # scope and the real actor, before and after.
+        _audit(request, "gc.collect.start", target=payload.scope,
+               detail={"candidates": len(candidates),
+                       "min_age_seconds": payload.min_age_seconds})
         _log(f"physical gc collect START scope={payload.scope} "
              f"candidates={len(candidates)} by {user.get('username', '?')}",
              "gc")
@@ -4880,12 +4929,41 @@ async def gc_collect(request: Request, payload: GCCollectRequest,
             transport, scope=payload.scope,
             min_age_seconds=payload.min_age_seconds,
             chunk_refs=candidates)
+        _audit(request, "gc.collect.done", target=payload.scope,
+               outcome="partial" if report["failed"] else "ok",
+               detail={"collected": len(report["collected"]),
+                       "skipped": len(report["skipped"]),
+                       "failed": len(report["failed"]),
+                       "bytes": sum(c.get("bytes", 0)
+                                    for c in report["collected"])})
         _log(f"physical gc collect DONE scope={payload.scope} "
              f"collected={len(report['collected'])} "
              f"skipped={len(report['skipped'])} "
              f"failed={len(report['failed'])}", "gc")
         return {"dry_run": False, "scope": payload.scope, **report,
                 "metrics": gcx.metrics()}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/audit", tags=["Users"],
+         summary="Durable security-event trail (admin only)")
+def list_security_audit(
+    limit: int = Query(default=100, ge=1, le=1000),
+    action: str | None = Query(default=None, max_length=64),
+    actor: str | None = Query(default=None, max_length=128),
+    _: None = Depends(require_auth),
+):
+    """Who changed what authority, and when.
+
+    Admin-only because the entries name users, buckets, keys and objects.
+    The in-memory log buffer is a debugging aid; this is the trail.
+    """
+    from teledrive.storage import audit as _audit_store
+    conn = db_connect()
+    try:
+        return {"events": _audit_store.recent(
+            conn, limit=limit, action=action, actor=actor)}
     finally:
         conn.close()
 
@@ -5406,6 +5484,10 @@ def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
         _log(f"s3 credential issued: id={key.id} access={key.access_key} "
              f"permissions={len(key.permissions)} "
              f"expires_at={payload.expires_at}", "security", user=actor)
+        _audit(request, "credential.issue", target=key.id,
+               detail={"access_key": key.access_key,
+                       "permissions": len(key.permissions),
+                       "expires_at": payload.expires_at})
         return {"id": key.id, "access_key": key.access_key,
                 "secret_key": key.secret_key, "permissions": key.permissions}
     finally:
@@ -5458,6 +5540,8 @@ def reveal_s3_credential_secret(request: Request, identifier: str,
             raise HTTPException(422, str(exc)) from exc
         _log(f"s3 credential secret revealed: id={identifier} "
              f"access={revealed['access_key']}", "security", user=actor)
+        _audit(request, "credential.reveal", target=str(identifier),
+               detail={"access_key": revealed["access_key"]})
         return revealed
     finally:
         conn.close()
@@ -5485,6 +5569,10 @@ def update_s3_credentials(request: Request, identifier: str,
             )
         except (RuntimeError, OSError, ValueError) as exc:
             raise _credential_error(exc) from exc
+        _audit(request, "credential.edit", target=str(identifier),
+               detail={"permissions_changed": payload.get("permissions")
+                       is not None,
+                       "expires_at": payload.get("expires_at")})
         _log(f"s3 credential edited: id={identifier} "
              f"permissions={None if payload.get('permissions') is None else len(payload['permissions'])} "
              f"expires_at={payload.get('expires_at')} "
@@ -5512,6 +5600,7 @@ def revoke_s3_credentials(request: Request, identifier: str,
         if not changed:
             raise HTTPException(404, "S3 key not found or already revoked")
         _log(f"s3 credential revoked: id={identifier}", "security", user=actor)
+        _audit(request, "credential.revoke", target=str(identifier))
         return {"ok": True}
     finally:
         conn.close()

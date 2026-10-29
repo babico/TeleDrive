@@ -427,12 +427,17 @@ def test_share_token_is_a_credential_not_public_metadata(service):
     assert client.get("/api/v1/admin/storage/shares",
                       headers=viewer).status_code == 403
 
-    # And no log line may contain the token, including the one the middleware
-    # writes for the anonymous download.
+    # A viewer cannot read the log stream at all, and no log line may contain
+    # the token, including the one the middleware writes for the anonymous
+    # download -- checked as admin, who CAN read it.
     assert client.get(f"/share/{token}").status_code == 200
-    logs = client.get("/api/v1/logs", headers=viewer)
-    assert logs.status_code == 200
-    assert token not in logs.text, "share token leaked into the log stream"
+    assert client.get("/api/v1/logs", headers=viewer).status_code == 403
+    from tests import login_headers as _login
+    admin_logs = client.get("/api/v1/logs",
+                            headers=_login(client, "admin-test",
+                                           "some-long-password"))
+    assert admin_logs.status_code == 200
+    assert token not in admin_logs.text, "share token leaked into the log stream"
 
 
 def test_multibyte_key_is_rejected_before_any_upload(service):

@@ -374,13 +374,19 @@ def test_viewer_denied_config_write_and_keys(authenv):
                        ).status_code == 403
 
 
-def test_viewer_can_read_storage_and_logs(authenv):
+def test_viewer_can_read_storage_but_not_the_audit_log(authenv):
+    """A viewer reads storage state; the audit trail is an operator surface.
+
+    Logs carry object keys, request paths and failure detail -- which is how
+    a share token and a credential identifier became readable by a read-only
+    account. Health and jobs stay readable; logs and config values do not.
+    """
     client = authenv["client"]
     auth = _bearer(client, "viewuser", "viewer-password-1")
     assert client.get("/api/v1/admin/storage/health",
                       headers=auth).status_code == 200
     assert client.get("/api/v1/admin/storage/jobs", headers=auth).status_code == 200
-    assert client.get("/api/logs", headers=auth).status_code == 200
+    assert client.get("/api/logs", headers=auth).status_code == 403
     assert client.get("/api/config", headers=auth).status_code == 200
 
 

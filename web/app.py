@@ -64,6 +64,7 @@ from teledrive.storage.catalog import BucketCatalog
 from teledrive.stores import pins as _pin_store
 from teledrive.stores import sessions as _session_store
 from teledrive.stores import shares as _share_store
+from teledrive.stores import users as _user_store
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
@@ -411,14 +412,12 @@ def _default_admin_password_in_use(username: str = "admin") -> bool:
         try:
             conn = db_connect()
             try:
-                from sqlalchemy import text as _text
-                row = conn.connection.execute(_text(
-                    "SELECT password_hash FROM users WHERE username = :u"
-                ), {"u": username}).fetchone()
+                record = _user_store.get_by_username(conn, username)
             finally:
                 conn.close()
             cached = bool(
-                row is not None and _verify_password("admin", row[0]))
+                record is not None
+                and _verify_password("admin", record["password_hash"]))
         except Exception:
             cached = False
         _DEFAULT_ADMIN_PW_CACHE[username] = cached
@@ -483,18 +482,11 @@ def _create_default_admin() -> None:
     """
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        exists = conn.connection.execute(_text(
-            "SELECT 1 FROM users WHERE username = 'admin'"
-        )).fetchone()
-        if exists is None:
+        if _user_store.get_by_username(conn, "admin") is None:
             now = int(time.time())
-            conn.connection.execute(_text(
-                "INSERT INTO users (username, password_hash, role, enabled, "
-                "created_at, updated_at) "
-                "VALUES ('admin', :ph, 'admin', 1, :now, :now)"
-            ), {"ph": _hash_password("admin"), "now": now})
-            conn.connection.commit()
+            _user_store.create(
+                conn, username="admin", password_hash=_hash_password("admin"),
+                role="admin", now=now)
             _log("bootstrap admin account 'admin' created with the default "
                  "password — change it immediately", "startup")
     except Exception as exc:
@@ -1534,11 +1526,7 @@ def _assert_not_last_admin(conn, current_role: str,
     """Refuse role changes or deletion that would remove the last admin."""
     if current_role != "admin" or new_role == "admin":
         return
-    from sqlalchemy import text as _text
-    admin_count = conn.connection.execute(_text(
-        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = 1"
-    )).scalar()
-    if admin_count <= 1:
+    if _user_store.count_enabled_admins(conn) <= 1:
         raise HTTPException(409, "cannot remove the last admin")
 
 
@@ -1665,34 +1653,26 @@ def login(payload: dict, request: Request):
     _auth_throttle_check(throttle_key)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT id, username, password_hash, role, enabled FROM users "
-            "WHERE username = :u"
-        ), {"u": username}).fetchone()
+        record = _user_store.get_by_username(conn, username)
     finally:
         conn.close()
     # Always run a hash comparison so response timing never reveals
     # whether the username exists.
-    stored_hash = row[2] if row is not None else _dummy_password_hash()
+    stored_hash = (record["password_hash"] if record is not None
+                   else _dummy_password_hash())
     valid = _verify_password(password, stored_hash)
-    if row is None or not valid:
+    if record is None or not valid:
         _auth_failure_record(throttle_key)
         raise HTTPException(401, "Invalid credentials")
-    if not row[4]:
+    if not record["enabled"]:
         _auth_failure_record(throttle_key)
         raise HTTPException(403, "Account is disabled")
     if not stored_hash.startswith("pbkdf2_sha256$"):
         # Transparently upgrade legacy password hashes on successful login.
         conn = db_connect()
         try:
-            from sqlalchemy import text as _text
-            conn.connection.execute(_text(
-                "UPDATE users SET password_hash = :ph, updated_at = :now "
-                "WHERE id = :id"
-            ), {"ph": _hash_password(password), "now": int(time.time()),
-                "id": row[0]})
-            conn.connection.commit()
+            _user_store.set_password(
+                conn, record["id"], _hash_password(password), int(time.time()))
         finally:
             conn.close()
     AUTH_FAILURES.pop(throttle_key, None)
@@ -1701,18 +1681,15 @@ def login(payload: dict, request: Request):
     expires = now + 7 * 86400  # 7 days
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
         # Same transaction: sessions.create commits once, after both writes.
-        conn.connection.execute(_text(
-            "UPDATE users SET last_login = :now WHERE id = :id"
-        ), {"now": now, "id": row[0]})
+        _user_store.set_last_login(conn, record["id"], now, commit=False)
         _session_store.create(
-            conn, token=_session_token_digest(token), user_id=row[0],
+            conn, token=_session_token_digest(token), user_id=record["id"],
             created_at=now, expires_at=expires)
     finally:
         conn.close()
     _log(f"login: username={username}", "auth")
-    resp = JSONResponse(content={"token": token, "user": {"id": row[0], "username": row[1], "role": row[3]},
+    resp = JSONResponse(content={"token": token, "user": {"id": record["id"], "username": record["username"], "role": record["role"]},
                                   "expires_at": expires})
     # Behind a TLS-terminating reverse proxy the cookie must still be
     # Secure when the client connection is https (X-Forwarded-Proto).
@@ -2127,19 +2104,13 @@ def change_user_password(user_id: int, request: Request, payload: dict,
     now = int(time.time())
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT id FROM users WHERE id = :id"
-        ), {"id": user_id}).fetchone()
-        if row is None:
+        if _user_store.get_by_id(conn, user_id) is None:
             raise HTTPException(404, "user not found")
-        conn.connection.execute(_text(
-            "UPDATE users SET password_hash = :ph, updated_at = :now WHERE id = :id"
-        ), {"ph": pw_hash, "now": now, "id": user_id})
         # Revoke all sessions for this user (force re-login) in the same
         # transaction as the password change.
+        _user_store.set_password(conn, user_id, pw_hash, now, commit=False)
         _session_store.delete_for_user(conn, user_id, commit=False)
-        conn.connection.commit()
+        conn.commit()
         _invalidate_default_admin_cache()
         _log(f"change password: user_id={user_id}", "users")
     finally:
@@ -2157,18 +2128,12 @@ def change_user_role(user_id: int, request: Request, payload: dict,
         raise HTTPException(400, "role must be admin, operator or viewer")
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT username, role FROM users WHERE id = :id"
-        ), {"id": user_id}).fetchone()
-        if row is None:
+        record = _user_store.get_by_id(conn, user_id)
+        if record is None:
             raise HTTPException(404, "user not found")
-        _assert_not_last_admin(conn, row[1], role)
-        conn.connection.execute(_text(
-            "UPDATE users SET role = :role, updated_at = :now WHERE id = :id"
-        ), {"role": role, "now": int(time.time()), "id": user_id})
-        conn.connection.commit()
-        _log(f"change role: user_id={user_id} {row[1]} -> {role}", "users")
+        _assert_not_last_admin(conn, record["role"], role)
+        _user_store.set_role(conn, user_id, role, int(time.time()))
+        _log(f"change role: user_id={user_id} {record['role']} -> {role}", "users")
     finally:
         conn.close()
     return {"ok": True}
@@ -2182,18 +2147,16 @@ def change_user_role(user_id: int, request: Request, payload: dict,
 def get_user_detail(user_id: int, _: None = Depends(require_auth)):
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT id, username, role, enabled, created_at, updated_at, last_login "
-            "FROM users WHERE id = :id"
-        ), {"id": user_id}).fetchone()
-        if row is None:
+        record = _user_store.get_by_id(conn, user_id)
+        if record is None:
             raise HTTPException(404, "user not found")
         sessions = _session_store.list_for_user(conn, user_id)
         return {
-            "id": row[0], "username": row[1], "role": row[2],
-            "enabled": bool(row[3]), "created_at": row[4],
-            "updated_at": row[5], "last_login": row[6],
+            "id": record["id"], "username": record["username"],
+            "role": record["role"], "enabled": record["enabled"],
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+            "last_login": record["last_login"],
             "sessions": [{"token_prefix": s["token"][:12] + "...",
                           "created_at": s["created_at"],
                           "expires_at": s["expires_at"]} for s in sessions],
@@ -2209,11 +2172,8 @@ def update_user(user_id: int, request: Request, payload: dict,
     _same_origin(request)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT id, username, role FROM users WHERE id = :id"
-        ), {"id": user_id}).fetchone()
-        if row is None:
+        record = _user_store.get_by_id(conn, user_id)
+        if record is None:
             raise HTTPException(404, "user not found")
 
         username = payload.get("username")
@@ -2225,40 +2185,37 @@ def update_user(user_id: int, request: Request, payload: dict,
         # the last enabled admin (often themselves) and lock everyone out
         # with no recovery path, because the admin row still existed.
         if role is not None:
-            _assert_not_last_admin(conn, row[2], role)
-        if enabled is False and row[2] == "admin":
-            _assert_not_last_admin(conn, row[2])
+            _assert_not_last_admin(conn, record["role"], role)
+        if enabled is False and record["role"] == "admin":
+            _assert_not_last_admin(conn, record["role"])
 
         if username is not None:
             _validate_username(username)
             # Renaming the bootstrap account would make the next startup
             # re-create admin/admin, which the review proved by doing it.
-            if row[1] == "admin" and username != "admin":
+            if record["username"] == "admin" and username != "admin":
                 raise HTTPException(
                     400, "the bootstrap account 'admin' cannot be renamed")
             try:
-                conn.connection.execute(_text(
-                    "UPDATE users SET username = :u, updated_at = :now WHERE id = :id"
-                ), {"u": username, "now": int(time.time()), "id": user_id})
+                _user_store.rename(
+                    conn, user_id, username, int(time.time()), commit=False)
             except Exception as exc:
                 raise HTTPException(409, "username already exists") from exc
 
         if role is not None:
             if role not in ("admin", "operator", "viewer"):
                 raise HTTPException(400, "role must be admin, operator or viewer")
-            conn.connection.execute(_text(
-                "UPDATE users SET role = :role, updated_at = :now WHERE id = :id"
-            ), {"role": role, "now": int(time.time()), "id": user_id})
+            _user_store.set_role(
+                conn, user_id, role, int(time.time()), commit=False)
 
         if enabled is not None:
-            conn.connection.execute(_text(
-                "UPDATE users SET enabled = :en, updated_at = :now WHERE id = :id"
-            ), {"en": 1 if enabled else 0, "now": int(time.time()), "id": user_id})
+            _user_store.set_enabled(
+                conn, user_id, bool(enabled), int(time.time()), commit=False)
             if not enabled:
                 # Revoke sessions for disabled users in the same transaction.
                 _session_store.delete_for_user(conn, user_id, commit=False)
 
-        conn.connection.commit()
+        conn.commit()
         _log(f"update user: id={user_id} username={username} role={role} enabled={enabled}", "users")
         _audit(request, "user.update", target=str(user_id),
                detail={"username": username, "role": role,
@@ -3519,15 +3476,7 @@ def logs(limit: int = Query(default=1000, ge=1, le=1500),
 def list_users(_: None = Depends(require_auth)):
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        rows = conn.connection.execute(_text(
-            "SELECT id, username, role, enabled, created_at, updated_at, last_login "
-            "FROM users ORDER BY id"
-        )).fetchall()
-        return {"users": [
-            {"id": r[0], "username": r[1], "role": r[2], "enabled": bool(r[3]),
-             "created_at": r[4], "updated_at": r[5], "last_login": r[6]}
-            for r in rows]}
+        return {"users": _user_store.list(conn)}
     finally:
         conn.close()
 
@@ -3554,24 +3503,18 @@ def create_user(request: Request, payload: UserCreateRequest,
     now = int(time.time())
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
         try:
-            conn.connection.execute(_text(
-                "INSERT INTO users (username, password_hash, role, created_at, updated_at) "
-                "VALUES (:u, :ph, :r, :now, :now)"
-            ), {"u": payload.username, "ph": pw_hash, "r": payload.role, "now": now})
-            conn.connection.commit()
+            record = _user_store.create(
+                conn, username=payload.username, password_hash=pw_hash,
+                role=payload.role, now=now)
         except Exception as exc:
             raise HTTPException(409, "username already exists") from exc
-        row = conn.connection.execute(_text(
-            "SELECT id FROM users WHERE username = :u"
-        ), {"u": payload.username}).fetchone()
     finally:
         conn.close()
     _log(f"create user: username={payload.username} role={payload.role}", "users")
     _audit(request, "user.create", target=payload.username,
            detail={"role": payload.role})
-    return {"id": row[0], "username": payload.username, "role": payload.role}
+    return {"id": record["id"], "username": payload.username, "role": payload.role}
 
 
 @app.delete("/api/v1/admin/users/{user_id}", tags=["Users"],
@@ -3580,13 +3523,10 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
     _same_origin(request)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT username, role FROM users WHERE id = :id"
-        ), {"id": user_id}).fetchone()
-        if row is None:
+        record = _user_store.get_by_id(conn, user_id)
+        if record is None:
             raise HTTPException(404, "user not found")
-        _assert_not_last_admin(conn, row[1])
+        _assert_not_last_admin(conn, record["role"])
         # Sessions MUST die with the account. user_sessions has no foreign
         # key, and an Integer primary key reuses rowids on SQLite, so an
         # orphan session row could be inherited by a later account -- the
@@ -3595,13 +3535,11 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
         # that impossible: the store does not commit here, the user delete
         # below does it once.
         _session_store.delete_for_user(conn, user_id, commit=False)
-        conn.connection.execute(_text(
-            "DELETE FROM users WHERE id = :id"
-        ), {"id": user_id})
-        conn.connection.commit()
-        _log(f"delete user: id={user_id} username={row[0]}", "users")
+        _user_store.delete(conn, user_id, commit=False)
+        conn.commit()
+        _log(f"delete user: id={user_id} username={record['username']}", "users")
         _audit(request, "user.delete", target=str(user_id),
-               detail={"username": row[0]})
+               detail={"username": record["username"]})
     finally:
         conn.close()
     return {"ok": True}

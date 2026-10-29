@@ -9,7 +9,7 @@ import pytest
 
 from teledrive.db import connect_database
 from teledrive.storage import quota
-from teledrive.stores import pins, sessions, shares
+from teledrive.stores import pins, sessions, shares, users
 
 
 @pytest.fixture
@@ -157,3 +157,73 @@ def test_session_delete_scopes(db):
     assert [s["token"] for s in sessions.list_for_user(db, other)] == ["tok-4"]
     assert sessions.delete_all(db) == 1
     assert sessions.list_for_user(db, other) == []
+
+
+def _new_user(db, username="alice", role="admin", enabled=True):
+    return users.create(db, username=username, password_hash="hash-1",
+                        role=role, now=10, enabled=enabled)["id"]
+
+
+def test_user_create_lookup_and_list(db):
+    uid = _new_user(db)
+    _new_user(db, username="bob", role="viewer", enabled=False)
+
+    created = users.get_by_id(db, uid)
+    assert created is not None
+    assert created["username"] == "alice" and created["role"] == "admin"
+    assert created["enabled"] is True
+    assert "password_hash" not in created
+
+    # Login needs the hash; lookup is by the UNIQUE username.
+    auth = users.get_by_username(db, "alice")
+    assert auth is not None and auth["password_hash"] == "hash-1"
+    assert users.get_by_username(db, "nobody") is None
+    assert users.get_by_id(db, 9999) is None
+
+    assert [(u["username"], u["enabled"]) for u in users.list(db)] == [
+        ("alice", True), ("bob", False)]
+
+
+def test_user_duplicate_username_raises(db):
+    from sqlalchemy.exc import IntegrityError
+
+    _new_user(db, username="alice")
+    with pytest.raises(IntegrityError):
+        _new_user(db, username="alice", role="viewer")
+
+
+def test_user_mutations(db):
+    uid = _new_user(db)
+    assert users.set_password(db, uid, "hash-2", now=20) == 1
+    assert users.set_role(db, uid, "viewer", now=21) == 1
+    assert users.set_enabled(db, uid, False, now=22) == 1
+    assert users.set_last_login(db, uid, now=23) == 1
+
+    record = users.get_by_id(db, uid)
+    assert record is not None
+    assert record["role"] == "viewer" and record["enabled"] is False
+    assert record["last_login"] == 23
+    assert record["updated_at"] == 22
+    assert users.get_by_username(db, "alice")["password_hash"] == "hash-2"
+
+    assert users.rename(db, uid, "alice-2", now=24) == 1
+    assert users.get_by_id(db, uid)["username"] == "alice-2"
+    # Renaming a missing row is a no-op, not an error.
+    assert users.rename(db, 9999, "ghost", now=24) == 0
+
+
+def test_user_delete_and_enabled_admin_count(db):
+    admin = _new_user(db, username="admin", role="admin")
+    second = _new_user(db, username="second", role="admin")
+    _new_user(db, username="disabled-admin", role="admin", enabled=False)
+    _new_user(db, username="viewer", role="viewer")
+
+    assert users.count_enabled_admins(db) == 2
+    assert users.delete(db, second) == 1
+    assert users.count_enabled_admins(db) == 1
+    assert users.delete(db, second) == 0
+
+    # commit=False leaves the delete for the caller's transaction.
+    assert users.delete(db, admin, commit=False) == 1
+    db.commit()
+    assert users.get_by_id(db, admin) is None

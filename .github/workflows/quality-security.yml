@@ -239,6 +239,7 @@ jobs:
             tests/web/test_security_audit.py \
             tests/web/test_governance_non_destructive.py \
             tests/meta/test_route_surface.py \
+            tests/meta/test_schema_ddl_is_centralized.py \
             tests/s3/test_s3_credential_escalation.py \
             tests/s3/test_s3_read_and_lock_gates.py \
             tests/s3/test_s3_unsigned_matrix.py \

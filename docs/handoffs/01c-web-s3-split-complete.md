@@ -174,5 +174,14 @@ $ .venv/bin/python -m pytest tests/s3 tests/web tests/storage tests/meta -q -n 4
 1966 passed, 48 skipped, 5 warnings in 186.70s (0:03:06)
 ```
 
+Two unrelated store commits (`be697e4`, `d42f1e9`) landed while this step ran and
+touched `web/app.py`/`teledrive/stores/`. The same broad command was re-run on
+the merged tree after they landed:
+
+```
+$ .venv/bin/python -m pytest tests/s3 tests/web tests/storage tests/meta -q -n 4
+1968 passed, 48 skipped, 5 warnings in 189.22s (0:03:09)
+```
+
 No test file was edited. `python scripts/ops/sync_s3_inventory.py --check`
 remains the only writer of the inventory files.

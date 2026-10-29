@@ -453,24 +453,6 @@ def _auth_failure_record(key: str) -> None:
     AUTH_FAILURES.setdefault(key, deque()).append(time.time())
 
 
-def _migrate_users_enabled_column() -> None:
-    """Add ``users.enabled`` to a pre-``enabled`` database (idempotent)."""
-    try:
-        conn = db_connect()
-        try:
-            from sqlalchemy import text as _text, inspect as _inspect
-            cols = {c['name'] for c in _inspect(conn.engine).get_columns('users')}
-            if 'enabled' not in cols:
-                conn.connection.execute(_text(
-                    "ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL "
-                    "DEFAULT 1"))
-                conn.connection.commit()
-        finally:
-            conn.close()
-    except Exception:
-        pass
-
-
 def _create_default_admin() -> None:
     """Create the hardcoded first-boot admin if no ``admin`` row exists.
 
@@ -1179,13 +1161,14 @@ async def lifespan(_: FastAPI):
     # because the image pre-creates /data/auth).
     _reload_service_settings()
     ensure_config()
-    # Migrate users table first: the bootstrap INSERT names `enabled`, so
-    # a pre-`enabled` schema must be upgraded before the row is created.
-    _migrate_users_enabled_column()
+    # The bootstrap INSERT names `enabled`, so the column must exist first --
+    # and it does: db_connect() opens the engine, which runs the schema
+    # coordinator, whose `core` step adds users.enabled. An inline ALTER here
+    # would be a SECOND DDL path for the same column: it ran after the
+    # coordinator had already applied it, so it was dead code that only
+    # looked like the thing keeping startup working.
     _create_default_admin()
-    # The schema coordinator runs inside db_connect()/_build_engine(); opening
-    # the database here keeps a bad database loud at startup without a second
-    # copy of the users.enabled ALTER.
+    # Opening the database keeps a bad database loud at startup.
     try:
         db_connect().close()
     except Exception:

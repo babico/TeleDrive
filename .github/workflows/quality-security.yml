@@ -237,6 +237,7 @@ jobs:
             tests/web/test_auth_single_model.py \
             tests/web/test_per_route_permissions.py \
             tests/web/test_s3_governance_ui.py \
+            tests/web/test_credentials_ui.py \
             tests/meta/test_host_soak.py \
             tests/meta/test_acceptance_cli.py \
             tests/meta/test_production_bundle.py \

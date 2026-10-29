@@ -5,13 +5,17 @@ most of the previously "read-compatible but write-rejected" S3 surface into
 real SQL-backed state:
 bucket policies, ACLs, ownership, Public Access Block, object lock,
 notifications, replication, website hosting, CORS, tagging, lifecycle
-expiration, reports and intelligent-tiering. It also moves ports and TLS to
-the environment, persists service settings in SQL, and closes the critical
+expiration, reports and intelligent-tiering. SSE-C joins the encryption
+surface, the metadata journal backs the nine bucket-metadata configuration
+operations, and the S3 governance and credentials pages make the resulting
+state operable without an S3 client. It also moves ports and TLS to the
+environment, persists service settings in SQL, and closes the critical
 findings from the codebase audit.
 
-The release candidate is prepared from this tree. The published binaries
-remain v1.0.7 until the mandatory checks pass on the exact release SHA; do
-not treat this file as a tag.
+The release candidate is prepared from this tree. **No tag has been
+published for 1.0.8.** The published binaries remain v1.0.7 until the
+mandatory checks pass on the exact release SHA; do not treat this file as
+a tag, and do not cite a SHA from it.
 
 ## Upgrade
 
@@ -25,8 +29,21 @@ deployment. Four changes can break an existing setup:
 - the default object-ownership model is `BucketOwnerEnforced`, which
   **ignores object-ACL grants** — a deployment that relied on them must
   switch the bucket to `ObjectWriter`;
-- the S3 permission catalog grew from 18 to 78 scopes, and existing
-  credentials are **not** auto-granted the new ones.
+- the S3 permission catalog grew from 18 to 88 scopes, and existing
+  credentials are **not** auto-granted the new ones. The credential
+  console groups and filters them and labels the destructive and
+  governance-changing ones.
+
+S3 credentials are issued on `/s3/credentials` now, not on API
+Management, and the S3 nav group reads Credentials · Buckets ·
+Governance on every page. That console groups all 88 scopes into 20
+resource families, offers five presets whose consequence is stated, marks
+scopes that can destroy data or change governance, and supports create,
+edit, rotate, revoke and reveal. Rotation is issue-new-then-revoke-old in
+one confirmed step, because an access key and its secret are immutable by
+design. A secret is shown once, is held only in the browser tab that
+received it, and is never written to local or session storage or placed in
+a URL.
 
 Object lock is a one-way bucket setting, and intelligent-tiering makes an
 archived object answer `403 InvalidObjectState`. Both stay off unless

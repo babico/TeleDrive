@@ -1,7 +1,11 @@
 # TeleDrive — Full S3 Operation Coverage Plan
 
-**Durum:** 89 supported / 7 partial (0 by code) / 20 unsupported — 116 operasyon.
-**Hedef:** 112 supported / 0 partial / 4 unsupported (96.5%).
+**Durum:** 110 supported / 2 partial (0 by code) / 4 unsupported — 116 operasyon.
+**Hedef:** 112 supported / 0 partial / 4 unsupported (96.5%) — pratikte
+ulaşılan dürüst son durum **110 supported / 2 partial / 4 unsupported**;
+`GetBucketRequestPayment` ve `GetBucketAccelerateConfiguration` tasarım
+gereği partial kalır (billing/edge yok), bu yüzden 112'lik hedef yalnız bu
+iki read probe da "supported" sayılırsa anlamlıdır.
 **Kural:** her operasyonun arkasında GERÇEK bir state veya GERÇEK bir iş olacak.
 "Kabul et ve yut" yasak; yapılamayan dürüstçe reddedilir.
 
@@ -11,7 +15,7 @@ sevkiyat edilebilir ve kendi CI doğrulamasını taşır.
 
 ---
 
-## Durum (2026-10-27)
+## Durum (2026-10-28)
 
 | Faz | Kapsam | Op | Durum |
 |---|---|---|---|
@@ -20,11 +24,18 @@ sevkiyat edilebilir ve kendi CI doğrulamasını taşır.
 | **N1–N3** | Analytics/inventory/metrics config + gerçek rapor üretimi | 12 | ✅ `4831a67` |
 | **O** | RenameObject, SelectObjectContent, RestoreObject, annotations, RequestPayment/Accelerate yazma | 9 | ✅ `4831a67` + `2e461d1` (gerçek AWS wire shape'leri) |
 | **Ara toplam** | | **29** | **89 supported / 7 partial / 20 unsupported** |
-| **N5 + O1** | Erişim sayacı, intelligent-tiering, RestoreObject'ın gerçek arşiv yolu | 6 | 🔄 paralel ajan |
-| **O3** | Bucket metadata journal (gerçek mutasyon jurnali) | 9 | 🔄 paralel ajan |
-| **M1** | SSE-C (client-supplied key, AES-256-GCM/chunk) | 8 | 🔄 paralel ajan |
-| **Hedef** | | **23** | **112 supported / 0 partial / 4 unsupported** |
+| **N5 + O1** | Erişim sayacı, intelligent-tiering, RestoreObject'ın gerçek arşiv yolu | 6 | ✅ `f341691`, `<Tiering>` düzeltmesi `45d40ff` |
+| **O3** | Bucket metadata journal (gerçek mutasyon jurnali) | 9 | ✅ `fea11d9`, aktör semantiği `b850ad1` |
+| **M1** | SSE-C (client-supplied key, AES-256-GCM/chunk) | 8 | ✅ `565796b` |
+| **Sonuç** | | **23** | **110 supported / 2 partial / 4 unsupported** |
 | **D — imkânsız** | Torrent, CreateSession, ListDirectoryBuckets, WriteGetObjectResponse | 4 | ⛔ kalıcı olarak unsupported |
+
+> **Kalan iki partial:** `GetBucketRequestPayment` ve
+> `GetBucketAccelerateConfiguration`. Her ikisi de tek gerçek state'i
+> (BucketOwner / Suspended) döndürür; karşı state requester-pays billing
+> veya bir edge network gerektirdiği için yazma tarafı 501 verir. Bunları
+> "supported" saymak, var olmayan bir faturalama/edge altyapısını varmış
+> gibi göstermek olurdu.
 
 > **Neden bu 4'ü "destekliyoruz" demiyoruz:** `GetObjectTorrent` bir
 > BitTorrent swarm/seeder gerektirir (üretilen .torrent'i seed edememek
@@ -290,6 +301,10 @@ TeleDrive'ın kullanım profili (kişisel/self-host yedekleme) bunları hiç ça
 ---
 
 ## 6. Sıralama ve bağımlılık
+
+> Bu bölüm planlama kaydıdır; fazların tamamı `f341691`, `fea11d9` ve
+> `565796b` ile sevk edildi. Güncel envanter 110 supported / 2 partial /
+> 4 unsupported.
 
 ```
 FAZ L (policy + ownership + PAB)     8 op   ~6 gün   bağımsız

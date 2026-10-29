@@ -77,8 +77,10 @@ The Web UI is multi-page. After logging in at `/login` you can switch between:
 | `/queue` | Durable local-file upload job queue with retry controls |
 | `/history` | Completed job and transfer history |
 | `/storage` | Buckets, channels, active channel settings and Telegram session state |
-| `/s3` | S3 bucket browser with per-bucket quotas, plus S3 gateway credentials |
-| `/api-management` | REST and S3 credential issuance, rotation and revocation |
+| `/s3/credentials` | S3 gateway credentials: grouped scope catalogue, presets, rotate and revoke |
+| `/s3/buckets` | S3 bucket browser with per-bucket quotas |
+| `/s3/governance` | Bucket policy, ownership, PAB, object lock, website, notifications, replication, tiering and reports |
+| `/api-management` | REST bearer-key issuance, rotation and revocation |
 | `/logs` | Service logs with a live tail mode |
 | `/users` | User management: create users, change roles and passwords |
 | `/settings` | Service configuration editor |
@@ -158,7 +160,7 @@ The default REST upload ceiling is 2 GiB, configurable with `web.rest_max_upload
 
 ## 4. S3-compatible API
 
-For the **116-operation AWS S3 API compatibility matrix**, parameter-level limitations, unsupported-operation groups, and the P2 Advanced S3 work plan, see [S3 Specifications](docs/S3_SPECS.md). That document is the authoritative inventory: at the time of this release it records **93 supported, 7 partial (all by design) and 16 unsupported operations**. Count operations, not request permutations, and treat every partial as partial.
+For the **116-operation AWS S3 API compatibility matrix**, parameter-level limitations, unsupported-operation groups, and the P2 Advanced S3 work plan, see [S3 Specifications](docs/S3_SPECS.md). That document is the authoritative inventory: for this tree it records **110 supported, 2 partial (both by design) and 4 unsupported operations**. Count operations, not request permutations, and treat every partial as partial.
 
 The S3 endpoint is **part of the default container**, not a separate Compose profile. It implements a tested **subset** of S3 over the shared Telegram-backed catalog. It is **not AWS S3 feature parity**.
 
@@ -194,7 +196,7 @@ PY
 ~~~
 
 3. Install the `cryptography` package on the host if necessary. Ensure the container's `PUID`/`PGID` can **read** this file. Back up the key separately: losing it makes stored S3 secrets undecryptable.
-4. Start the default Compose service and issue a **scoped** S3 access key and secret in **WebUI → API Management → S3-compatible gateway** . The secret appears once and is encrypted in SQL.
+4. Start the default Compose service and issue a **scoped** S3 access key and secret in **WebUI → S3 → Credentials** . The secret appears once and is encrypted in SQL.
 
 ### SDK example
 
@@ -231,7 +233,7 @@ assert client.get_object(Bucket="backup-bucket", Key="hello.txt")["Body"].read()
 | Metadata and versions | Published and delete-marker versions, Enabled/Suspended bucket versioning, object lock with retention and legal hold, Public Access Block, bucket policies and ABAC, ACL grants, object/bucket tags with a deferred journal for in-flight uploads, metadata, CopySource, CORS, website documents behind an admin gate, notifications, replication configuration, GetObjectAttributes (`ETag`, `ObjectSize`, full-object SHA-256 `Checksum`, `STANDARD`, historical `VersionId`, immutable multipart `ObjectParts` with bounded pagination) |
 | Reports and tiering | Analytics, inventory and metrics configuration with real generated output into a destination bucket; intelligent-tiering backed by real access counting and a restore gate. Every deviation from the AWS output format is documented in the module and in the spec |
 | Checksums | SHA-256, SHA-1, Content-MD5, CRC32, CRC32C and CRC64NVME validation where explicitly implemented |
-| Known gaps | SSE-S3/SSE-KMS/SSE-C, requester-pays billing, transfer acceleration, directory buckets, Object Lambda and BitTorrent export; exhaustive per-operation crash/race coverage and unverified clients. Physical Telegram GC remains an owner-gated decision |
+| Known gaps | SSE-S3/SSE-KMS (SSE-C *is* supported), requester-pays billing, transfer acceleration, directory buckets, Object Lambda and BitTorrent export; exhaustive per-operation crash/race coverage and unverified clients. Physical Telegram GC remains an owner-gated decision |
 
 **Safety:** `UNSIGNED-PAYLOAD` writes are accepted only when an appropriately **signed, verifiable** checksum binds the actual received bytes. Public ACLs and unsupported archival tiers must not be inferred from AWS-style parameters. Failed conditional publications may retain protected, unpublished Telegram manifests rather than deleting uncertain remote media.
 
@@ -239,15 +241,23 @@ S3 client integrations tested in CI use **real** AWS CLI and rclone executables 
 
 ### S3 governance from the WebUI
 
-`/s3/governance` is the intended single place to manage bucket governance
+`/s3/governance` is the single place to manage bucket governance
 without an S3 client: bucket policy and ABAC, object ownership, Public
 Access Block, object-lock defaults, website hosting, notifications,
 replication, the intelligent-tiering configuration and the
-analytics/inventory/metrics reports. The page is built alongside this
-release; until it ships, the same state is managed through the S3 API. It
-is intended to write the same SQL state the S3 API reads, so there is no
-second configuration store. Destructive or exposing actions (the website
-public-read gate, physical GC) stay admin-only and are audit-logged.
+analytics/inventory/metrics reports. It writes the same SQL state the S3
+API reads, so there is no second configuration store. Destructive or
+exposing actions (the website public-read gate, physical GC) stay
+admin-only and are audit-logged. The page signs its requests server-side
+with a real S3 credential; the browser never receives a secret key.
+
+`/s3/credentials` is where keypairs are issued. The console groups all 88
+S3 scopes into 20 resource families, filters them live, offers five
+presets (Read-only, Backup client, Sync client, Bucket administrator, Full
+access) whose consequence is stated, and marks the scopes that can destroy
+data or change governance. A secret is displayed once, is held only in the
+tab that requested it, and is never written to local or session storage or
+placed in a URL.
 
 ### Client certificate bootstrap
 

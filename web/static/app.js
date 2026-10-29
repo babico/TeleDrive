@@ -5,6 +5,12 @@ const LOG_NOISE_RE = /^GET \/api\/v1\/logs( |$)|^GET \/api\/v1\/admin\/storage\/
 
 function app(){
   return {
+    // S3 credential console state and methods, defined by credentials.js.
+    // That file is loaded only on /s3/credentials, so every other page
+    // spreads nothing rather than throwing a ReferenceError.
+    ...(typeof credentialState === 'function' ? credentialState() : {}),
+    ...(typeof credentialMethods === 'function' ? credentialMethods() : {}),
+
     // State
     toastMsg: '',
     toastBad: false,
@@ -200,41 +206,9 @@ function app(){
     selectedScopes: ['objects:read','objects:write','objects:delete','buckets:read','buckets:manage'],
     createdKey: null,
 
-    // S3
-    s3KeyName: '',
-    s3CreateOpen: false,
-    s3ExpiryPreset: 90,
-    s3KeyExpiry: '',
-    s3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:GetObjectAttributes','s3:GetObjectTagging','s3:PutObjectTagging','s3:DeleteObjectTagging','s3:GetBucketTagging','s3:GetBucketCORS','s3:PutBucketCORS','s3:PutBucketTagging','s3:DeleteBucketTagging','s3:PutObject','s3:DeleteObject','s3:CreateBucket','s3:DeleteBucket'],
-    selectedS3Perms: ['s3:ListAllMyBuckets','s3:ListBucket','s3:GetBucketLocation','s3:GetObject','s3:PutObject','s3:DeleteObject'],
-    s3Keys: [],
-    s3Edit: null,
-    revealedS3: null,
-    // Permission groups for the S3 credential grids (create + edit).
-    s3PermGroups: [
-      {label: 'Read', hint: 'List buckets/objects and download content', perms: [
-        's3:ListAllMyBuckets', 's3:ListBucket', 's3:ListBucketVersions',
-        's3:GetBucketLocation', 's3:GetObject', 's3:GetObjectAttributes']},
-      {label: 'Write objects', hint: 'Upload, overwrite and delete objects', perms: [
-        's3:PutObject', 's3:DeleteObject']},
-      {label: 'Object tagging', hint: 'Read and manage object tags', perms: [
-        's3:GetObjectTagging', 's3:PutObjectTagging', 's3:DeleteObjectTagging']},
-      {label: 'Bucket administration', hint: 'Create/delete buckets and manage settings', perms: [
-        's3:CreateBucket', 's3:DeleteBucket', 's3:GetBucketTagging',
-        's3:PutBucketTagging', 's3:DeleteBucketTagging', 's3:GetBucketCORS',
-        's3:PutBucketCORS', 's3:GetBucketVersioning', 's3:PutBucketVersioning',
-        's3:GetLifecycleConfiguration', 's3:PutLifecycleConfiguration']},
-      {label: 'Compatibility probes (read-only)', hint: 'AWS-shaped read responses for client compatibility', perms: [
-        's3:GetBucketAcl', 's3:GetObjectAcl', 's3:GetOwnershipControls',
-        's3:GetBucketPolicy', 's3:GetBucketPolicyStatus',
-        's3:GetBucketPublicAccessBlock', 's3:PutBucketPublicAccessBlock',
-        's3:GetAccelerateConfiguration', 's3:GetBucketLogging',
-        's3:GetBucketNotification', 's3:GetBucketObjectLockConfiguration',
-        's3:GetBucketReplication', 's3:GetBucketRequestPayment',
-        's3:GetBucketWebsite', 's3:GetEncryptionConfiguration',
-        's3:GetObjectLegalHold', 's3:GetObjectRetention']},
-    ],
-    createdS3: null,
+    // S3 credentials live in credentials.js (credentialState /
+    // credentialMethods), including the secret reveal. Nothing here
+    // persists a secret: the API response is held in component state only.
 
     // Logs
     logEntries: [],
@@ -297,7 +271,7 @@ function app(){
         await this.refreshBuckets();
         await this.refreshShares();
       } else if(path === '/s3/credentials'){
-        await this.refreshS3Keys();
+        await this.s3Load();
       } else if(path === '/s3/governance'){
         await this.govInit();
       } else if(path === '/users'){
@@ -702,62 +676,6 @@ function app(){
 
     async copyText(t){
       try{ await navigator.clipboard.writeText(t); this.toast('Copied'); }catch(e){ this.toast('Clipboard unavailable',true); }
-    },
-
-    async revokeS3Key(id){
-      if(!this.confirmDelete('this S3 credential', 'S3 clients signed with it stop working immediately.')) return;
-      try { await this.api('/api/v1/admin/s3/credentials/'+id,{method:'DELETE'}); this.toast('Revoked'); await this.refreshS3Keys(); }
-      catch(e){ this.toast(e.message,true); }
-    },
-
-    async revealS3Secret(k){
-      if(!confirm('Reveal the secret for '+k.name+'? This action is audit-logged.')) return;
-      try {
-        this.revealedS3 = await this.api('/api/v1/admin/s3/credentials/'+k.id+'/secret');
-      } catch(e){ this.toast(e.message,true); }
-    },
-    togglePermGroup(perms, editTarget){
-      const model = editTarget ? editTarget.permissions : this.selectedS3Perms;
-      const allOn = perms.every(p => model.includes(p));
-      for(const p of perms){
-        const i = model.indexOf(p);
-        if(allOn && i >= 0) model.splice(i, 1);
-        else if(!allOn && i < 0) model.push(p);
-      }
-    },
-    startS3Edit(k){
-      this.s3Edit = {id: k.id, access_key: k.access_key, name: k.name,
-                     permissions: [...(k.permissions||[])]};
-    },
-    async saveS3Edit(){
-      try {
-        await this.api('/api/v1/admin/s3/credentials/'+this.s3Edit.id,
-          {method:'PUT', body: JSON.stringify({name: this.s3Edit.name.trim(),
-            permissions: this.s3Edit.permissions})});
-        this.toast('Credential updated');
-        this.s3Edit = null;
-        await this.refreshS3Keys();
-      } catch(e){ this.toast(e.message,true); }
-    },
-    async refreshS3Keys(){
-      try { const r = await this.api('/api/v1/admin/s3/credentials'); this.s3Keys = r.credentials||[]; }
-      catch(e){ this.toast(e.message,true); }
-    },
-
-    async createS3Key(){
-      try {
-        const body = {name:this.s3KeyName.trim()||'s3-key', permissions:this.selectedS3Perms.slice()};
-        if(this.s3ExpiryPreset === 'custom'){
-          if(this.s3KeyExpiry) body.expires_at = Math.floor(new Date(this.s3KeyExpiry).getTime()/1000);
-        } else if(Number(this.s3ExpiryPreset) > 0){
-          body.expires_at = Math.floor(Date.now()/1000) + Number(this.s3ExpiryPreset)*86400;
-        }
-        const r = await this.api('/api/v1/admin/s3/credentials',{method:'POST',body:JSON.stringify(body)});
-        this.createdS3 = {access:r.access_key, secret:r.secret_key};
-        this.toast('S3 credentials created');
-        this.s3CreateOpen = false;
-        await this.refreshS3Keys();
-      } catch(e){ this.toast(e.message,true); }
     },
 
     async loadLogs(){

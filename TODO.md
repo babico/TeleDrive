@@ -6,9 +6,12 @@
 > commands and CI contracts, see [CI and Test Guide](docs/CI_WORKFLOWS.md).
 > Product/feature analysis that produced the roadmap phases:
 > `.opencode/teledrive/10x/session-1.md` (git-ignored).
-> Last audited: 2026-10-28 (tree at `45d40ff`). The last all-six-automatic-workflows
+> Last audited: 2026-10-28 (tree at `08a7c8e`). The last all-six-automatic-workflows
 > green run recorded here is on `9c4769d`; later commits carry their own test
 > evidence in their commit messages and must not inherit that green status.
+> The S3 credentials UI refresh and its test are uncommitted work at the time
+> of this audit; treat them as reviewed-but-not-yet-proven until a commit
+> carries them.
 
 ---
 
@@ -301,8 +304,8 @@ come from simply authorizing more accounts.
 
       Historical snapshot: that paragraph quotes the counts at the time it
       was written. The metadata-parity and full-coverage phases superseded
-      them; the current inventory is **93 supported / 7 partial (all by
-      design) / 16 unsupported** (§13).
+      them; the current inventory is **110 supported / 2 partial (both by
+      design) / 4 unsupported** (§13).
 - [ ] Extend trustworthy recovery of unknown original Telegram history beyond
       candidate markers without inventing metadata.
 - [ ] Establish longer-duration real-environment capacity benchmarks on
@@ -561,23 +564,41 @@ dependency order, each independently shippable; A and B first.
       `InvalidObjectState` gate on archived objects and a bounded restore
       window. No Telegram byte moves; documented as an access gate, not
       Glacier. Inventory: **93 supported / 7 partial / 16 unsupported**.
-- [ ] **Full S3 coverage plan — remaining phases** — see
-      [S3_FULL_COVERAGE_PLAN.md](docs/S3_FULL_COVERAGE_PLAN.md).
-      Still open: O3 bucket metadata journal (9 ops) and M1
-      SSE-C/SSE-S3 (8 ops, `PutBucketEncryption` pair and
-      `UpdateObjectEncryption`). The plan quotes a target of **112
-      supported / 0 partial / 4 unsupported**; note that
-      RequestPayment and Accelerate are listed there as kept by design,
-      so the honest reachable end state is 110 supported / 2 partial / 4
-      unsupported unless those two read probes are also promoted. The 4
-      permanently impossible operations (BitTorrent swarm, S3 Express
-      directory buckets, Object Lambda) stay unsupported.
-- [ ] **S3 governance WebUI page (`/s3/governance`)** — one page over the
-      SQL state the API already uses: policy, ownership, PAB, object-lock
-      defaults, website gate, notifications, replication, tiering and
-      report configurations. It is being built in parallel; the README
-      describes it as the intended surface. Nothing on the S3 API depends
-      on it.
+- [x] **Phase O3 — bucket metadata journal** (`fea11d9`, actor semantics
+      documented in `b850ad1`): `storage_metadata_journal` records
+      every mutation with actor and timestamp, written through a savepoint
+      in the same transaction as the mutation; nine bucket-metadata
+      configuration operations expose it, and journal retention follows the
+      real `UpdateBucketMetadata*TableConfiguration` windows. TeleDrive-shaped
+      identifiers only; no AWS table ARN is fabricated.
+- [x] **Phase M1 — SSE-C** (`565796b`): each Telegram chunk is AES-256-GCM
+      under a fresh nonce with an AAD binding object identity and ordinal;
+      the client key is never persisted, logged or echoed, only the
+      AWS-published key-MD5 fingerprint. Range reads decrypt overlapping
+      chunks only, multipart binds one key, `UpdateObjectEncryption`
+      re-encrypts in a bounded pass. SSE-S3/SSE-KMS stay 501 by design.
+      Inventory: **110 supported / 2 partial (by design) / 4 unsupported**.
+- [x] **Full S3 coverage plan — remaining phases.** All three planned
+      phases shipped (see the three entries above). The plan's 112-target
+      assumed the two request-payment/accelerate read probes would be
+      promoted; they are kept partial by design (no billing or edge
+      network), so the honest end state is **110 supported / 2 partial /
+      4 unsupported**. The 4 permanently impossible operations (BitTorrent
+      swarm, S3 Express directory buckets, Object Lambda) stay unsupported.
+- [x] **S3 governance WebUI page (`/s3/governance`)** (`e809a9a`) — policy,
+      ownership, PAB, object-lock defaults, website gate, notifications,
+      replication, tiering and report configuration are operable over the
+      same SQL state the S3 API reads. Writes are admin-only, audit-logged,
+      and signed server-side with a real S3 credential; the browser never
+      receives a secret key.
+- [ ] **S3 credentials console refresh — uncommitted.** The grouped
+      20-family catalogue, five presets, risk markers, rotate/revoke
+      confirmations, relative/absolute expiry and loading/empty/error states
+      are implemented in `web/static/credentials.js` +
+      `web/static/credentials.html`, with `tests/web/test_credentials_ui.py`
+      (27 tests) registered in the web CI list. Not yet committed, so it is
+      not yet a release claim; promote to `[x]` only when a commit carries it
+      and the full web/meta suite is green on that SHA.
 - [ ] **Phase K — SSE envelope** (owner decision, conflicts with
       dedup/replication/search). Converts 1.
 - Kept by-design forever: RequestPayment, Accelerate — no honest

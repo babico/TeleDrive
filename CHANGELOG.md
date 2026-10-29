@@ -139,6 +139,40 @@ v1.0.7 binaries.
   The page signs internally with a real credential, requires admin for
   writes, audit-logs them, and states the real consequence of each action
   rather than a friendly label.
+- **S3 credentials console rebuilt around the 88-scope catalogue.** The
+  catalog outgrew a single checkbox wall: it went from 18 scopes in 1.0.7
+  to 88 enforced scopes, grouped here into 20 resource families (buckets,
+  objects, tagging, annotations, ACL, policy and ownership, PAB, object
+  lock, versioning, lifecycle, CORS, website, notifications, logging,
+  replication, encryption/SSE-C, metadata configuration, tiering,
+  reports, acceleration). Every scope the server will accept is present in
+  the UI, and a regression test compares the groups against the server's
+  `PERMISSIONS` set so a newly enforced scope cannot become ungrantable
+  from the page. `/s3/credentials` now
+  groups by family with a human description, filters groups and scopes
+  live, offers group-level select-all/clear, and keeps a sticky
+  "N of M selected" summary. Five presets (Read-only, Backup client, Sync
+  client, Bucket administrator, Full access) state their consequence and
+  remain a starting point: applying one shows which groups it enabled and
+  leaves every checkbox editable. Scopes that destroy data or change
+  governance (`s3:Delete*`, policy, object-lock configuration, ACL, SSE-C
+  object encryption, metadata-retention updates, rename) carry a
+  destructive/governance marker with an inline consequence; the grant is
+  still allowed, so the operator is informed rather than blocked. Create,
+  edit, rotate, revoke and reveal are all reachable from the page; rotate
+  is issue-new-then-revoke-old in one confirmed step because an access key
+  and secret are immutable, and both rotate and revoke state that existing
+  clients stop working immediately. Expiry is shown as absolute plus
+  relative time with an "expires soon" state, revoked and expired
+  credentials stay listed but immovable, and the page has explicit
+  loading, error and empty states. The S3 nav group on every page now
+  reads Credentials · Buckets · Governance.
+- **The credentials page never persists a secret.** The created/revealed
+  secret lives only in the Alpine component that received it, is rendered
+  into the page, and is discarded when the panel closes. It is not written
+  to `localStorage` or `sessionStorage` and never appears in a URL;
+  reveal keeps its explicit confirmation and audit note. A regression test
+  asserts the absence of all three paths.
 
 **Deployment and operations**
 
@@ -168,11 +202,15 @@ v1.0.7 binaries.
   access. Deployments that relied on object ACLs must switch the bucket to
   `ObjectWriter` (or `BucketOwnerPreferred`). This is a deliberate
   behaviour change, documented in [docs/UPGRADING.md](docs/UPGRADING.md).
-- **The S3 credential permission catalog grew from 18 to 78 scopes.** New
+- **The S3 credential permission catalog grew from 18 to 88 scopes.** New
   credentials receive the full default set, but existing credentials keep
   their stored list. An existing credential that must call the new policy,
-  ownership, object-lock, website, notification, replication, tagging,
-  reporting, rename, select or tiering operations needs those scopes added.
+  ownership, object-lock, website, notification, replication, SSE-C,
+  metadata-configuration, reporting, rename, select or tiering operations
+  needs those scopes added. The console groups all 88 by resource family
+  and marks the ones that can destroy data or change governance, so the
+  difference between "this client needs to restore an object" and "this
+  client can delete the bucket" is visible before it is granted.
 - **`config.yaml` is no longer the live source for listener ports or TLS.**
   Those keys are deployment plumbing and are read only from the environment.
   Other service settings still use the file as their bootstrap source until

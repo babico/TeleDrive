@@ -59,9 +59,17 @@ exhausted.
       policy — 14 findings, two criticals (a config save could redirect the
       database and seed admin/admin there; GET returned the live Telethon
       session string).
-- [ ] Wave 6 (running): admin download, CompleteMultipartUpload, SigV4
-      verification, public website hosting. Then waves 7+ until the 101
-      handlers are covered.
+- [x] Wave 6 (`cebd7df`): admin download (which exposed the duplicated read
+      path), CompleteMultipartUpload, SigV4, public website hosting.
+- [x] Wave 7 (`63b02a2`): s3 governance API, replication + tiering, batch
+      delete + form upload, legacy import + GC admin. Seven [high] findings,
+      including a WORM bypass and a silent replica orphan.
+- [x] Ledger closed (`9e173a9`): every finding from 25 endpoint sections is
+      **fixed** (64), **disproved** (1) or **open** (0). Unfixed-by-design
+      items are listed separately in the review document itself.
+- [ ] Waves 8+ until the remaining handlers are covered. Coverage so far is
+      the highest-risk surface, not the whole 101: the remaining routes are
+      list/read endpoints over state those 25 already established.
 - [x] Cross-cutting: the duplicated read path is gone
       (`48e8d95`) — `admin_download_object` and `get_object_content` shared
       their logic by copy, so three fixes landed on one and not the other.

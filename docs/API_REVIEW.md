@@ -1,3 +1,31 @@
+# API review — per-endpoint defect reports
+
+Four reviewers per wave, one endpoint each. Every report below is a
+read-only audit with file:line evidence; the "Findings" lists describe the
+code **as reviewed**, not necessarily the current tree.
+
+## Fix status
+
+| Endpoint | Finding | State |
+|---|---|---|
+| `issue_api_key` | [high] delegation ignored lifetime/lineage | **fixed** (`61c4c77`) — a child may expire no later than its parent |
+| `rotate_api_key` | [high] `admin:*` could not call any admin route (dead preset) | **fixed** (`61c4c77`) — `admin:*` expands over the live route table |
+| `reveal_s3_credential_secret` | [high] a reveal-scoped key could read a more privileged credential's secret | **fixed** (`2ead9b6`) — sessions only, keys get 403 and are audited |
+| `reveal_s3_credential_secret` | [medium] master-key path leaked into viewer-readable logs | **fixed** (`2ead9b6`) — fixed 503 message, reason class in the audit line |
+| `gc_collect` | [critical] default scope deleted Telegram media then rolled its own record back | **fixed** (`2ead9b6`) — idempotent journal insert |
+| `gc_collect` | [critical] safety window measured upload age, not revocation age | **fixed** (`2ead9b6`) — age is the later of the two |
+| `gc_collect` | [high] no lease/fence between concurrent collects | **open** |
+| `gc_collect` | [high] preview and collect share one stale snapshot | **open** |
+| `gc_collect` | [high] crash mid-object is unrecoverable and unaudited | **open** |
+| `gc_collect` | [high] a scoped API key bypasses the admin role gate | **open** — see Phase 4 (role gate for destructive ops) |
+| `issue_api_key` | [medium] audit has no actor/id, written before validation, name unescaped | **open** |
+| `rotate_api_key` | [medium] 403/404/409 existence oracle | **open** |
+| `reveal_s3_credential_secret` | [medium] audit is in-memory only and viewer-readable | **open** |
+
+Open findings are tracked in `docs/POST_108_PLAN.md` Phase 4.
+
+---
+
 ## issue_api_key — POST /api/v1/admin/keys
 
 - **Handler:** web/app.py:1860 (route declared web/app.py:1859-1883)

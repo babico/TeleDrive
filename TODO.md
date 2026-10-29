@@ -790,20 +790,23 @@ backlog that the release notes link to.
 admin-only GC gate and the immutable ACL owner; `4365694` for audit identity
 spoofing). The rest are still open:
 
-- [ ] **#4 Bucket delete leaves orphan metadata** — `delete_bucket` does not
-      remove `storage_bucket_acl_grants`, `storage_object_acl_grants`,
-      `bucket_quotas`, `bucket_account_pins` or `share_links`. Re-creating a
-      bucket with the same name can revive old grants. This is a security
-      bug, not cosmetics (O10).
+- [x] **#4 Bucket delete leaves orphan metadata** (`04b6a4c`) — worse than
+      reported: THIRTEEN tables survived, including the bucket policy
+      (a Deny would reactivate), ABAC, SSE, replication, tiering,
+      notification, logging and report configs plus quotas, pins and public
+      share links, so re-creating a bucket name revived the previous
+      bucket's rights and kept its share URLs working. All are cleared in
+      the bucket-delete transaction, pinned by a test that probes every
+      table and then re-creates the name.
 - [x] **#7 Schema init race and scattered migrations** (`b91df33`) —
       `teledrive/storage/schema.py` is now the only place that decides the
       schema state or issues DDL: a WeakSet fast path, a `schema_migrations`
       version probe, and a real cross-process lock (flock / `pg_advisory_xact_lock`
       / `GET_LOCK`) around 19 recorded idempotent steps. Proved with five
       simultaneous OS processes on SQLite, PostgreSQL and MySQL.
-- [ ] **#8 MySQL SQL leaks** — `ON CONFLICT` in the quota and pin upserts
-      and `INSERT OR IGNORE` in the reindex path still fail on MySQL,
-      although README and CI list MySQL as supported (O9).
+- [x] **#8 MySQL SQL leaks** (`62b3a91`) — the quota and pin upserts used
+      `ON CONFLICT` and reindex used `INSERT OR IGNORE`; all three are now
+      portable update-then-insert, verified against a live MySQL 8.4.
 - [ ] **#9 Three permission catalogs** — `ENDPOINT_PERMISSIONS`,
       `CURATED_PERMISSIONS` and handler string literals still duplicate the
       same nine REST permissions.
@@ -815,9 +818,9 @@ spoofing). The rest are still open:
       share still bypass a store layer.
 - [ ] **#14 Missing indexes/FKs** — `aliases.source_object_id` and the
       version/bucket FKs are still unindexed or absent.
-- [ ] **#15 Dead/duplicate helpers in `user_mode.py`** —
-      `_session_from_file` and the first `_session_from_file_for` remain
-      defined and unused.
+- [x] **#15 Dead/duplicate helpers in `user_mode.py`** (`62b3a91`) —
+      `_session_from_file` (no callers) and the shadowed first
+      `_session_from_file_for` are gone.
 
 ### 14.2 Schema-initialisation race (O4/O6)
 

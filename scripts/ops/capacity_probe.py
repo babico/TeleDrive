@@ -81,6 +81,11 @@ def _readback(catalog: BucketCatalog, media: IsolatedMedia, object_id: str,
         raise ValueError("Historical Telegram readback failed integrity proof")
 
 
+# The report samples first/middle/last, so fewer than three objects cannot
+# satisfy "historical rereads" at all.
+MIN_ROUNDTRIPS = 3
+
+
 def run(*, duration_seconds: int, object_bytes: int, interval_seconds: float = 1.0,
         workspace: Path | None = None, clock=time.monotonic, sleep=time.sleep) -> dict:
     if (type(duration_seconds) is not int or not 1 <= duration_seconds <= 21600
@@ -140,7 +145,15 @@ def run(*, duration_seconds: int, object_bytes: int, interval_seconds: float = 1
                           recovered, workspace)
                 historic_rereads += 1
 
-            if clock() - start >= duration_seconds:
+            # A minimum object count is part of the CONTRACT, not a nicety:
+            # the final readback samples three distinct historical items
+            # (first / middle / last), and a one-second soak on a fast host
+            # produced a single object, so that set collapsed to one and the
+            # endurance report proved nothing about history. On a slow host
+            # the loop would have produced eight. Making the floor explicit
+            # means the same assertion holds on every machine.
+            if (len(history) >= MIN_ROUNDTRIPS
+                    and clock() - start >= duration_seconds):
                 break
             if interval_seconds:
                 sleep(interval_seconds)

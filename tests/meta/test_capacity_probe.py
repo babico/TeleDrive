@@ -72,3 +72,27 @@ def test_synthetic_message_corruption_is_visible_to_original_storage_engine(tmp_
         assert not (scratch / "output").exists()
     finally:
         db.close()
+
+
+def test_a_soak_shorter_than_its_object_floor_is_still_meaningful(tmp_path):
+    """The report must be provable on a FAST host, not only a slow one.
+
+    CI failed here: a 1-second soak on a fast runner completed one object, so
+    the final readback sampled `{0, len//2, len-1}` -- a set that collapses to
+    a single index -- and `historical_rereads >= 3` was unsatisfiable. The
+    previous shape passed only when the host happened to be slow enough to
+    produce three or more objects inside the duration.
+
+    A frozen clock simulates the fast host deterministically.
+    """
+    from scripts.ops.capacity_probe import MIN_ROUNDTRIPS
+
+    ticks = iter(range(10_000))
+    result = run(duration_seconds=1, object_bytes=1024, interval_seconds=0,
+                 workspace=tmp_path / "fast", clock=lambda: next(ticks))
+
+    assert result["verified_roundtrips"] >= MIN_ROUNDTRIPS
+    assert result["historical_rereads"] >= MIN_ROUNDTRIPS
+    assert result["sql_restarts"] >= 1
+    # The retention invariant still has to hold with the extra objects.
+    assert result["retained_telegram_bytes"] == result["verified_bytes"]

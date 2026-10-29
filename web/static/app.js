@@ -863,7 +863,7 @@ function app(){
         } catch(e){}
       }
       this.selectedKeyList = []; this.syncSelectedKeys();
-      this.toast('Deleted ' + ok + ' object(s)');
+      this.toast('Unlinked ' + ok + ' object(s); Telegram media is retained until physical GC');
       await this.browseBucket(this.currentBucket);
       await this.refreshBuckets();
     },
@@ -1000,7 +1000,7 @@ function app(){
     },
     async deleteObject(bucket,key){
       if(!this.confirmDelete(key, 'Telegram media is retained (physical GC is owner-gated).')) return;
-      try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}),{method:'DELETE'}); this.toast('Deleted'); await this.browseBucket(bucket); await this.refreshBuckets(); }
+      try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}),{method:'DELETE'}); this.toast('Unlinked; Telegram media is retained until physical GC'); await this.browseBucket(bucket); await this.refreshBuckets(); }
       catch(e){ this.toast(e.message,true); }
     },
     async editQuota(name){

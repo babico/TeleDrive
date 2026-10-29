@@ -30,13 +30,13 @@ from teledrive.s3.write_conditions import check_write_precondition
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.gc_collect import RetainedMediaGC
 from teledrive.storage.sse import SSECError, parse_ssec_headers
-from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 from web.app import _secure_mkdir
 
 from web.s3_gateway.authorization import _require_source_acl
 from web.s3_gateway.checksums import _ssec_response_headers, _verify_upload_sha256
-from web.s3_gateway.common import _quota_guard, storage_transport
+from web.s3_gateway.common import _chunk_size, _quota_guard, storage_transport
 from web.s3_gateway.xml import NAMESPACE, _error, _xml
+
 
 def _list_multipart_uploads(ctx: _S3RequestContext) -> Response:
     """GET ?uploads: ListMultipartUploads response XML."""
@@ -109,6 +109,7 @@ def _list_multipart_uploads(ctx: _S3RequestContext) -> Response:
     return Response(ET.tostring(root, encoding="utf-8", xml_declaration=True),
                     media_type="application/xml")
 
+
 async def _handle_multipart(ctx: _S3RequestContext) -> Response:
     """Multipart upload operations on an object path (initiate, part,
     complete, abort, list parts)."""
@@ -162,6 +163,7 @@ async def _handle_multipart(ctx: _S3RequestContext) -> Response:
         return await _mpu_complete(ctx, mpu, upload_id)
     return await _mpu_upload_part(ctx, mpu, upload_id)
 
+
 async def _mpu_initiate(ctx: _S3RequestContext, mpu: MultipartStore) -> Response:
     """POST ?uploads: CreateMultipartUpload (metadata-only initiate)."""
     request = ctx.request
@@ -188,6 +190,7 @@ async def _mpu_initiate(ctx: _S3RequestContext, mpu: MultipartStore) -> Response
     return Response(_xml("InitiateMultipartUploadResult", [
         ("Bucket", bucket), ("Key", key), ("UploadId", upload_id),
     ]), media_type="application/xml", status_code=200, headers=headers)
+
 
 async def _mpu_list_parts(ctx: _S3RequestContext, mpu: MultipartStore,
                           upload_id: str) -> Response:
@@ -246,6 +249,7 @@ async def _mpu_list_parts(ctx: _S3RequestContext, mpu: MultipartStore,
                     media_type="application/xml",
                     headers=(_ssec_response_headers(sse_key)
                              if sse_key is not None else None))
+
 
 async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
                         upload_id: str) -> Response:
@@ -389,7 +393,7 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
         return quota_error
     engine = TelegramObjectStorage(
         catalog.manifests, transport,
-        chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+        chunk_size=_chunk_size(), scratch_directory=scratch,
     )
     if streaming_verification:
         # One streaming pass over the assembled part bytes computes
@@ -482,6 +486,7 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
                     headers=(_ssec_response_headers(sse_key)
                              if sse_key is not None else None))
 
+
 async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
                            upload_id: str) -> Response:
     """PUT ?uploadId&partNumber: UploadPart staging and checksum verify."""
@@ -569,7 +574,7 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
         await transport.verify_target()
         engine = TelegramObjectStorage(
             catalog.manifests, transport,
-            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+            chunk_size=_chunk_size(), scratch_directory=scratch,
         )
         staged = await engine.put_file(bucket, key, stage, dedup=False,
                                        sse_key=sse_key)
@@ -591,6 +596,7 @@ async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,
         return Response(status_code=200, headers=headers)
     finally:
         stage.unlink(missing_ok=True)
+
 
 async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
                                upload_id: str) -> Response:
@@ -676,7 +682,7 @@ async def _mpu_upload_part_copy(ctx: _S3RequestContext, mpu: MultipartStore,
         await transport.verify_target()
         engine = TelegramObjectStorage(
             ctx.catalog.manifests, transport,
-            chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=scratch,
+            chunk_size=_chunk_size(), scratch_directory=scratch,
         )
         with open(stage, "wb") as out:
             async for piece in engine.iter_bytes(

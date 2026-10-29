@@ -1310,6 +1310,12 @@ class BucketCatalog:
             raise ValueError("Object changed; generation precondition failed")
         if expected_object_id is not None and current.item.id != expected_object_id:
             raise ValueError("Object changed; object ID precondition failed")
+        # The unlink itself always fences on the OBJECT ID, even when the
+        # caller only sent a generation. publish() restarts the counter at 1
+        # whenever the head is absent, so A@gen1 -> unlink -> B@gen1 has the
+        # SAME generation for a different object: a conditional delete by
+        # generation alone destroyed the newer object (verified over HTTP).
+        # The id is unique forever, so it closes the ABA window.
         condition = [
             heads.c.bucket == bucket, heads.c.key_hash == digest,
             heads.c.object_id == current.item.id,
@@ -1317,7 +1323,12 @@ class BucketCatalog:
         ]
         changed = self.db.connection.execute(delete(heads).where(and_(*condition)))
         self.db.commit()
-        return changed.rowcount == 1
+        if changed.rowcount != 1:
+            # Rowcount 0 means a concurrent writer replaced the head between
+            # the read and the delete. Reporting {"ok": true} made a lost
+            # race look like success; the S3 path correctly returns 412.
+            raise ValueError("Object changed; unlink precondition failed")
+        return True
 
     def delete_bucket(self, name: str) -> None:
         """Refuse buckets with any current or historical manifests."""

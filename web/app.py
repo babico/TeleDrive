@@ -1405,9 +1405,20 @@ class GCCollectRequest(BaseModel):
         default=None, description='Typed confirmation "DELETE-RETAINED" to execute')
 
 
+# A new S3 credential with no explicit permission list gets READ-ONLY
+# object access. It used to default to every known permission, so an omitted
+# field silently produced a credential that could delete buckets and rewrite
+# bucket policy -- the opposite of least privilege for the common case.
+DEFAULT_NEW_CREDENTIAL_PERMISSIONS = [
+    "s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation",
+    "s3:GetObject", "s3:GetObjectAttributes",
+]
+
+
 class S3KeyCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    permissions: list[str] = Field(default_factory=lambda: list(DEFAULT_PERMISSIONS))
+    permissions: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_NEW_CREDENTIAL_PERMISSIONS))
     expires_at: int | None = None
 
 
@@ -1448,6 +1459,27 @@ class VersionIndexRequest(BaseModel):
 class BucketCreateRequest(BaseModel):
     name: str = Field(min_length=3, max_length=63)
 
+# Usernames are login identifiers AND appear in log lines. Restricting them
+# to an ASCII subset with no whitespace/newlines prevents a name like
+# "admin\n[2026-01-01] [system] ..." from forging a log record, and prevents
+# homograph confusion with the reserved bootstrap account.
+_USERNAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+
+
+def _validate_username(username: str) -> str:
+    if (not isinstance(username, str) or not 1 <= len(username) <= 64
+            or not _USERNAME_RE.fullmatch(username)
+            or username.strip() != username):
+        raise HTTPException(
+            400,
+            "username must be 1-64 characters of letters, digits, dot, "
+            "dash or underscore")
+    if username.casefold() == "admin" and username != "admin":
+        raise HTTPException(
+            400, "the name 'admin' is reserved for the bootstrap account")
+    return username
+
+
 def _assert_not_last_admin(conn, current_role: str,
                             new_role: str | None = None) -> None:
     """Refuse role changes or deletion that would remove the last admin."""
@@ -1455,7 +1487,7 @@ def _assert_not_last_admin(conn, current_role: str,
         return
     from sqlalchemy import text as _text
     admin_count = conn.connection.execute(_text(
-        "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = 1"
     )).scalar()
     if admin_count <= 1:
         raise HTTPException(409, "cannot remove the last admin")
@@ -2086,13 +2118,22 @@ def update_user(user_id: int, request: Request, payload: dict,
         role = payload.get("role")
         enabled = payload.get("enabled")
 
-        # Prevent removing the last admin (row[2] is the current role).
+        # Prevent removing the last admin. Disabling counts as removing: the
+        # guard used to fire only on a role change, so an admin could disable
+        # the last enabled admin (often themselves) and lock everyone out
+        # with no recovery path, because the admin row still existed.
         if role is not None:
             _assert_not_last_admin(conn, row[2], role)
+        if enabled is False and row[2] == "admin":
+            _assert_not_last_admin(conn, row[2])
 
         if username is not None:
-            if not username or len(username) > 128:
-                raise HTTPException(400, "invalid username")
+            _validate_username(username)
+            # Renaming the bootstrap account would make the next startup
+            # re-create admin/admin, which the review proved by doing it.
+            if row[1] == "admin" and username != "admin":
+                raise HTTPException(
+                    400, "the bootstrap account 'admin' cannot be renamed")
             try:
                 conn.connection.execute(_text(
                     "UPDATE users SET username = :u, updated_at = :now WHERE id = :id"
@@ -3405,6 +3446,7 @@ def create_user(request: Request, payload: UserCreateRequest,
     _same_origin(request)
     if not payload.username or not payload.password:
         raise HTTPException(400, "username and password are required")
+    _validate_username(payload.username)
     if payload.role not in ("admin", "operator", "viewer"):
         raise HTTPException(400, "role must be admin, operator or viewer")
     if len(payload.password) < 8:
@@ -3444,6 +3486,15 @@ def delete_user(user_id: int, request: Request, _: None = Depends(require_auth))
         if row is None:
             raise HTTPException(404, "user not found")
         _assert_not_last_admin(conn, row[1])
+        # Sessions MUST die with the account. user_sessions has no foreign
+        # key, and an Integer primary key reuses rowids on SQLite, so an
+        # orphan session row could be inherited by a later account -- the
+        # review proved a deleted viewer's token authenticating as a newly
+        # created admin. Deleting the sessions in the same transaction makes
+        # that impossible.
+        conn.connection.execute(_text(
+            "DELETE FROM user_sessions WHERE user_id = :id"
+        ), {"id": user_id})
         conn.connection.execute(_text(
             "DELETE FROM users WHERE id = :id"
         ), {"id": user_id})
@@ -5096,6 +5147,42 @@ def list_s3_credentials(_: None = Depends(require_auth)):
         conn.close()
 
 
+def _require_interactive_session(request: Request, what: str) -> str:
+    """Refuse an API-key caller for a secret-bearing S3 credential action.
+
+    An S3 credential IS a secret and its permission set is the whole
+    authorization surface of the S3 gateway. Letting an API key mint, edit,
+    revoke or reveal one creates a chain of secrets that bypasses the
+    delegation ceiling: the review proved a key scoped to only
+    ``post:/api/v1/admin/s3/credentials`` could create a credential with all
+    90 permissions (including s3:PutBucketPolicy and s3:DeleteBucket) and
+    receive its secret, then edit an existing least-privilege credential to
+    add destructive permissions. A human session is interactive, CSRF-fenced
+    and revocable, so that is the only principal allowed here.
+
+    Returns the actor name for the audit line.
+    """
+    if getattr(request.state, "api_key_scopes", None) is not None:
+        _log(f"denied: api-key attempted to {what} an S3 credential",
+             "security")
+        raise HTTPException(
+            403,
+            "S3 credentials can only be managed from an interactive "
+            "session, never with an API key",
+        )
+    return (getattr(request.state, "user", None) or {}).get("username") \
+        or "unknown"
+
+
+def _credential_error(exc: Exception) -> HTTPException:
+    """Map a credential-store failure without leaking the master-key path."""
+    if isinstance(exc, (RuntimeError, OSError)):
+        return HTTPException(
+            503, "S3 credentials are unavailable: the master key cannot be "
+                 "loaded")
+    return HTTPException(422, str(exc))
+
+
 @app.post("/api/v1/admin/s3/credentials", tags=["API keys"], status_code=201,
           summary="Issue encrypted S3 access credentials (secret displayed once)")
 @app.post("/api/v1/admin/s3-credentials", tags=["API keys"], status_code=201,
@@ -5103,16 +5190,18 @@ def list_s3_credentials(_: None = Depends(require_auth)):
 def issue_s3_credentials(request: Request, payload: S3KeyCreateRequest,
                          _: None = Depends(require_auth)):
     _same_origin(request)
+    actor = _require_interactive_session(request, "issue")
     conn = db_connect()
     try:
         try:
             key = S3CredentialStore(conn, load_master_key()).create(
                 payload.name, payload.permissions, expires_at=payload.expires_at
             )
-        except RuntimeError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise _credential_error(exc) from exc
+        _log(f"s3 credential issued: id={key.id} access={key.access_key} "
+             f"permissions={len(key.permissions)} "
+             f"expires_at={payload.expires_at}", "security", user=actor)
         return {"id": key.id, "access_key": key.access_key,
                 "secret_key": key.secret_key, "permissions": key.permissions}
     finally:
@@ -5137,18 +5226,9 @@ def reveal_s3_credential_secret(request: Request, identifier: str,
     A human session is interactive, CSRF-fenced and revocable, so it is the
     only principal allowed to see a secret.
     """
-    if getattr(request.state, "api_key_scopes", None) is not None:
-        _log("denied: api-key attempted to reveal an S3 credential secret",
-             "security")
-        raise HTTPException(
-            403,
-            "Credential secrets can only be revealed from an interactive "
-            "session, never with an API key",
-        )
+    actor = _require_interactive_session(request, "reveal the secret of")
     if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
         raise HTTPException(422, "Invalid credential identifier")
-    actor = (getattr(request.state, "user", None) or {}).get("username") \
-        or "unknown"
     conn = db_connect()
     try:
         try:
@@ -5187,6 +5267,7 @@ def update_s3_credentials(request: Request, identifier: str,
                           payload: dict = Body(...),
                           _: None = Depends(require_auth)):
     _same_origin(request)
+    actor = _require_interactive_session(request, "edit")
     conn = db_connect()
     try:
         try:
@@ -5198,10 +5279,13 @@ def update_s3_credentials(request: Request, identifier: str,
                 expires_at=payload.get("expires_at"),
                 clear_expiry=payload.get("clear_expiry") is True,
             )
-        except RuntimeError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise _credential_error(exc) from exc
+        _log(f"s3 credential edited: id={identifier} "
+             f"permissions={None if payload.get('permissions') is None else len(payload['permissions'])} "
+             f"expires_at={payload.get('expires_at')} "
+             f"clear_expiry={payload.get('clear_expiry') is True}",
+             "security", user=actor)
         return {"ok": True, "credential": updated}
     finally:
         conn.close()
@@ -5214,14 +5298,16 @@ def update_s3_credentials(request: Request, identifier: str,
 def revoke_s3_credentials(request: Request, identifier: str,
                           _: None = Depends(require_auth)):
     _same_origin(request)
+    actor = _require_interactive_session(request, "revoke")
     conn = db_connect()
     try:
         try:
             changed = S3CredentialStore(conn, load_master_key()).revoke(identifier)
-        except RuntimeError as exc:
-            raise HTTPException(503, str(exc)) from exc
+        except (RuntimeError, OSError, ValueError) as exc:
+            raise _credential_error(exc) from exc
         if not changed:
             raise HTTPException(404, "S3 key not found or already revoked")
+        _log(f"s3 credential revoked: id={identifier}", "security", user=actor)
         return {"ok": True}
     finally:
         conn.close()
@@ -5308,12 +5394,26 @@ def unlink_current_object(bucket: str, key: str = Query(..., min_length=1, max_l
                           _: None = Depends(require_api_scope("rest:objects:delete"))):
     conn = db_connect()
     try:
+        catalog = BucketCatalog(ManifestStore(conn))
         try:
-            deleted = BucketCatalog(ManifestStore(conn)).remove_current(
+            # A versioned bucket must keep history: a permanent head removal
+            # there destroys the only record of the previous version, and
+            # nothing in storage_removed_versions or the metadata journal
+            # would describe what happened. AWS semantics are a delete
+            # marker, which is exactly what delete_marker() writes.
+            if catalog.versioning_state(bucket) == "Enabled":
+                marker = catalog.delete_marker(bucket, key,
+                                               expected_generation=generation)
+                _log(f"unlink {bucket}/{key}: delete marker {marker}", "storage")
+                return {"ok": True, "unlinked": True, "delete_marker": marker}
+            deleted = catalog.remove_current(
                 bucket, key, expected_generation=generation
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "Bucket not found") from exc
+        _log(f"unlink {bucket}/{key}: removed current head", "storage")
         return {"ok": True, "unlinked": deleted}
     finally:
         conn.close()

@@ -90,6 +90,12 @@ object_aliases = Table(
            nullable=False),
 )
 
+# GC asks "is any alias still pointing at this object?" on every candidate,
+# and the alias index is also the dedup lookup. Without an index on the
+# SOURCE side that was a full table scan per object.
+Index("ix_storage_object_aliases_source",
+      object_aliases.c.source_object_id)
+
 writer_fences = Table(
     "storage_writer_fences", metadata,
     Column("object_id", String(36), ForeignKey("storage_objects.id"), primary_key=True),

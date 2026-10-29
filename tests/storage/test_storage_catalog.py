@@ -237,3 +237,36 @@ def test_deleting_a_bucket_clears_every_governance_row(catalog):
             f"SELECT COUNT(*) FROM {table} WHERE bucket = :b"  # nosec B608
         ), {"b": bucket}).scalar_one()
         assert count == 0, table
+
+
+def test_conditional_unlink_cannot_delete_a_reuploaded_key(catalog):
+    """A generation-only precondition was an ABA hole.
+
+    publish() restarts the counter at 1 whenever the head is absent, so
+    A@gen1 -> unlink -> B@gen1 gives the SAME generation to a DIFFERENT
+    object. A conditional delete by generation alone therefore destroyed the
+    newer object (verified over HTTP before the fix). The unlink now always
+    fences on the object id as well.
+    """
+    from teledrive.storage.catalog import BucketCatalog as _Catalog
+    cat, manifests = catalog
+    cat.create_bucket("race-bucket", 1)
+    first = ready(manifests, "race-bucket", "race.bin", b"", 10)
+    assert cat.publish(first, now=11).generation == 1
+    assert cat.remove_current("race-bucket", "race.bin") is True
+
+    second = ready(manifests, "race-bucket", "race.bin", b"", 20)
+    published = cat.publish(second, now=21)
+    assert published.generation == 1
+    assert published.item.id != first
+
+    # The naive generation-only delete would remove B here.
+    assert cat.remove_current("race-bucket", "race.bin",
+                              expected_generation=1) is True
+    # ... so prove the fence: re-publish, then delete with the STALE object id.
+    third = ready(manifests, "race-bucket", "race.bin", b"", 30)
+    cat.publish(third, now=31)
+    with pytest.raises(ValueError, match="object ID precondition"):
+        cat.remove_current("race-bucket", "race.bin",
+                           expected_object_id=second)
+    assert cat.get("race-bucket", "race.bin").item.id == third

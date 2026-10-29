@@ -30,17 +30,40 @@ api_keys = Table(
     Column("revoked", Boolean, nullable=False),
 )
 # Per-endpoint permissions: every REST bearer endpoint is individually
-# permissionable. The description doubles as the UI label.
+# permissionable. THIS is the single source of the route -> curated-name
+# mapping; web/permissions.py imports CURATED_ROUTES instead of repeating
+# the same nine pairs (they used to be written twice and could drift).
+#
+# (name, method, template, description)
+CURATED_PERMISSION_ROWS = (
+    ("rest:buckets:list", "GET", "/api/v1/buckets", "list buckets"),
+    ("rest:buckets:create", "POST", "/api/v1/buckets", "create a bucket"),
+    ("rest:buckets:delete", "DELETE", "/api/v1/buckets/{bucket}",
+     "remove an empty bucket"),
+    ("rest:objects:list", "GET", "/api/v1/buckets/{bucket}/objects",
+     "list current objects"),
+    ("rest:objects:list-versions", "GET", "/api/v1/buckets/{bucket}/versions",
+     "list a key's published versions"),
+    ("rest:objects:get", "GET", "/api/v1/buckets/{bucket}/content",
+     "stream object bytes (Range)"),
+    ("rest:objects:head", "HEAD", "/api/v1/buckets/{bucket}/content",
+     "object headers"),
+    ("rest:objects:put", "PUT", "/api/v1/buckets/{bucket}/content",
+     "upload object bytes"),
+    ("rest:objects:delete", "DELETE", "/api/v1/buckets/{bucket}/objects",
+     "unlink a current object"),
+)
+
+# name -> UI label, built from the rows above.
 ENDPOINT_PERMISSIONS = {
-    "rest:buckets:list": "GET /api/v1/buckets — list buckets",
-    "rest:buckets:create": "POST /api/v1/buckets — create a bucket",
-    "rest:buckets:delete": "DELETE /api/v1/buckets/{bucket} — remove an empty bucket",
-    "rest:objects:list": "GET /api/v1/buckets/{bucket}/objects — list current objects",
-    "rest:objects:list-versions": "GET /api/v1/buckets/{bucket}/versions — list a key's published versions",
-    "rest:objects:get": "GET /api/v1/buckets/{bucket}/content — stream object bytes (Range)",
-    "rest:objects:head": "HEAD /api/v1/buckets/{bucket}/content — object headers",
-    "rest:objects:put": "PUT /api/v1/buckets/{bucket}/content — upload object bytes",
-    "rest:objects:delete": "DELETE /api/v1/buckets/{bucket}/objects — unlink a current object",
+    name: f"{method} {template} — {text}"
+    for name, method, template, text in CURATED_PERMISSION_ROWS
+}
+
+# (METHOD, template) -> name, consumed by the web permission registry.
+CURATED_ROUTES = {
+    (method, template): name
+    for name, method, template, _text in CURATED_PERMISSION_ROWS
 }
 
 # Legacy grouped scopes stay valid and expand to endpoint sets, so keys

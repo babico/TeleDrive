@@ -149,17 +149,11 @@ def _is_read_permission(permission: str) -> bool:
 
 # Curated short names for the original REST bearer surface (backward
 # compatibility with issued keys and the S3 credential docs).
-CURATED_PERMISSIONS = {
-    ("GET", "/api/v1/buckets"): "rest:buckets:list",
-    ("POST", "/api/v1/buckets"): "rest:buckets:create",
-    ("DELETE", "/api/v1/buckets/{bucket}"): "rest:buckets:delete",
-    ("GET", "/api/v1/buckets/{bucket}/versions"): "rest:objects:list-versions",
-    ("GET", "/api/v1/buckets/{bucket}/objects"): "rest:objects:list",
-    ("DELETE", "/api/v1/buckets/{bucket}/objects"): "rest:objects:delete",
-    ("PUT", "/api/v1/buckets/{bucket}/content"): "rest:objects:put",
-    ("HEAD", "/api/v1/buckets/{bucket}/content"): "rest:objects:head",
-    ("GET", "/api/v1/buckets/{bucket}/content"): "rest:objects:get",
-}
+# The curated route -> permission mapping has ONE definition, in
+# teledrive/api_keys.py, because keys and the permission registry must agree
+# on the same names. This used to be a literal copy of the same nine pairs;
+# two sources for one fact would eventually drift.
+from teledrive.api_keys import CURATED_ROUTES as CURATED_PERMISSIONS
 
 # Short human descriptions for permission groups (path with {params}
 # folded to '*', trailing '/*' dropped — the same rule the UI uses).

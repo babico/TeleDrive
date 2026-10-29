@@ -233,6 +233,8 @@ jobs:
             tests/web/test_public_certificate.py \
             tests/web/test_api_key_delegation.py \
             tests/web/test_telegram_session_auth.py \
+            tests/web/test_user_admin_safety.py \
+            tests/s3/test_s3_credential_escalation.py \
             tests/web/test_settings_persistence.py \
             tests/web/test_website_admin.py \
             tests/web/test_auth_rbac.py \

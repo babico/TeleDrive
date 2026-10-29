@@ -303,10 +303,21 @@ class S3CredentialStore:
             raise ValueError("Unknown credential")
         if row[1]:
             raise ValueError("Revoked credentials cannot be edited")
+        # Editing an expired credential would be a revival: expiry is enforced
+        # at SigV4 time, so a new future expiry restores live access. A dead
+        # credential must be reissued, which leaves an honest audit trail.
+        current_expiry = self.db.connection.execute(select(
+            credentials.c.expires_at).where(
+            credentials.c.id == row[0])).scalar_one()
+        if current_expiry is not None and int(current_expiry) <= int(time.time()):
+            raise ValueError("Expired credentials cannot be edited; issue a "
+                             "new credential")
         values: dict = {}
         if name is not None:
             name = str(name).strip()
-            if not name or len(name) > 128:
+            # Same bound as create() -- the column is String(120), so a
+            # longer name was silently truncated or rejected by the backend.
+            if not name or len(name) > 120:
                 raise ValueError("Invalid credential name")
             values["name"] = name
         if permissions is not None:
@@ -316,7 +327,16 @@ class S3CredentialStore:
                 raise ValueError("Invalid permission set")
             values["permissions"] = json.dumps(sorted(set(permissions)))
         if expires_at is not None:
-            values["expires_at"] = int(expires_at)
+            # An edit must obey the same expiry bounds as create(), or it can
+            # revive an already-expired credential (or set a past date) and
+            # thereby grant real access at signature-verification time.
+            expires_at = int(expires_at)
+            now = int(time.time())
+            if (expires_at <= now
+                    or expires_at > now + 10 * 365 * 86400):
+                raise ValueError(
+                    "Expiration must be in the future (up to 10 years)")
+            values["expires_at"] = expires_at
         elif clear_expiry:
             values["expires_at"] = None
         if tags is not None:

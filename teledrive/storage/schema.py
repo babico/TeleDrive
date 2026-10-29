@@ -293,6 +293,21 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_hot_indexes(ctx: SchemaContext) -> None:
+    """Indexes for columns the hot paths filter on (append-only migration).
+
+    ``storage_object_aliases.source_object_id`` is read for every GC
+    candidate and for every dedup lookup; it had no index, so both were full
+    scans.
+    """
+    from teledrive.storage.manifest import object_aliases
+    # Defensive: a database created before the alias table existed gets it
+    # here too, so the index never references a missing table.
+    object_aliases.create(ctx.engine, checkfirst=True)
+    for index in object_aliases.indexes:
+        index.create(ctx.engine, checkfirst=True)
+
+
 def _step_gc_leases(ctx: SchemaContext) -> None:
     """Durable physical-GC leases (append-only migration).
 
@@ -389,6 +404,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("s3_config", _step_s3_config),
     ("legacy_columns", _step_legacy_columns),
     ("content_search", _step_content_search),
+    ("hot_indexes", _step_hot_indexes),
 ]
 
 # Bump by appending a step; never reorder or remove one.

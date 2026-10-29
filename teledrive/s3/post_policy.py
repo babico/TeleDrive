@@ -41,6 +41,18 @@ def parse_form(content_type: str, data: bytes):
     if (len(content_type) > 256 or not content_type.lower().startswith("multipart/form-data;")
             or "\r" in content_type or "\n" in content_type):
         raise SigV4Error("InvalidRequest", "Expected multipart/form-data")
+    # Count the boundary delimiters BEFORE parsing. BytesParser.parsebytes
+    # builds the whole MIME tree up front, so an anonymous 3.5 MiB body with
+    # 50 000 parts cost 34 seconds of CPU and 45 MiB regardless of the part
+    # cap applied afterwards. Counting delimiters is a linear byte scan, so
+    # the request is refused in milliseconds.
+    boundary_match = re.search(r'boundary="?([^";]{1,70})"?',
+                               content_type, re.IGNORECASE)
+    if boundary_match is None:
+        raise SigV4Error("InvalidRequest", "Multipart boundary is missing")
+    delimiter = b"--" + boundary_match.group(1).encode("latin-1", "replace")
+    if data.count(delimiter) > MAX_FORM_PARTS + 2:
+        raise SigV4Error("InvalidRequest", "Too many browser form parts")
     try:
         mime = ("Content-Type: " + content_type +
                 "\r\nMIME-Version: 1.0\r\n\r\n").encode("ascii") + data
@@ -49,9 +61,16 @@ def parse_form(content_type: str, data: bytes):
         raise SigV4Error("InvalidRequest", "Malformed upload form") from exc
     if not msg.is_multipart() or msg.defects:
         raise SigV4Error("InvalidRequest", "Malformed multipart upload")
-    items = list(msg.iter_parts())
-    if len(items) > MAX_FORM_PARTS:
-        raise SigV4Error("InvalidRequest", "Too many browser form parts")
+    # The part cap MUST be enforced while iterating, not after building the
+    # list. `list(msg.iter_parts())` materialises every parsed part first, so
+    # an anonymous request with ~50 000 parts in 3.5 MiB cost 34 seconds of
+    # CPU and 45 MiB -- before any signature exists to check. Stopping at
+    # cap+1 makes the work proportional to what the endpoint will accept.
+    items = []
+    for part in msg.iter_parts():
+        items.append(part)
+        if len(items) > MAX_FORM_PARTS:
+            raise SigV4Error("InvalidRequest", "Too many browser form parts")
     fields = {}
     file_bytes = None
     for part in items:

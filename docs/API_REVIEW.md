@@ -18,9 +18,9 @@ code **as reviewed**, not necessarily the current tree.
 | `gc_collect` | [high] preview and collect share one stale snapshot | **fixed** — the lease claim commits before re-verification, so every check runs in a fresh transaction |
 | `gc_collect` | [high] crash mid-object is unrecoverable and unaudited | **fixed** — the lease expires and the next run resumes; chunk deletion and the removed-versions write are idempotent |
 | `gc_collect` | [high] a scoped API key bypasses the admin role gate | **by design** — an API key exists only because an admin minted it with that exact scope, and delegation caps it; the role gate governs humans, the key is the grant |
-| `issue_api_key` | [medium] audit has no actor/id, written before validation, name unescaped | **open** |
-| `rotate_api_key` | [medium] 403/404/409 existence oracle | **open** |
-| `reveal_s3_credential_secret` | [medium] audit is in-memory only and viewer-readable | **open** |
+| `issue_api_key` | [medium] audit has no actor/id, written before validation, name unescaped | **fixed** — the line is written after the row exists, with the actor and the new key id; `_log` sanitises newlines for the buffer *and* the file |
+| `rotate_api_key` | [medium] 403/404/409 existence oracle | **fixed** — `scopes_for_identifier` returns None for revoked/expired, and `rotate` answers a uniform 404; one bounded, ordered resolver |
+| `reveal_s3_credential_secret` | [medium] audit is in-memory only and viewer-readable | **fixed** — durable `security_audit_events` (schema step 25) exposed at `/api/v1/admin/audit`, and the log buffer is admin-only |
 | telegram session | [high] an operator could bind a Telegram account and own the storage backend | **fixed** — `request-code`/`verify-code`/`DELETE` are admin-only; the read-only status and listing stay readable |
 | telegram session | [high] `verify-code` had no attempt cap (5-digit code, unlimited retries) | **fixed** — 5 wrong codes destroy the pending request |
 | `admin_list_shares` | [high] a viewer could list every share token, and the token was logged | **fixed** — share listing/revoke is admin-only and `/share/<token>` is redacted from the request log |
@@ -39,7 +39,7 @@ code **as reviewed**, not necessarily the current tree.
 | `remove_object_content` | [critical] generation ABA: a conditional delete destroyed a re-uploaded key (generation restarts at 1) | **fixed** — the unlink always fences on the object id, which is unique forever |
 | `remove_object_content` | [high] a lost CAS race returned `200 {"ok": true}` | **fixed** — rowcount 0 is now 409, matching the S3 path's 412 |
 | `remove_object_content` | [high] versioned buckets got no tombstone or history record | **fixed** — an Enabled bucket writes a real delete marker; the REST unlink is audit-logged with the key |
-| `remove_object_content` | [medium] legal hold / retention do not fence the unlink | **open** — bytes survive (GC re-checks the lock) and the S3 error is correct, but the REST unlink still hides the head |
+| `remove_object_content` | [medium] legal hold / retention do not fence the unlink | **fixed** — the REST unlink answers 403 for a hold or an open retention window, matching S3 |
 | `get_object_content` | [high] archived objects streamed with 200/206 (no tiering gate) | **fixed** — GET and HEAD answer 403 InvalidObjectState until restored |
 | `get_object_content` | [high] SSE-C objects sent `200` + Content-Length + zero bytes | **fixed** — 400 naming SSE-C on GET and HEAD instead of a silent empty body |
 | `get_object_content` | [medium] reads were invisible to access accounting, so tiering demoted actively-read objects | **fixed** — every REST read records the access |
@@ -74,7 +74,7 @@ code **as reviewed**, not necessarily the current tree.
 | replication / GC | [high] GC deleted only primary messages and then dropped the replica rows, leaving a full copy on another account forever | **fixed** — every replica chunk is passed to `transport.delete` before its row is removed |
 | batch delete | [high] a suspended bucket removed a COMPLIANCE-retained head with no lock check | **fixed** — the suspended branch enforces legal hold and retention |
 | batch delete / MPU / version delete | [high] the GC-enqueue calls raised `NameError` and were swallowed, so all three S3 paths were dead | **fixed** — `RetainedMediaGC` is imported |
-| batch delete / form upload | [medium] the form parser checked the part cap only after building the list (pre-auth CPU amplification) | **open** — measured 3.55 MB/50 000 parts at 34 s; bounded work is the next step |
+| batch delete / form upload | [medium] the form parser checked the part cap only after building the list (pre-auth CPU amplification) | **fixed** — the boundary count is checked before parsing: 34 s became 3 ms for a 50 000-part body |
 
 Open findings are tracked in `docs/POST_108_PLAN.md` Phase 4.
 

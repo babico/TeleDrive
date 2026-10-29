@@ -7,33 +7,33 @@ instructions are quoted where they constrain the outcome.
 
 | Item | Scope | State |
 |---|---|---|
-| Two remaining partials | `GetBucketAccelerateConfiguration` emits `<TransferAcceleratedStatus>` but AWS's element is `<Status>`, so boto3 parsed nothing. Same audit for `GetBucketRequestPayment`. Promote both to supported with a **real boto3** round-trip test. | in flight |
-| `ListDirectoryBuckets` | Honest answer for an account with zero directory buckets is 200 + empty result. Implement as a real always-empty listing, strict query validation. | in flight |
-| `CreateSession` | No directory buckets ever, so return the most accurate AWS error (`NoSuchBucket`) rather than a generic 501, rejecting malformed input 400. | in flight |
-| `WriteGetObjectResponse` | No Lambda runtime. Stays unsupported, but the rejection must name the reason. | in flight |
+| Two remaining partials | **DONE** (`ccd76b4`). The accelerate renderer emitted `<TransferAcceleratedStatus>`, so boto3 parsed nothing; it now emits `<Status>` and a real boto3 client over uvicorn asserts the value. RequestPayment was already correct and is proven the same way. | done |
+| `ListDirectoryBuckets` | **DONE** (`ccd76b4`). Real always-empty `200`, strict `continuation-token`/`max-directory-buckets` validation. | done |
+| `CreateSession` | **DONE** (`ccd76b4`). `400 InvalidBucketName` / `400 InvalidRequest` for an existing general bucket / `404 NoSuchBucket`; required accepting the real `s3express` SigV4 scope for this and ListDirectoryBuckets. | done |
+| `WriteGetObjectResponse` | **DONE** (`ccd76b4`). Stays unsupported; the rejection now names the missing Lambda runtime. | done |
 | `GetObjectTorrent` | Owner decision: stays unsupported. | settled |
-| Schema-init race (O4/O6) | One serialized migration coordinator with a real cross-process lock (SQLite file lock, PG advisory, MySQL GET_LOCK) and a `schema_version` row. Multi-process test. | in flight |
-| S3 credentials UI refresh | 84 scopes are a wall of checkboxes. Group by resource family, live search, presets, risk markers, rotate/revoke confirmations, relative timestamps. | in flight |
-| Release docs | CHANGELOG/UPGRADING/RELEASE up to date with the tree. | in flight |
+| Schema-init race (O4/O6) | **DONE** (`b91df33`). `teledrive/storage/schema.py` with flock / `pg_advisory_xact_lock` / `GET_LOCK`, 19 recorded steps, 5-process proof on all three backends. Warm constructor costs 4.9 us and emits zero SQL. | done |
+| S3 credentials UI refresh | **DONE** (`ca28afe`). 21 families, live search, 5 presets, 37 risk-marked scopes, rotate/revoke confirmations, no secret ever persisted client-side. | done |
+| Release docs | **DONE** (`ca28afe`), corrected again against the tree: 114/0/2 inventory, 90 scopes. | done |
 
 ## Phase 2 — authentication: remove Basic entirely
 
-**Owner:** *"basic authu komple kaldır istemem bu sıfır kurulum admin userınıda admin:admin olarak ilk kurulumda ekle eğer databasede zaten eklenmiş admin varsa üzerine yazma ve bunu harcode yap bi confige bağlama, P5 güzel devam"*
+**Landed in `b97bf62`.** **Owner:** *"basic authu komple kaldır istemem bu sıfır kurulum admin userınıda admin:admin olarak ilk kurulumda ekle eğer databasede zaten eklenmiş admin varsa üzerine yazma ve bunu harcode yap bi confige bağlama, P5 güzel devam"*
 
-- [ ] Delete HTTP Basic authentication completely — no `Authorization: Basic`
+- [x] Delete HTTP Basic authentication completely — no `Authorization: Basic`
       anywhere, no `WEB_PASSWORD` credential path, no fallback that treats the
       config password as a principal.
-- [ ] First-boot admin is created **unconditionally in code**, hardcoded as
+- [x] First-boot admin is created **unconditionally in code**, hardcoded as
       `admin` / `admin`, with `role=admin`, `enabled=1`.
-- [ ] Never overwrite an existing `admin` row: if the username already exists,
+- [x] Never overwrite an existing `admin` row: if the username already exists,
       leave the row (and its password hash) untouched.
-- [ ] Not driven by config: no `web.password`, no env var, no YAML switch
+- [x] Not driven by config: no `web.password`, no env var, no YAML switch
       controls whether the bootstrap admin exists.
-- [ ] Keep P5: ONE permission model for session and API key (explicit
+- [x] Keep P5: ONE permission model for session and API key (explicit
       role→permission map, no "GET is universally allowed").
-- [ ] Update `docs/UPGRADING.md`: Basic is gone, the bootstrap admin is
+- [x] Update `docs/UPGRADING.md`: Basic is gone, the bootstrap admin is
       `admin`/`admin`, change it on first login.
-- [ ] Startup must still refuse to run without a way to authenticate if the
+- [x] Startup must still refuse to run without a way to authenticate if the
       users table is somehow empty — the bootstrap covers that, so remove the
       `WEB_PASSWORD` startup requirement and say why.
 

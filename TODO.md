@@ -591,18 +591,32 @@ dependency order, each independently shippable; A and B first.
       same SQL state the S3 API reads. Writes are admin-only, audit-logged,
       and signed server-side with a real S3 credential; the browser never
       receives a secret key.
-- [ ] **S3 credentials console refresh — uncommitted.** The grouped
-      20-family catalogue, five presets, risk markers, rotate/revoke
-      confirmations, relative/absolute expiry and loading/empty/error states
-      are implemented in `web/static/credentials.js` +
-      `web/static/credentials.html`, with `tests/web/test_credentials_ui.py`
-      (27 tests) registered in the web CI list. Not yet committed, so it is
-      not yet a release claim; promote to `[x]` only when a commit carries it
-      and the full web/meta suite is green on that SHA.
-- [ ] **Phase K — SSE envelope** (owner decision, conflicts with
-      dedup/replication/search). Converts 1.
-- Kept by-design forever: RequestPayment, Accelerate — no honest
-  backing exists (billing/network).
+- [x] **S3 credentials console refresh** (`ca28afe`) — 21 resource
+      families with tri-state group selects, live search, five presets with
+      stated consequences, 37 risk-marked scopes with per-scope warnings,
+      rotate/revoke confirmations, absolute+relative expiry with an
+      "expires soon" state, and loading/empty/error states. A test fails if
+      the server enforces a scope the UI cannot show (which is how the two
+      newest Express scopes were caught), and the secret is proven never to
+      reach localStorage, sessionStorage, a cookie or a URL.
+- [x] **The last two partials were a bug, not a design limit** (`ccd76b4`):
+      the accelerate renderer emitted `<TransferAcceleratedStatus>`, the
+      internal enum name, so botocore — whose shape has exactly one member,
+      `Status` — parsed our document into an empty dict. Fixed, and both
+      payment and accelerate are now proven with a real boto3 client.
+- [x] **`ListDirectoryBuckets` and `CreateSession` promoted** (`ccd76b4`).
+      An account with no directory buckets has a real AWS answer (200 with
+      an empty result), and `CreateSession` refuses truthfully per name
+      class. Both needed the real `s3express` SigV4 scope, previously
+      rejected because verification hard-coded `/s3/`.
+- [x] **Inventory reaches its honest end state** — **114 supported /
+      0 partial / 2 unsupported**. Only `GetObjectTorrent` (owner decision:
+      no seeder) and `WriteGetObjectResponse` (no Lambda runtime) remain,
+      each rejecting with a named reason rather than a generic 501.
+- [x] **Phase K is moot** — SSE-C shipped (`565796b`) and
+      `GetBucketEncryption` is supported. Envelope encryption stays
+      rejected because it conflicts with dedup, replication and
+      content-search; that is a decision, not open work.
 
 ## 12. User feedback round 2 (2026-10-23)
 
@@ -781,9 +795,12 @@ spoofing). The rest are still open:
       `bucket_quotas`, `bucket_account_pins` or `share_links`. Re-creating a
       bucket with the same name can revive old grants. This is a security
       bug, not cosmetics (O10).
-- [ ] **#7 Schema init race and scattered migrations** — every store
-      constructor calls `create_all` outside the schema lock, and manual
-      ALTERs stand in for a migration system. See 14.2.
+- [x] **#7 Schema init race and scattered migrations** (`b91df33`) —
+      `teledrive/storage/schema.py` is now the only place that decides the
+      schema state or issues DDL: a WeakSet fast path, a `schema_migrations`
+      version probe, and a real cross-process lock (flock / `pg_advisory_xact_lock`
+      / `GET_LOCK`) around 19 recorded idempotent steps. Proved with five
+      simultaneous OS processes on SQLite, PostgreSQL and MySQL.
 - [ ] **#8 MySQL SQL leaks** — `ON CONFLICT` in the quota and pin upserts
       and `INSERT OR IGNORE` in the reindex path still fail on MySQL,
       although README and CI list MySQL as supported (O9).
@@ -819,12 +836,21 @@ This needs a migration baseline and a cross-process lock, not a patch.
 Both change the backward-compatibility contract, so neither was fixed
 silently.
 
-- [ ] **P5 — session/bearer asymmetry.** A viewer session can read every GET
+- [x] **P5 — session/bearer asymmetry** (`b97bf62`) — one role→permission
+      map derived from the live route table governs session and Basic alike;
+      the "any GET is allowed" branch is gone. API keys keep their scopes.
+- [ ] **P5 (historical note) — session/bearer asymmetry.** A viewer session can read every GET
       API route, while an API key for the same user needs an explicit
       permission per route. "Viewer" therefore means two different things.
       The decision is whether sessions should shrink to the route
       permission set or bearer keys should gain a role-derived default.
-- [ ] **P6 — legacy HTTP Basic is unconditional admin.** The configured
+- [x] **P6 — HTTP Basic removed entirely** (`b97bf62`). There is no
+      Basic path and no config credential: `web.user`/`web.password`/
+      `web.password_file`/`web.allow_insecure` are not settings any more and
+      are stripped on read. Identity is the login session or an API key.
+      First boot creates the hardcoded `admin`/`admin` administrator and
+      never overwrites an existing `admin` row.
+- [ ] **P6 (historical note) — legacy HTTP Basic was unconditional admin.** The configured
       `web.user`/`web.password` bypasses the database user and role system.
       Keeping it for scripts is defensible, but it needs a separate
       principal identity and an additional guard on admin-only routes, or

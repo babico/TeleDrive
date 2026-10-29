@@ -276,11 +276,28 @@ class ApiKeyStore:
         return int(row[1]) if row[1] is not None else None
 
     def scopes_for_identifier(self, identifier: str) -> frozenset[str] | None:
-        """Effective permissions of a key by id/prefix (None if absent)."""
-        row = self.db.connection.execute(
+        """Effective permissions of a LIVE key by id/prefix (None otherwise).
+
+        Revoked and expired keys return None here, like an unknown one, so a
+        caller cannot distinguish "does not exist" from "exists but is
+        privileged" by the status its delegation gate produces. The lookup is
+        also bounded and ordered: a prefix could match several rows, and an
+        unordered ``.first()`` made the answer depend on row order.
+        """
+        if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
+            return None
+        # Deterministic when a prefix is ambiguous: prefer the exact id.
+        statement = (
             select(api_keys.c.scopes)
             .where((api_keys.c.id == identifier)
-                   | (api_keys.c.prefix == identifier))).first()
+                   | (api_keys.c.prefix == identifier))
+            .order_by(
+                (api_keys.c.id == identifier).desc(),
+                api_keys.c.created_at.desc(),
+            )
+            .limit(1)
+        )
+        row = self.db.connection.execute(statement).first()
         if row is None:
             return None
         return expand_scopes(json.loads(row[0]))
@@ -295,14 +312,33 @@ class ApiKeyStore:
 
     def rotate(self, identifier: str, *, now: int | None = None) -> IssuedKey:
         now = int(time.time()) if now is None else now
-        old = self.db.connection.execute(
-            select(api_keys.c.name, api_keys.c.scopes, api_keys.c.expires_at)
-            .where(api_keys.c.id == identifier, api_keys.c.revoked.is_(False))
+        # Accept the same identifier forms as the caller used to authorize:
+        # id OR prefix, resolved deterministically to one row.
+        if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
+            raise FileNotFoundError("API key not found")
+        row = self.db.connection.execute(
+            select(api_keys.c.id, api_keys.c.name, api_keys.c.scopes,
+                   api_keys.c.expires_at)
+            .where((api_keys.c.id == identifier)
+                   | (api_keys.c.prefix == identifier))
+            .order_by((api_keys.c.id == identifier).desc(),
+                      api_keys.c.created_at.desc())
+            .limit(1)
         ).first()
-        if old is None:
-            raise FileNotFoundError("API key not found or revoked")
-        if old[2] is not None and old[2] <= now:
-            raise ValueError("Cannot rotate expired key")
+        if row is None or row[3] is not None and row[3] <= now:
+            # Unknown, revoked and expired all answer the same way. A distinct
+            # status per state was an existence oracle: a caller holding only
+            # the rotate permission could learn which identifiers exist and
+            # which are privileged.
+            raise FileNotFoundError("API key not found")
+        identifier = row[0]
+        old = (row[1], row[2], row[3])
+        # A revoked key must not rotate even if the row was found by prefix.
+        live = self.db.connection.execute(
+            select(api_keys.c.revoked).where(api_keys.c.id == identifier)
+        ).scalar()
+        if live:
+            raise FileNotFoundError("API key not found")
         permissions = json.loads(old[1])
         # Keep creation+revoke in one transaction, so no partial rotation.
         token = "td_live_" + secrets.token_urlsafe(32)

@@ -535,6 +535,24 @@ class MultipartStore:
              .order_by(completion_parts.c.position)).all()
             if [(p.number, p.etag) for p in original] != selected:
                 raise MultipartError("InvalidPart", "Completion part list differs from committed object")
+            # A replay must honour the SAME write preconditions as the first
+            # completion. Returning early ignored them, so a client that had
+            # since overwritten the key received 200 with the SUPERSEDED
+            # ETag while GET served the newer bytes.
+            if expected_generation is not None or expected_object_id is not None:
+                current = self.db.connection.execute(select(
+                    heads.c.object_id, heads.c.generation).where(
+                    heads.c.bucket == bucket,
+                    heads.c.key_hash == self.catalog._keyhash(key))).first()
+                actual_generation = int(current[1]) if current else 0
+                actual_object = current[0] if current else None
+                if ((expected_generation is not None
+                     and expected_generation != actual_generation)
+                        or (expected_object_id is not None
+                            and expected_object_id != actual_object)):
+                    raise MultipartError(
+                        "PreconditionFailed",
+                        "Multipart destination changed", 412)
             final = self.manifests.get(row["completed_object_id"])
             return CompletedUpload(final.id, row["completed_etag"], final.size)
         if lease_seconds < 5:
@@ -751,6 +769,21 @@ class MultipartStore:
                     if moved.rowcount != 1:
                         raise MultipartError("OperationAborted", "Concurrent object replacement", 409)
 
+                # A multipart completion IS a publish, so the destination
+                # bucket's default object lock applies exactly as it does to
+                # a single PUT. Without this, a bucket configured for
+                # GOVERNANCE/COMPLIANCE retention accepted an unprotected
+                # object through the multipart API -- the WORM guarantee
+                # depended on which write API the client chose. Written in
+                # the same transaction as the head CAS.
+                lock_config = self.catalog.object_lock_config(bucket)
+                if lock_config and lock_config.get("default_days"):
+                    self.db.connection.execute(update(objects).where(
+                        objects.c.id == object_id).values(
+                        retention_mode=lock_config["default_mode"],
+                        retention_until_ns=time.time_ns()
+                        + int(lock_config["default_days"]) * 86400
+                        * 1_000_000_000))
                 self.catalog._record_published_uncommitted(
                     self.manifests.get(object_id)
                 )

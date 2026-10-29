@@ -57,7 +57,8 @@ from teledrive.s3.website import (
 )
 from teledrive.storage.gc import StorageGCInventory
 from teledrive.storage.gc_collect import RetainedMediaGC
-from teledrive.storage.manifest import ManifestStore
+from teledrive.storage.manifest import ManifestStore, objects
+from sqlalchemy import select as _sa_select
 from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.copy import copy_object, CopyConflict
@@ -230,10 +231,30 @@ def _extract_user(request: Request) -> str:
     return "anonymous"
 
 
+# A log LINE must not be able to contain a line break: several log call
+# sites interpolate names, keys and exception text, and a newline let a
+# caller forge a second record ("[2026-01-01] [system] [users] ...") that
+# /api/logs serves as genuine. Control characters are stripped at the single
+# place every record is built, so no call site has to remember.
+_LOG_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _log_safe(value) -> str:
+    text_value = str(value)
+    text_value = text_value.replace("\r\n", " ").replace("\r", " ")
+    text_value = text_value.replace("\n", " ")
+    return _LOG_CONTROL_RE.sub("", text_value)
+
+
 def _log(msg: str, source: str = "web", user: str = "system") -> None:
     """Append a timestamped, user-tagged, source-tagged entry to LOG_BUFFER."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    entry = f"[{ts}] [{user}] [{source}] {msg}"
+    # Sanitise ONCE and use the same values everywhere: the in-memory buffer
+    # and the durable rotating file must not disagree about what a log line
+    # is, or a newline could forge a record in one and not the other.
+    safe_user, safe_source, safe_msg = (_log_safe(user), _log_safe(source),
+                                        _log_safe(msg))
+    entry = f"[{ts}] [{safe_user}] [{safe_source}] {safe_msg}"
     LOG_BUFFER.append(entry)
     # Push to live WebSocket subscribers. _log can run in worker threads,
     # so the handoff to the main event loop must be thread-safe.
@@ -247,10 +268,10 @@ def _log(msg: str, source: str = "web", user: str = "system") -> None:
         import logging as _logging
         record = _logging.LogRecord(
             name="teledrive", level=_logging.INFO, pathname="", lineno=0,
-            msg=msg, args=(), exc_info=None
+            msg=safe_msg, args=(), exc_info=None
         )
-        record.source = source
-        record.user = user
+        record.source = safe_source
+        record.user = safe_user
         record.created = time.time()
         if _FILE_LOG_HANDLER is not None:
             _FILE_LOG_HANDLER.emit(record)
@@ -1570,9 +1591,13 @@ def _byte_range(value: str | None, size: int) -> tuple[int, int, bool]:
     """HTTP Range with inclusive input -> half-open output; 416 on invalid input."""
     if value is None:
         return 0, size, False
-    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
+    # Bound the digit count BEFORE int(): CPython refuses to convert an
+    # integer literal longer than ~4300 digits, and the ValueError escaped as
+    # a 500. A range header that long can only be nonsense, so it is a 416.
+    match = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", value.strip())
     if match is None or not (match.group(1) or match.group(2)):
-        raise HTTPException(416, "Unsupported byte range", headers={"Content-Range": f"bytes */{size}"})
+        raise HTTPException(416, "Unsupported byte range",
+                            headers={"Content-Range": f"bytes */{size}"})
     first, last = match.groups()
     if size == 0:
         raise HTTPException(416, "Empty object has no satisfiable range",
@@ -2031,7 +2056,16 @@ def issue_api_key(request: Request, payload: KeyCreateRequest, _: None = Depends
                 extra_allowed=route_permissions)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        return {"id": key.id, "token": key.value, "prefix": key.prefix, "scopes": key.scopes}
+        # Log AFTER the row exists, with the actor and the new key's id:
+        # logging before the store call made a rejected request read as a
+        # successful issuance, and "system" made the entry unattributable.
+        _log(f"issue api key: id={key.id} prefix={key.prefix} "
+             f"scopes={key.scopes} expires_at={payload.expires_at}",
+             "api-keys",
+             user=(getattr(request.state, "user", None) or {}).get(
+                 "username") or "system")
+        return {"id": key.id, "token": key.value, "prefix": key.prefix,
+                "scopes": key.scopes, "expires_at": payload.expires_at}
     finally:
         conn.close()
 
@@ -2064,14 +2098,18 @@ def rotate_api_key(identifier: str, request: Request, _: None = Depends(require_
         target_scopes = ApiKeyStore(conn).scopes_for_identifier(identifier)
         _require_within_delegation(
             request, frozenset(target_scopes or ()), "key rotation")
-        _log(f"rotate api key: id={identifier}", "api-keys")
         try:
             key = ApiKeyStore(conn).rotate(identifier)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return {"id": key.id, "token": key.value, "prefix": key.prefix, "scopes": key.scopes}
+        _log(f"rotate api key: old={identifier} new={key.id} "
+             f"prefix={key.prefix}", "api-keys",
+             user=(getattr(request.state, "user", None) or {}).get(
+                 "username") or "system")
+        return {"id": key.id, "token": key.value, "prefix": key.prefix,
+                "scopes": key.scopes}
     finally:
         conn.close()
 
@@ -3728,16 +3766,19 @@ async def _stream_object_response(bucket: str, key: str, request: Request, *,
         except FileNotFoundError as exc:
             raise HTTPException(404, "Object not found") from exc
         _rest_read_gate(manifests, catalog, item)
-        if count_access:
-            # Without this, tiering's idle clock demotes an object that is
-            # actively read, and the next S3 GET answers 403.
-            catalog.record_object_access(item.id)
-            conn.commit()
+        # Parse the range BEFORE counting: a 416 is not a read, and counting
+        # it kept objects warm and inflated the statistics -- the opposite of
+        # what the counter exists for.
         if allow_range:
             start, end, partial = _byte_range(
                 request.headers.get("range"), item.size)
         else:
             start, end, partial = 0, item.size, False
+        if count_access:
+            # Without this, tiering's idle clock demotes an object that is
+            # actively read, and the next S3 GET answers 403.
+            catalog.record_object_access(item.id)
+            conn.commit()
         transport = storage_transport(conn)
         root = Path(STORAGE_SCRATCH_DIR)
         _secure_mkdir(root)
@@ -5558,6 +5599,29 @@ def unlink_current_object(bucket: str, key: str = Query(..., min_length=1, max_l
     conn = db_connect()
     try:
         catalog = BucketCatalog(ManifestStore(conn))
+        # A legal hold or an open retention window forbids removing the
+        # object, and the S3 path already answers AccessDenied for it. The
+        # REST unlink only hid the head, so the same logical delete behaved
+        # differently depending on which surface it came from.
+        try:
+            held_item = catalog.get(bucket, key).item
+        except FileNotFoundError:
+            held_item = None
+        if held_item is not None:
+            lock_row = catalog.db.connection.execute(
+                _sa_select(objects.c.legal_hold,
+                           objects.c.retention_until_ns)
+                .where(objects.c.id == held_item.id)).first()
+            if lock_row is not None:
+                if bool(lock_row[0]):
+                    raise HTTPException(
+                        403, "Object is under legal hold and cannot be "
+                             "unlinked")
+                if (lock_row[1] is not None
+                        and int(lock_row[1]) > time.time_ns()):
+                    raise HTTPException(
+                        403, "Object is under retention and cannot be "
+                             "unlinked")
         try:
             # A versioned bucket must keep history: a permanent head removal
             # there destroys the only record of the previous version, and
@@ -6035,6 +6099,20 @@ async def _serve_site(bucket: str, path: str, request: Request) -> Response:
             conn.close()
             return _site_not_found()
 
+        # The public site is a READ surface, so it must obey the same gate as
+        # every other one. Without this, an SSE-C object answered 200 with a
+        # non-zero Content-Length and zero body bytes (a client reads that as
+        # a successful empty page), and an archived object streamed normally
+        # instead of answering InvalidObjectState.
+        manifests = ManifestStore(conn)
+        try:
+            _rest_read_gate(manifests, catalog, item)
+        except HTTPException:
+            # A public site never explains WHY: an anonymous client gets the
+            # same uniform 404 as a missing key.
+            conn.close()
+            return _site_not_found()
+
         headers, status_code = _site_headers(catalog, item, status_code)
         if request.method == "HEAD":
             conn.close()
@@ -6043,7 +6121,7 @@ async def _serve_site(bucket: str, path: str, request: Request) -> Response:
         root = Path(STORAGE_SCRATCH_DIR)
         _secure_mkdir(root)
         engine = TelegramObjectStorage(
-            ManifestStore(conn), transport,
+            manifests, transport,
             chunk_size=RECOMMENDED_CHUNK_SIZE, scratch_directory=root)
     except BaseException:
         conn.close()

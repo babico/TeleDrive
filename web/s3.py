@@ -500,7 +500,9 @@ def _range(value: str | None, size: int) -> tuple[int, int, bool]:
     if value is None:
         return 0, size, False
     import re
-    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
+    # Same digit bound as the REST path: an over-long integer raises before
+    # any comparison and would escape as a 500 instead of InvalidRange.
+    match = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", value.strip())
     if not match or not (match.group(1) or match.group(2)) or size <= 0:
         raise SigV4Error("InvalidRange", "Unsupported byte range")
     first, last = match.groups()
@@ -3101,14 +3103,40 @@ async def _handle_object_lock_controls(ctx: _S3RequestContext) -> Response:
                 raise ObjectLockError("MalformedXML",
                                       "Lock control XML exceeds 16 KiB")
         body = bytes(payload)
-        # The request body is signed with an x-amz-content-sha256 digest.
+        # The body MUST be bound to what the signature covered. A presigned
+        # PUT signs UNSIGNED-PAYLOAD and can carry a signed
+        # x-amz-checksum-sha256 instead, so checking only
+        # x-amz-content-sha256 let such a URL be replayed with a DIFFERENT
+        # Retention document -- the signature proved the URL, not the body.
+        import hashlib as _hashlib
+        body_digest = _hashlib.sha256(body).hexdigest()
         signed_digest = request.headers.get("x-amz-content-sha256", "")
+        bound = False
         if signed_digest and signed_digest not in STREAMING_MODES:
-            import hashlib as _hashlib
-            if not hmac.compare_digest(
-                    signed_digest, _hashlib.sha256(body).hexdigest()):
+            if not hmac.compare_digest(signed_digest, body_digest):
                 raise ObjectLockError("XAmzContentSHA256Mismatch",
                                       "Lock control body checksum mismatch")
+            bound = True
+        checksum = request.headers.get("x-amz-checksum-sha256", "")
+        if checksum:
+            import base64 as _base64
+            try:
+                expected = _base64.b64decode(checksum, validate=True)
+            except Exception:
+                raise ObjectLockError(
+                    "InvalidRequest", "Malformed x-amz-checksum-sha256") from None
+            if not hmac.compare_digest(expected, bytes.fromhex(body_digest)):
+                raise ObjectLockError("BadDigest",
+                                      "Lock control body checksum mismatch")
+            bound = True
+        elif signed_digest in STREAMING_MODES and not bound:
+            # A streaming-payload PUT without a verifiable checksum cannot be
+            # bound to the signed request at all, so it is refused rather
+            # than accepting an unverifiable retention change.
+            raise ObjectLockError(
+                "InvalidRequest",
+                "A streaming-payload lock control requires "
+                "x-amz-checksum-sha256")
         try:
             root = SafeET.fromstring(body)
         except (ET.ParseError, DefusedXmlException) as exc:
@@ -4757,7 +4785,11 @@ async def _handle(request: Request):
 
         master = load_master_key()
         db = db_connect()
-        store = S3CredentialStore(db, master)
+        # No schema work before the signature is verified: the constructor's
+        # ensure_schema() used to run for every unauthenticated request that
+        # reached the gateway, so a stranger could trigger a migration. A
+        # missing table makes resolve() return None, which fails closed.
+        store = S3CredentialStore(db, master, ensure=False)
         ctx = _S3RequestContext(
             request=request, db=db, store=store, master=master,
             bucket=bucket, key=key,

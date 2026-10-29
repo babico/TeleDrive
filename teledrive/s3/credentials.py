@@ -169,11 +169,19 @@ class IssuedS3Credential:
 
 
 class S3CredentialStore:
-    def __init__(self, database: Database, master_key: bytes):
+    def __init__(self, database: Database, master_key: bytes, *,
+                 ensure: bool = True):
         self.db = database
         self.cipher = Fernet(master_key)
-        from teledrive.storage.schema import ensure_schema
-        ensure_schema(database.engine)
+        # ``ensure=False`` is for the pre-authentication path: the S3 gateway
+        # must not run schema DDL for an unauthenticated request, or anyone
+        # who can reach the port can trigger a migration. Signature
+        # verification only needs a read, and a missing table reads as "no
+        # such credential" -- which fails closed. Every write path keeps the
+        # default.
+        if ensure:
+            from teledrive.storage.schema import ensure_schema
+            ensure_schema(database.engine)
 
     def create(self, name: str, permissions: list[str], *,
                expires_at: int | None = None, now: int | None = None,

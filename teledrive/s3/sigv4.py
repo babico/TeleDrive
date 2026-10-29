@@ -287,9 +287,12 @@ def presign_get_url(endpoint: str, bucket: str, key: str, access_key: str,
     stamp = clock.strftime("%Y%m%dT%H%M%SZ")
     date = stamp[:8]
     host = endpoint.split("://", 1)[-1].rstrip("/")
+    # Preserve EVERY segment byte-for-byte, including empty ones: the
+    # verifier canonicalises the request path as received, so dropping empty
+    # segments signed a DIFFERENT object than the one requested -- "a//b"
+    # produced a URL for "a/b", and a trailing "dir/" dropped its slash.
     path = "/" + "/".join(
-        quote(segment, safe="-_.~") for segment in (bucket, *key.split("/"))
-        if segment != "")
+        quote(segment, safe="-_.~") for segment in (bucket, *key.split("/")))
     scope = f"{date}/{region}/s3/aws4_request"
     pairs = [
         ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),

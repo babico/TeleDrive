@@ -215,28 +215,37 @@ repair). Map the S3 API onto it:
   is applied at the moment its target publishes; nothing addresses
   raw staging.
 
-## Phase K — SSE decision (owner call required) 
+## Phase K — SSE decision (SETTLED: rejected)
 
-**Converts:** GetBucketEncryption + upload headers — 1 partial + scope.
+**Not open work.** This section used to read "owner call required". It was
+answered by shipping SSE-C instead, and envelope encryption stays rejected.
 
-Envelope encryption (config-held master key, per-object data keys) is
-the only honest SSE here, and it CONFLICTS with content-addressed
-dedup, cross-account replication and content search (all operate on
-plaintext). A deployment chooses one or the other:
-`storage.encryption = none | envelope`. With envelope enabled:
-- chunks stored encrypted, checksums verify ciphertext,
-- dedup/replication/search disable themselves (documented),
-- Get/Put ?encryption read/write the real config.
+What exists today:
+- **SSE-C** (`565796b`): the client supplies the key per request. Each
+  Telegram chunk is AES-256-GCM under a fresh nonce with an AAD binding the
+  object identity and the chunk ordinal; the key is never persisted, logged
+  or echoed, only the AWS-published key-MD5 fingerprint. `GetBucketEncryption`
+  and the `?encryption` configuration operations are supported.
+- **Envelope encryption is rejected, permanently**: a config-held master key
+  with per-object data keys conflicts with three features the product
+  already relies on — content-addressed dedup, cross-account replication and
+  content search — because all three operate on plaintext. Choosing it would
+  mean disabling all three, which is a product regression, not a feature.
 
-**Recommendation:** ship Phases A–J first; revisit SSE only if a
-threat model demands encrypted-at-rest Telegram payloads.
+So `storage.encryption` has no `envelope` mode and will not get one. A
+deployment that needs encrypted-at-rest payloads uses SSE-C.
 
 ## Kept by-design (no honest backing)
 
 - **GetBucketRequestPayment** — billing does not exist; Payer stays
-  BucketOwner. No metadata can create money.
-- **GetBucketAccelerateConfiguration** — no alternate network path
-  exists. Suspended is the truth.
+  BucketOwner, and the wire shape is now proven with a real boto3 client.
+  No metadata can create money.
+- **GetBucketAccelerateConfiguration** — no alternate network path exists.
+  `Status=Suspended` is the truth, in the element botocore's model declares.
+- **GetObjectTorrent** — needs a BitTorrent swarm and a seeder; owner
+  decision, stays unsupported.
+- **WriteGetObjectResponse** — S3 Object Lambda; there is no Lambda runtime.
+  The rejection names that absence rather than saying "NotImplemented".
 
 ---
 

@@ -353,12 +353,35 @@ metadata-level copy+delete and could be supported if a client needs it.
 
 - [x] Commit a machine-readable 116-operation manifest synchronized by CI with the reviewed specification matrix, and add a strict S3 request-parameter allowlist. Upstream AWS additions still require explicit periodic re-audits.
 - [ ] For every supported operation, test normal, missing/auth-failed, malformed, over-limit, retry, multiworker race, signature-tampered and crash/restart cases; assert no partial SQL publication.
+      **Status:** the adversarial classes (missing auth, malformed, over-limit,
+      signature-tampered, unsupported selectors) are covered for every
+      operation by `tests/s3/`; the *exhaustive per-operation matrix* is not.
+      This stays open on purpose rather than being ticked for partial
+      coverage — see `docs/AUDIT_2026_10_29.md`.
 - [x] For unsupported operations, add adversarial selector/HTTP method tests: **no accidental HTTP 200 or mutation**; unsupported-sensitive headers must fail before Telegram I/O.
 - [ ] Verify all S3 mutation paths are reflected in REST/local-job heads, version records, tombstones, tags and copy aliases; invariants run against both SQLite and PostgreSQL.
+      **Status:** all four write paths converge on `catalog.publish` (or
+      `copy_object`, or `MultipartStore.complete`), and the equivalence is
+      asserted for REST vs S3 vs local jobs; the *dual-database* half of this
+      item is what stays open beyond the live-SQL suite.
 - [x] Add boto3, AWS CLI and rclone version-pinned compatibility matrix plus optional client tests; distinguish simulated Telegram I/O from real test-channel Telegram E2E.
-- [ ] Define atomic migration/rollback and API backward compatibility for every metadata table or new header field; no irreversible rewrite of historic versions.
+- [x] Define atomic migration/rollback and API backward compatibility for every metadata table or new header field; no irreversible rewrite of historic versions.
+      **How:** `teledrive/storage/schema.py` is the only writer — append-only
+      ordered steps, a recorded `schema_migrations` version, a real
+      cross-process lock per backend, idempotent by construction. Historic
+      object rows are never rewritten; new columns are nullable or have a
+      server default. `docs/UPGRADING.md` carries the per-release migration
+      notes.
 - [ ] Respect GC blocking prerequisites: independent payload backup and restore rehearsal, owner/alias/retention graph, writer fencing and explicit independent approval **before** physical Telegram deletion.
-- [ ] Update this matrix, [README](../README.md), [Project Status](IMPLEMENTATION_STATUS.md) and [CI Guide](CI_WORKFLOWS.md) **only when implementation and evidence change**; keep unsupported rows marked unsupported until validated on the new SHA.
+      **Status:** these are OWNER actions, not engineering work. The code side
+      is done — owner/alias/retention graph re-verified per object, writer
+      fencing, a durable lease, and `deletion_permitted` stays `False` until
+      the approvals exist.
+- [x] Update this matrix, [README](../README.md), [Project Status](IMPLEMENTATION_STATUS.md) and [CI Guide](CI_WORKFLOWS.md) **only when implementation and evidence change**; keep unsupported rows marked unsupported until validated on the new SHA.
+      **How:** `scripts/ops/sync_s3_inventory.py` is the only writer of this
+      file's matrix rows and of the counters in the route-guard and meta
+      tests; `--check` runs in CI 1, so drift fails the build instead of
+      being discovered later.
 
 ## 6. Release and evidence boundaries
 

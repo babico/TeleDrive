@@ -1,7 +1,12 @@
 # 02a — `web/deps.py` + `web/errors.py` (step 2 of the `web/app.py` split)
 
-Base commit: `f09db82`. Move-only. No behaviour change, no route moved, no
+Planned base: `f09db82`. Move-only. No behaviour change, no route moved, no
 test edited.
+
+While this step was in progress another commit (`6a364c4`, buckets.js
+extraction) landed on `main`. It does not touch `web/app.py`
+(`git diff f09db82 6a364c4 -- web/app.py` is empty), so this move is the
+move against `f09db82`'s `web/app.py`, committed on top of `6a364c4`.
 
 ## What moved
 
@@ -162,7 +167,8 @@ The single failure is
 `tests/meta/test_ci_workflows.py::test_every_test_file_is_referenced_by_a_real_ci_workflow`
 (`tests/web/test_page_composition.py` is not named in any workflow). It is not
 caused by this move: the test reads only `tests/**` and `.github/workflows/**`,
-neither of which is touched (`git status` shows only `web/app.py` modified plus
-the two new modules), and running that one test in a clean worktree of
-`f09db82` fails identically. A later agent must schedule that module or relax
-the test; it is outside a move-only commit.
+neither of which this commit touches, and running that one test in a clean
+worktree of `6a364c4` (the commit that added `test_page_composition.py`) fails
+identically. `6a364c4` landed concurrently with this step; whoever owns it must
+schedule that module or relax the test. It is outside a move-only commit and
+was deliberately not fixed here.

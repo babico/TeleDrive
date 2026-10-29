@@ -64,6 +64,7 @@ from teledrive.storage.catalog import BucketCatalog
 from teledrive.stores import pins as _pin_store
 from teledrive.stores import sessions as _session_store
 from teledrive.stores import shares as _share_store
+from teledrive.stores import telegram_pending as _pending_store
 from teledrive.stores import users as _user_store
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
@@ -2759,11 +2760,7 @@ def _record_verify_attempt(token: str) -> None:
     """Count one failed verification without extending the request's life."""
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "UPDATE telegram_session_pending SET attempts = attempts + 1 "
-            "WHERE token = :token"), {"token": token})
-        conn.connection.commit()
+        _pending_store.bump_attempts(conn, token)
     except Exception:
         pass
     finally:
@@ -2773,11 +2770,7 @@ def _record_verify_attempt(token: str) -> None:
 def _consume_pending_session_token(token: str) -> None:
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "DELETE FROM telegram_session_pending WHERE token = :token"
-        ), {"token": token})
-        conn.connection.commit()
+        _pending_store.consume(conn, token)
     finally:
         conn.close()
 
@@ -2941,20 +2934,15 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
     # Store pending state in DB (persistent across restarts).
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "DELETE FROM telegram_session_pending WHERE created_at < :cutoff"
-        ), {"cutoff": now - 300})
-        conn.connection.execute(_text(
-            "INSERT INTO telegram_session_pending (token, api_id, api_hash, phone, "
-            "phone_code_hash, session_string, channel, strategy, created_at) "
-            "VALUES (:token, :api_id, :api_hash, :phone, :pch, :sess, :channel, "
-            ":strategy, :now)"
-        ), {"token": token, "api_id": payload.api_id, "api_hash": payload.api_hash,
-            "phone": payload.phone, "pch": phone_code_hash, "sess": request_session,
-            "channel": channel, "strategy": payload.strategy or "round_robin",
-            "now": now})
-        conn.connection.commit()
+        # One transaction: the stale-row purge and the new request commit
+        # together when create() commits.
+        _pending_store.purge_older_than(conn, now - 300, commit=False)
+        _pending_store.create(
+            conn, token=token, api_id=payload.api_id,
+            api_hash=payload.api_hash, phone=payload.phone,
+            phone_code_hash=phone_code_hash, session_string=request_session,
+            channel=channel, strategy=payload.strategy or "round_robin",
+            created_at=now)
     finally:
         conn.close()
 
@@ -2979,19 +2967,18 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
 
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT api_id, api_hash, phone, phone_code_hash, session_string, "
-            "channel, strategy, created_at, attempts FROM "
-            "telegram_session_pending WHERE token = :token"
-        ), {"token": payload.token}).fetchone()
+        pending = _pending_store.get(conn, payload.token)
     finally:
         conn.close()
-    if row is None:
+    if pending is None:
         raise HTTPException(404, "No pending code request (expired, invalid "
                                  "token, or already used). Request a new code.")
-    api_id, api_hash, phone, phone_code_hash, request_session, channel, \
-        strategy, created_at, attempts = row
+    api_id, api_hash, phone = (pending["api_id"], pending["api_hash"],
+                               pending["phone"])
+    phone_code_hash = pending["phone_code_hash"]
+    request_session = pending["session_string"]
+    channel, strategy = pending["channel"], pending["strategy"]
+    created_at, attempts = pending["created_at"], pending["attempts"]
     # A Telegram login code is five digits. Telegram throttles the send, but
     # not the verify side reliably, so cap wrong attempts here: past the
     # budget the pending request is destroyed and a fresh code is required.

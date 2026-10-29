@@ -9,7 +9,7 @@ import pytest
 
 from teledrive.db import connect_database
 from teledrive.storage import quota
-from teledrive.stores import pins, sessions, shares, users
+from teledrive.stores import pins, sessions, shares, telegram_pending, users
 
 
 @pytest.fixture
@@ -227,3 +227,43 @@ def test_user_delete_and_enabled_admin_count(db):
     assert users.delete(db, admin, commit=False) == 1
     db.commit()
     assert users.get_by_id(db, admin) is None
+
+
+def _pending(db, token="pending-a", created_at=100):
+    return telegram_pending.create(
+        db, token=token, api_id=1, api_hash="hash", phone="+15550001111",
+        phone_code_hash="pch", session_string="sess", channel="chan",
+        strategy="round_robin", created_at=created_at)
+
+
+def test_pending_create_get_and_consume(db):
+    _pending(db)
+    record = telegram_pending.get(db, "pending-a")
+    assert record is not None
+    assert record["phone"] == "+15550001111" and record["attempts"] == 0
+    assert record["session_string"] == "sess"
+    assert telegram_pending.get(db, "missing") is None
+
+    assert telegram_pending.consume(db, "pending-a") == 1
+    assert telegram_pending.get(db, "pending-a") is None
+    assert telegram_pending.consume(db, "pending-a") == 0
+
+
+def test_pending_attempts_bump_and_purge(db):
+    _pending(db, token="old", created_at=100)
+    _pending(db, token="new", created_at=1000)
+    for expected in (1, 2):
+        assert telegram_pending.bump_attempts(db, "old") == 1
+        assert telegram_pending.get(db, "old")["attempts"] == expected
+    assert telegram_pending.bump_attempts(db, "missing") == 0
+
+    # Strictly older than the cutoff; the new request survives.
+    assert telegram_pending.purge_older_than(db, 500) == 1
+    assert telegram_pending.get(db, "old") is None
+    assert telegram_pending.get(db, "new") is not None
+
+    # commit=False leaves the purge for the caller's transaction.
+    assert telegram_pending.purge_older_than(db, 5000, commit=False) == 1
+    db.commit()
+    assert telegram_pending.get(db, "new") is None
+

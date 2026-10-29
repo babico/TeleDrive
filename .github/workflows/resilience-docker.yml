@@ -51,12 +51,20 @@ jobs:
             -p 127.0.0.1:19000:9000 \
             teledrive-security-ci)"
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          # HTTP Basic was removed; the only browser credential is the login
+          # form's session cookie. The first boot creates the hardcoded
+          # bootstrap administrator admin/admin, so log in once and reuse it.
+          jar=/tmp/ci-cookies.txt
           ready=0
           for i in $(seq 1 45); do
-            if curl -fsS -u ci:ci-only-not-a-real-secret \
-              http://127.0.0.1:18080/api/v1/admin/storage/health >/tmp/health.json \
-              && curl -fsS -u ci:ci-only-not-a-real-secret \
-              http://127.0.0.1:18080/api/v1/admin/storage/telegram-sessions >/tmp/sessions.json \
+            if curl -fsS -c "$jar" -H 'Content-Type: application/json' \
+                -H 'x-teledrive-csrf: 1' \
+                -d '{"username":"admin","password":"admin"}' \
+                http://127.0.0.1:18080/api/v1/auth/login >/dev/null \
+              && curl -fsS -b "$jar" \
+                http://127.0.0.1:18080/api/v1/admin/storage/health >/tmp/health.json \
+              && curl -fsS -b "$jar" \
+                http://127.0.0.1:18080/api/v1/admin/storage/telegram-sessions >/tmp/sessions.json \
               && curl -fsS http://127.0.0.1:19000/__health >/tmp/s3-health.json; then
               ready=1
               break
@@ -72,7 +80,7 @@ jobs:
           assert "sessions" in sessions and "count" in sessions
           assert json.load(open("/tmp/s3-health.json", encoding="utf-8")) == {"ok": True}
           PY
-          curl -fsS -u ci:ci-only-not-a-real-secret \
+          curl -fsS -b "$jar" \
             http://127.0.0.1:18080/openapi.json >/tmp/openapi.json
           python - <<'PY'
           import json

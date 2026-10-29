@@ -57,22 +57,37 @@ and the machine-readable manifest agree on **116 operations**:
 
 | Status | Count | Meaning |
 | --- | ---: | --- |
-| Supported | **110** | Implemented for the documented TeleDrive contract and backed by focused regression tests. Not a claim of complete AWS parity. |
-| Partial — by design | **2** | `GetBucketRequestPayment` and `GetBucketAccelerateConfiguration`. Both report the single state that exists here (BucketOwner / Suspended) and their write side rejects the state that would need requester-pays billing or an edge network. |
-| Unsupported | **4** | Permanently impossible; listed below. Nothing is pending. |
+| Supported | **114** | Implemented for the documented TeleDrive contract and backed by focused regression tests. Not a claim of complete AWS parity. |
+| Partial | **0** | None — by code or by design. |
+| Unsupported | **2** | Permanently impossible; listed below. Nothing is pending. |
 
-There are **zero partial operations "by code"**: every remaining partial is
-a deliberate architectural decision, fail-closed on purpose.
+There are **zero partial operations of any kind**. The last two were not
+design decisions at all: `GetBucketAccelerateConfiguration` emitted
+`<TransferAcceleratedStatus>`, the internal enum name, while botocore's
+`AccelerateConfiguration` shape has exactly one member, `Status` — so boto3
+parsed our document into an empty dict and the SDK never saw the state.
+`GetBucketRequestPayment` was already correct and is now proven with a real
+boto3 client rather than assumed.
 
-The four permanently impossible operations are not refused out of caution;
+Two operations previously listed here as impossible were re-examined and are
+honest at a lower bar than full AWS parity:
+
+| Operation | What it now does |
+| --- | --- |
+| `ListDirectoryBuckets` | A deployment with zero directory buckets has a real AWS answer: `200` with an empty `ListDirectoryBucketsResult` — no `Buckets`, no `ContinuationToken`. `continuation-token` and `max-directory-buckets` are validated; unknown parameters are 400. |
+| `CreateSession` | Refuses truthfully instead of a blanket 501: a malformed name is `400 InvalidBucketName`, an existing general-purpose bucket is `400 InvalidRequest` naming the required directory-bucket class, and any other well-formed name is the AWS-declared `404 NoSuchBucket`. No session can ever be issued, because there are no S3 Express directory buckets. |
+
+Both accept the real `s3express` SigV4 service scope that botocore uses to
+sign those two calls; verification previously hard-coded `/s3/`, so genuine
+SDK calls failed with `AccessDenied`.
+
+The two permanently impossible operations are not refused out of caution;
 they have no honest backing here:
 
 | Operation | Why it cannot be supported |
 | --- | --- |
 | `GetObjectTorrent` | Needs a BitTorrent swarm and a seeder. Producing a `.torrent` file we cannot seed would mislead the caller. |
-| `CreateSession` | Issues an S3 Express One Zone session token. TeleDrive has no directory buckets. |
-| `ListDirectoryBuckets` | Directory buckets are an AWS storage class with zone-local infrastructure that does not exist over Telegram. |
-| `WriteGetObjectResponse` | S3 Object Lambda. There is no Lambda execution environment to run the transformation. |
+| `WriteGetObjectResponse` | S3 Object Lambda. There is no Lambda execution environment to run the transformation. The rejection names that absence rather than saying "NotImplemented". |
 
 No operation is left as ordinary pending work: the nine bucket-metadata
 configuration operations (backed by a real mutation journal), `PutBucketEncryption`,
@@ -81,3 +96,31 @@ release. SSE is supported **only** as SSE-C, where the client supplies the
 AES-256 key on every request and we never persist or log it; a bucket-level
 default `AES256` (SSE-S3) or `aws:kms` rule is rejected 501, because TeleDrive
 holds no server-side key for data the client did not encrypt.
+
+## Security review before the tag
+
+The tag was deliberately held while an exhaustive per-endpoint review ran.
+Seven waves covered 25 endpoints — the whole authority surface, not the whole
+route list — and found **64 real defects**, all fixed before release. The
+full ledger, including the one finding that was disproved with evidence, is
+[API_REVIEW.md](API_REVIEW.md).
+
+The ones that would have shipped as vulnerabilities:
+
+| Class | What it was |
+| --- | --- |
+| Takeover | A config save could redirect `state.database_url`; the bootstrap then created `admin`/`admin` in the new database. |
+| Takeover | `GET /api/v1/config` returned the live Telethon `session_string` to a read-only viewer. |
+| Takeover | Deleting a user left their session behind; SQLite reuses integer ids, so a later account inherited it (proved: a deleted viewer authenticating as a new admin). |
+| Takeover | An API key scoped to one route could mint an S3 credential holding all 90 permissions and receive its secret. |
+| Authorization | `admin:*` expanded to nine REST names, so the "full access" preset was rejected on every admin route. |
+| Authorization | A `Deny` on `s3:prefix` answered 403 for `?prefix=a` and 200 for a bare listing, which enumerated the bucket. |
+| Denial of service | A bucket-policy glob compiled `*` to `.*`: over five seconds of CPU per request, single-threaded, from a policy-writing credential. Now 0.4 ms. |
+| Data loss | Physical GC's default scope deleted Telegram media and then rolled its own record back, leaving SQL saying `ready`. |
+| Data loss | GC deleted only primary messages and dropped the replica rows: a full second copy of a "deleted" object stayed on another account forever. |
+| Immutability | A suspended bucket removed a COMPLIANCE-retained head with no lock check; multipart completion and copy skipped the default retention entirely. |
+| Exposure | Every public share token was readable by a viewer and written to the log stream; the link also re-targeted replaced bytes. |
+| Exposure | Bucket delete left thirteen governance tables behind, so re-creating a name revived the old policy (including a Deny) and its public share links. |
+
+Operator-visible consequences and migrations are in
+[UPGRADING.md](UPGRADING.md) §7.

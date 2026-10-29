@@ -61,6 +61,7 @@ from teledrive.storage.manifest import ManifestStore, objects
 from sqlalchemy import select as _sa_select
 from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
+from teledrive.stores import pins as _pin_store
 from teledrive.stores import shares as _share_store
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
@@ -4558,34 +4559,10 @@ def admin_set_quota(bucket: str, payload: BucketQuotaRequest, request: Request,
     _same_origin(request)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        now = int(time.time())
-        values = {"b": bucket, "ms": payload.max_size_bytes,
-                  "mo": payload.max_objects, "now": now}
-        # Portable upsert: UPDATE first, INSERT only when the row is
-        # missing. ``ON CONFLICT (bucket) DO UPDATE`` is PostgreSQL/SQLite
-        # only and raised on MySQL, which this project documents as
-        # supported. The INSERT is guarded by the unique constraint, so a
-        # concurrent creator still ends with one row.
-        changed = conn.connection.execute(_text(
-            "UPDATE bucket_quotas SET max_size_bytes = :ms, "
-            "max_objects = :mo, updated_at = :now WHERE bucket = :b"
-        ), values)
-        if changed.rowcount == 0:
-            try:
-                conn.connection.execute(_text(
-                    "INSERT INTO bucket_quotas (bucket, max_size_bytes, "
-                    "max_objects, created_at, updated_at) "
-                    "VALUES (:b, :ms, :mo, :now, :now)"
-                ), values)
-            except Exception:
-                # Lost the race: the row now exists, so apply the update.
-                conn.connection.rollback()
-                conn.connection.execute(_text(
-                    "UPDATE bucket_quotas SET max_size_bytes = :ms, "
-                    "max_objects = :mo, updated_at = :now WHERE bucket = :b"
-                ), values)
-        conn.connection.commit()
+        from teledrive.storage import quota as _quota
+        _quota.set_bucket_quota(
+            conn, bucket, payload.max_size_bytes, payload.max_objects,
+            int(time.time()))
         _log(f"set quota: bucket={bucket} max_size={payload.max_size_bytes} max_objects={payload.max_objects}", "storage")
     finally:
         conn.close()
@@ -4601,6 +4578,7 @@ def _prom_escape(value: str) -> str:
 def prometheus_metrics(_: None = Depends(require_auth)):
     """Text exposition format 0.0.4; scrape with HTTP auth like any API route."""
     from sqlalchemy import text as _text, func, select
+    from teledrive.storage import quota as _quota
 
     lines: list[str] = [
         "# HELP teledrive_up Service is running and answering.",
@@ -4622,9 +4600,7 @@ def prometheus_metrics(_: None = Depends(require_auth)):
                 lines.append('teledrive_storage_jobs{state="%s"} %d'
                              % (_prom_escape(state), int(count)))
 
-        quotas = conn.connection.execute(_text(
-            "SELECT bucket, max_size_bytes, max_objects FROM bucket_quotas"
-        )).fetchall()
+        quotas = _quota.all_bucket_quotas(conn)
         if quotas:
             lines += ["# HELP teledrive_quota_limit_bytes Bucket size quota.",
                       "# TYPE teledrive_quota_limit_bytes gauge",
@@ -4722,10 +4698,7 @@ def prometheus_metrics(_: None = Depends(require_auth)):
 def admin_get_bucket_pin(bucket: str, _: None = Depends(require_auth)):
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        pin = conn.connection.execute(_text(
-            "SELECT account FROM bucket_account_pins WHERE bucket = :b"
-        ), {"b": bucket}).scalar_one_or_none()
+        pin = _pin_store.get(conn, bucket)
         return {"bucket": bucket, "account": pin}
     finally:
         conn.close()
@@ -4748,24 +4721,7 @@ def admin_put_bucket_pin(bucket: str, request: Request,
                 "SELECT 1 FROM telegram_sessions WHERE account = :a"),
                 {"a": account}).first():
             raise HTTPException(404, "Unknown Telegram session account")
-        # Portable upsert (see the quota handler): ON CONFLICT is
-        # PostgreSQL/SQLite only and raised on MySQL.
-        pin_values = {"b": bucket, "a": account, "now": int(time.time())}
-        changed = conn.connection.execute(_text(
-            "UPDATE bucket_account_pins SET account = :a, updated_at = :now "
-            "WHERE bucket = :b"), pin_values)
-        if changed.rowcount == 0:
-            try:
-                conn.connection.execute(_text(
-                    "INSERT INTO bucket_account_pins "
-                    "(bucket, account, updated_at) VALUES (:b, :a, :now)"
-                ), pin_values)
-            except Exception:
-                conn.connection.rollback()
-                conn.connection.execute(_text(
-                    "UPDATE bucket_account_pins SET account = :a, "
-                    "updated_at = :now WHERE bucket = :b"), pin_values)
-        conn.connection.commit()
+        _pin_store.set(conn, bucket, account, int(time.time()))
     finally:
         conn.close()
     _log(f"bucket pin set: bucket={bucket} account={account}", "storage")
@@ -4780,11 +4736,7 @@ def admin_delete_bucket_pin(bucket: str, request: Request,
     _same_origin(request)
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "DELETE FROM bucket_account_pins WHERE bucket = :b"),
-            {"b": bucket})
-        conn.connection.commit()
+        _pin_store.delete(conn, bucket)
     finally:
         conn.close()
     return {"ok": True}

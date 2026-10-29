@@ -8,7 +8,8 @@ from __future__ import annotations
 import pytest
 
 from teledrive.db import connect_database
-from teledrive.stores import shares
+from teledrive.storage import quota
+from teledrive.stores import pins, shares
 
 
 @pytest.fixture
@@ -64,3 +65,27 @@ def test_share_list_and_delete_for_bucket(db):
 
     assert shares.delete_for_bucket(db, "b1") == 1
     assert [row["token"] for row in shares.list(db)] == ["f" * 24]
+
+
+def test_pin_set_get_update_and_delete(db):
+    assert pins.get(db, "b1") is None
+    pins.set(db, "b1", "account-a", now=10)
+    assert pins.get(db, "b1") == "account-a"
+    # Updating an existing pin must not insert a second row.
+    pins.set(db, "b1", "account-b", now=20)
+    assert pins.get(db, "b1") == "account-b"
+    assert pins.delete(db, "b1") == 1
+    assert pins.get(db, "b1") is None
+    assert pins.delete(db, "b1") == 0
+
+
+def test_bucket_quota_set_update_and_list(db):
+    assert quota.bucket_quota(db, "b1") == (None, None)
+    quota.set_bucket_quota(db, "b1", 100, 2, now=10)
+    quota.set_bucket_quota(db, "b2", 200, None, now=11)
+    assert quota.bucket_quota(db, "b1") == (100, 2)
+    # Updating an existing quota keeps a single row and clears fields.
+    quota.set_bucket_quota(db, "b1", None, 3, now=20)
+    assert quota.bucket_quota(db, "b1") == (None, 3)
+    assert quota.all_bucket_quotas(db) == [
+        ("b1", None, 3), ("b2", 200, None)]

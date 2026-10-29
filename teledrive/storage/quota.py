@@ -30,6 +30,36 @@ def bucket_quota(conn, bucket: str) -> tuple[int | None, int | None]:
     return (row[0], row[1]) if row else (None, None)
 
 
+def set_bucket_quota(conn, bucket: str, max_size_bytes: int | None,
+                     max_objects: int | None, now: int) -> None:
+    """Set (or clear) a bucket's quota, creating the row when missing.
+
+    UPDATE-then-INSERT rather than ``ON CONFLICT``: the latter is
+    PostgreSQL/SQLite only and raised on MySQL. The INSERT is guarded by the
+    primary key, so a concurrent creator still ends with one row.
+    """
+    values = {"ms": max_size_bytes, "mo": max_objects, "now": now, "b": bucket}
+    changed = conn.connection.execute(text(
+        "UPDATE bucket_quotas SET max_size_bytes = :ms, "
+        "max_objects = :mo, updated_at = :now WHERE bucket = :b"
+    ), values)
+    if changed.rowcount == 0:
+        try:
+            conn.connection.execute(text(
+                "INSERT INTO bucket_quotas (bucket, max_size_bytes, "
+                "max_objects, created_at, updated_at) "
+                "VALUES (:b, :ms, :mo, :now, :now)"
+            ), values)
+        except Exception:
+            # Lost the race: the row now exists, so apply the update.
+            conn.connection.rollback()
+            conn.connection.execute(text(
+                "UPDATE bucket_quotas SET max_size_bytes = :ms, "
+                "max_objects = :mo, updated_at = :now WHERE bucket = :b"
+            ), values)
+    conn.commit()
+
+
 def bucket_current_usage(conn, bucket: str) -> tuple[int, int]:
     """``(object_count, total_size)`` of a bucket's CURRENT objects."""
     row = conn.connection.execute(text(
@@ -69,3 +99,11 @@ def enforce_bucket_quota(conn, bucket: str, key: str,
         count, _size = bucket_current_usage(conn, bucket)
         if not has_current_key(conn, bucket, key) and count >= max_objects:
             raise QuotaExceeded("Upload exceeds bucket quota (max objects)")
+
+
+def all_bucket_quotas(conn) -> list[tuple[str, int | None, int | None]]:
+    """Every configured quota, ordered by bucket (metrics exposition)."""
+    rows = conn.connection.execute(text(
+        "SELECT bucket, max_size_bytes, max_objects FROM bucket_quotas "
+        "ORDER BY bucket")).fetchall()
+    return [(str(row[0]), row[1], row[2]) for row in rows]

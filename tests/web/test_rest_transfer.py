@@ -449,3 +449,82 @@ def test_multibyte_key_is_rejected_before_any_upload(service):
     reply = put(client, headers, b"x" * 4096, key="é" * 600)
     assert reply.status_code == 422, reply.text
     assert bot.counter == before, "bytes reached Telegram for a doomed key"
+
+
+def test_rest_reads_refuse_an_archived_object_until_restored(service):
+    """Tiering is an access gate; the REST read path must apply it too.
+
+    The S3 data plane answers 403 InvalidObjectState for an archived object,
+    but this handler never called object_read_state, so archived bytes
+    streamed with 200/206 -- the access control was simply absent on one of
+    the two read surfaces.
+    """
+    from sqlalchemy import text
+    client, headers, bot, _ = service
+    body = os.urandom(300)
+    uploaded = put(client, headers, body, key="cold.bin")
+    assert uploaded.status_code == 201
+    oid = uploaded.json()["id"]
+
+    db = connect_database(webapp.db_connect().engine.url.database)
+    try:
+        db.connection.execute(text(
+            "UPDATE storage_objects SET storage_class = 'ARCHIVE_ACCESS', "
+            "restore_until_ns = NULL WHERE id = :o"), {"o": oid})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    before = bot.counter
+    denied = client.get("/api/v1/buckets/backup-bucket/content",
+                        params={"key": "cold.bin"}, headers=headers)
+    assert denied.status_code == 403, denied.text
+    assert "InvalidObjectState" in denied.text
+    assert client.head("/api/v1/buckets/backup-bucket/content",
+                       params={"key": "cold.bin"}, headers=headers
+                       ).status_code == 403
+    assert bot.counter == before, "archived bytes were streamed anyway"
+
+    # An open restore window makes it readable again.
+    db = connect_database(webapp.db_connect().engine.url.database)
+    try:
+        from sqlalchemy import text as _text
+        db.connection.execute(_text(
+            "UPDATE storage_objects SET restore_until_ns = :until WHERE id = :o"),
+            {"until": (2 ** 63) - 1, "o": oid})
+        db.connection.commit()
+    finally:
+        db.close()
+    restored = client.get("/api/v1/buckets/backup-bucket/content",
+                          params={"key": "cold.bin"}, headers=headers)
+    assert restored.status_code == 200
+    assert restored.content == body
+
+
+def test_rest_get_refuses_an_sse_c_object_instead_of_empty_200(service):
+    """A 200 with Content-Length and zero bytes is a silent data-loss shape."""
+    from sqlalchemy import text
+    client, headers, bot, _ = service
+    uploaded = put(client, headers, b"secret-bytes", key="enc.bin")
+    assert uploaded.status_code == 201
+    oid = uploaded.json()["id"]
+
+    db = connect_database(webapp.db_connect().engine.url.database)
+    try:
+        db.connection.execute(text(
+            "INSERT INTO storage_object_encryption "
+            "(object_id, mode, key_md5, created_at) "
+            "VALUES (:o, 'SSE-C', :md5, 1)"),
+            {"o": oid, "md5": "a" * 24})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    resp = client.get("/api/v1/buckets/backup-bucket/content",
+                      params={"key": "enc.bin"}, headers=headers)
+    assert resp.status_code == 400, resp.text
+    assert "SSE-C" in resp.text
+    assert resp.content != b""
+    assert client.head("/api/v1/buckets/backup-bucket/content",
+                       params={"key": "enc.bin"}, headers=headers
+                       ).status_code == 400

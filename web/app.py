@@ -5498,18 +5498,57 @@ async def put_object_content(
     return await _stream_object_upload(bucket, key, request, generation)
 
 
+def _rest_read_gate(manifests, catalog, item) -> dict:
+    """The access gate every REST read applies before any byte is produced.
+
+    Two things the S3 data plane already enforces were missing here:
+
+    * an archived object (ARCHIVE_ACCESS / DEEP_ARCHIVE_ACCESS) must answer
+      403 InvalidObjectState until a RestoreObject window is open, and
+    * an SSE-C object cannot be read without the customer key, so the REST
+      surface -- which cannot supply one -- must refuse instead of sending
+      200 with Content-Length and an empty body (probe-confirmed: curl -f
+      treated that as a successful empty download).
+
+    Returns the encryption marker when the object is readable.
+    """
+    state = catalog.object_read_state(item.id)
+    if state["archived"]:
+        raise HTTPException(
+            403,
+            "Object is archived; restore it first "
+            "(InvalidObjectState)")
+    encryption = manifests.encryption_info(item.id)
+    if encryption is not None:
+        raise HTTPException(
+            400,
+            "This object requires an SSE-C customer key; use the S3 API "
+            "with x-amz-server-side-encryption-customer-* headers")
+    return encryption
+
+
+def _valid_rest_key(key: str) -> str:
+    if not isinstance(key, str) or not (1 <= len(key.encode("utf-8")) <= 1024):
+        raise HTTPException(422, "Object key must contain 1..1024 UTF-8 bytes")
+    return key
+
+
 @app.head("/api/v1/buckets/{bucket}/content", tags=["Uploads"],
           summary="Read object headers without downloading Telegram bytes")
 def head_object_content(
     bucket: str, key: str = Query(..., min_length=1, max_length=1024),
     _: None = Depends(require_api_scope("rest:objects:head")),
 ):
+    _valid_rest_key(key)
     conn = db_connect()
     try:
+        manifests = ManifestStore(conn)
+        catalog = BucketCatalog(manifests)
         try:
-            item = BucketCatalog(ManifestStore(conn)).get(bucket, key).item
+            item = catalog.get(bucket, key).item
         except FileNotFoundError as exc:
             raise HTTPException(404, "Object not found") from exc
+        _rest_read_gate(manifests, catalog, item)
         return Response(status_code=200, headers={
             "ETag": '"' + item.sha256 + '"',
             "Content-Length": str(item.size),
@@ -5527,6 +5566,7 @@ async def get_object_content(
     bucket: str, request: Request, key: str = Query(..., min_length=1, max_length=1024),
     _: None = Depends(require_api_scope("rest:objects:get")),
 ):
+    _valid_rest_key(key)
     conn = db_connect()
     try:
         manifests = ManifestStore(conn)
@@ -5535,6 +5575,11 @@ async def get_object_content(
             item = catalog.get(bucket, key).item
         except FileNotFoundError as exc:
             raise HTTPException(404, "Object not found") from exc
+        _rest_read_gate(manifests, catalog, item)
+        # Count the read, or tiering's idle clock demotes objects that are
+        # actively read over REST, and the next S3 GET answers 403.
+        catalog.record_object_access(item.id)
+        conn.commit()
         start, end, partial = _byte_range(request.headers.get("range"), item.size)
         transport = storage_transport(conn)
         root = Path(STORAGE_SCRATCH_DIR)

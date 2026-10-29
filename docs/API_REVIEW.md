@@ -39,6 +39,10 @@ code **as reviewed**, not necessarily the current tree.
 | `remove_object_content` | [high] a lost CAS race returned `200 {"ok": true}` | **fixed** — rowcount 0 is now 409, matching the S3 path's 412 |
 | `remove_object_content` | [high] versioned buckets got no tombstone or history record | **fixed** — an Enabled bucket writes a real delete marker; the REST unlink is audit-logged with the key |
 | `remove_object_content` | [medium] legal hold / retention do not fence the unlink | **open** — bytes survive (GC re-checks the lock) and the S3 error is correct, but the REST unlink still hides the head |
+| `get_object_content` | [high] archived objects streamed with 200/206 (no tiering gate) | **fixed** — GET and HEAD answer 403 InvalidObjectState until restored |
+| `get_object_content` | [high] SSE-C objects sent `200` + Content-Length + zero bytes | **fixed** — 400 naming SSE-C on GET and HEAD instead of a silent empty body |
+| `get_object_content` | [medium] reads were invisible to access accounting, so tiering demoted actively-read objects | **fixed** — every REST read records the access |
+| `get_object_content` | [medium] a multibyte key over 1024 UTF-8 bytes returned 500 | **fixed** — 422 on GET and HEAD |
 
 Open findings are tracked in `docs/POST_108_PLAN.md` Phase 4.
 

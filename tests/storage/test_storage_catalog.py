@@ -140,3 +140,100 @@ def test_catalog_metadata_survives_restart(tmp_path):
         assert cat.get("persisted-bucket", "some/key").item.id == ident
     finally:
         two.close()
+
+
+def test_deleting_a_bucket_clears_every_governance_row(catalog):
+    """Re-creating a bucket must not revive the old one's rights.
+
+    Every governance surface is keyed by the bucket NAME, so a surviving row
+    silently re-attaches to the new bucket: an old policy (including a
+    Deny), ABAC gates, an SSE default, replication rules, tiering rules
+    (which would make new objects answer 403 until restored), webhook and
+    logging targets, report schedules, an old quota, an account pin and
+    — worst — a public share link that keeps working against new keys.
+    """
+    from sqlalchemy import text
+
+    cat, _ = catalog
+    bucket = "revive-bucket"
+    cat.create_bucket(bucket, 1)
+    conn = cat.db.connection
+
+    rows = [
+        ("storage_bucket_acl_grants", "bucket"),
+        ("storage_bucket_policy", "bucket"),
+        ("storage_bucket_abac", "bucket"),
+        ("storage_bucket_encryption", "bucket"),
+        ("storage_replication_configs", "bucket"),
+        ("storage_tiering_configs", "bucket"),
+        ("storage_report_configs", "bucket"),
+        ("storage_notification_configs", "bucket"),
+        ("storage_logging_configs", "bucket"),
+        ("bucket_quotas", "bucket"),
+        ("bucket_account_pins", "bucket"),
+        ("share_links", "bucket"),
+    ]
+    inserted = []
+    for table, column in rows:
+        if not conn.dialect.has_table(conn, table):
+            continue
+        cols = {c["name"] for c in
+                __import__("sqlalchemy").inspect(conn.engine).get_columns(table)}
+        if column not in cols:
+            continue
+        payload = {column: bucket}
+        # Fill any other required column with a harmless default.
+        for name in cols:
+            if name == column:
+                continue
+            if name in ("id", "token"):
+                payload[name] = f"probe-{table}-{name}"
+            elif name in ("created_at", "updated_at", "created_ns",
+                          "updated_ns", "committed_ns", "removed_ns"):
+                payload[name] = 1
+            elif name in ("permission",):
+                payload[name] = "READ"
+            elif name in ("grantee", "owner", "config_id", "kind", "event"):
+                payload[name] = "probe"
+            elif name in ("rules", "document", "tags", "payload"):
+                payload[name] = "{}"
+            elif name in ("max_size_bytes", "max_objects"):
+                payload[name] = 1
+            elif name in ("account", "channel"):
+                payload[name] = "probe"
+            elif name in ("enabled", "public_read", "revoked"):
+                payload[name] = 0
+            elif name in ("password_salt", "password_hash", "prefix",
+                          "destination", "mode", "key_md5", "digest_kind"):
+                payload[name] = None
+        try:
+            conn.execute(text(
+                f"INSERT INTO {table} ({', '.join(payload)}) "
+                f"VALUES ({', '.join(':' + k for k in payload)})"  # nosec B608
+            ), payload)
+        except Exception:
+            conn.rollback()
+            continue
+        inserted.append(table)
+    conn.commit()
+    assert inserted, "no governance table accepted a probe row"
+
+    cat.delete_bucket(bucket)
+
+    leftover = {}
+    for table in inserted:
+        count = conn.execute(text(
+            f"SELECT COUNT(*) FROM {table} WHERE bucket = :b"  # nosec B608
+        ), {"b": bucket}).scalar_one()
+        if count:
+            leftover[table] = count
+    assert leftover == {}, f"orphaned governance rows: {leftover}"
+    assert bucket not in cat.list_buckets()
+
+    # Re-creating the name must start from a clean slate.
+    cat.create_bucket(bucket, 2)
+    for table in inserted:
+        count = conn.execute(text(
+            f"SELECT COUNT(*) FROM {table} WHERE bucket = :b"  # nosec B608
+        ), {"b": bucket}).scalar_one()
+        assert count == 0, table

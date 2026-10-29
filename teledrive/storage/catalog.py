@@ -1394,6 +1394,40 @@ class BucketCatalog:
             self.db.connection.execute(text(
                 "DELETE FROM storage_metadata_configs WHERE bucket = :bucket"
             ), {"bucket": name})
+        # Every remaining governance surface keyed by the bucket NAME must
+        # be cleared too, or re-creating a bucket with the same name silently
+        # revives the previous one's rights and settings: an old bucket
+        # policy (including a Deny), ABAC gates, an SSE default, replication
+        # rules, tiering rules (which make new objects answer 403 until
+        # restored), webhook/logging targets and report schedules. Quotas,
+        # account pins and public share links have the same problem -- a
+        # stale share URL would keep working against the new bucket's keys.
+        # Object-keyed rows (ACL grants) are cleared here as well.
+        for table, column in (
+            ("storage_bucket_acl_grants", "bucket"),
+            ("storage_bucket_policy", "bucket"),
+            ("storage_bucket_abac", "bucket"),
+            ("storage_bucket_encryption", "bucket"),
+            ("storage_replication_configs", "bucket"),
+            ("storage_tiering_configs", "bucket"),
+            ("storage_report_configs", "bucket"),
+            ("storage_notification_configs", "bucket"),
+            ("storage_logging_configs", "bucket"),
+            ("bucket_quotas", "bucket"),
+            ("bucket_account_pins", "bucket"),
+            ("share_links", "bucket"),
+        ):
+            if inspect(self.db.engine).has_table(table):
+                # table/column come from the hardcoded tuple above, never
+                # request input; the value stays a bound parameter.
+                self.db.connection.execute(text(
+                    f"DELETE FROM {table} WHERE {column} = :bucket"  # nosec B608
+                ), {"bucket": name})
+        # Object-keyed ACL grants have no bucket column of their own.
+        if inspect(self.db.engine).has_table("storage_object_acl_grants"):
+            self.db.connection.execute(text(
+                "DELETE FROM storage_object_acl_grants WHERE bucket = :bucket"
+            ), {"bucket": name})
         self.db.connection.execute(
             update(buckets).where(buckets.c.name == name).values(public_read=False))
         self.db.connection.execute(delete(buckets).where(buckets.c.name == name))

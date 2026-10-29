@@ -293,6 +293,16 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_gc_leases(ctx: SchemaContext) -> None:
+    """Durable physical-GC leases (append-only migration).
+
+    Added after the gc step shipped: editing that step would never run on an
+    already-migrated database, so the new table gets its own version.
+    """
+    from teledrive.storage import gc_collect
+    gc_collect.gc_leases.create(ctx.engine, checkfirst=True)
+
+
 def _step_verification_attempts(ctx: SchemaContext) -> None:
     """Login-verification attempt counter (append-only migration).
 
@@ -360,6 +370,7 @@ def _step_content_search(ctx: SchemaContext) -> None:
 _STEPS: list[tuple[str, Step]] = [
     ("core", _step_core),
     ("verification_attempts", _step_verification_attempts),
+    ("gc_leases", _step_gc_leases),
     ("manifest", _step_manifest),
     ("catalog", _step_catalog),
     ("tagging", _step_tagging),

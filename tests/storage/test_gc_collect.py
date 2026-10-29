@@ -393,3 +393,38 @@ def test_queued_scope_drains_a_version_deleted_object(store):
     report = asyncio.run(gcx.collect(transport, scope="queued"))
     assert report["failed"] == [], report["failed"]
     assert [c["object_id"] for c in report["collected"]] == [oid]
+
+
+def test_a_claimed_object_is_skipped_by_a_second_collector(store):
+    """A durable lease stops two collectors deleting the same messages.
+
+    Found by the API review: two concurrent collect() calls picked the same
+    candidate, both called transport.delete, and the loser rolled its SQL
+    back after the bytes were already gone. The lease is what makes the
+    second worker skip instead of racing.
+    """
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    oid, _message = _publish(cat, "contended.bin", size=200, now=old)
+    cat.delete_version("gcx", "contended.bin", oid)
+    _backdate_revocation(cat, oid, old)
+
+    gcx = RetainedMediaGC(cat.manifests.db)
+    gcx.set_enabled(True, by="test")
+    # Another worker holds the claim (not stale, so it must be respected).
+    assert gcx._claim(oid) is True
+
+    transport = FakeTransport()
+    report = asyncio.run(gcx.collect(transport, scope="revoked",
+                                     min_age_seconds=3600))
+    assert report["collected"] == []
+    assert [s["object_id"] for s in report["skipped"]] == [oid]
+    assert "claimed" in report["skipped"][0]["reason"]
+    assert transport.deleted == [], "a leased object was deleted anyway"
+
+    # The holder releases it and the work becomes available again.
+    gcx._release(oid)
+    report = asyncio.run(gcx.collect(transport, scope="revoked",
+                                     min_age_seconds=3600))
+    assert [c["object_id"] for c in report["collected"]] == [oid]
+    assert transport.deleted

@@ -51,6 +51,18 @@ gc_queue = Table(
     Column("enqueued_ns", BigInteger, nullable=False),
     Column("reason", String(64), nullable=False),
 )
+# A physical-collection lease. Two concurrent collect() calls used to pick
+# the same candidate and both call transport.delete, so the same Telegram
+# messages were deleted twice and the loser rolled its SQL back after the
+# bytes were already gone. The lease is durable (not in-process) so it also
+# survives a crash: a stale row expires and the next run resumes the object,
+# which is safe because chunk deletion is idempotent.
+gc_leases = Table(
+    "storage_gc_leases", metadata,
+    Column("object_id", String(36), primary_key=True),
+    Column("claimed_ns", BigInteger, nullable=False),
+    Column("owner", String(64), nullable=False),
+)
 gc_collected = Table(
     "storage_gc_collected", metadata,
     Column("object_id", String(36), primary_key=True),
@@ -84,6 +96,11 @@ def _send_intents_table():
 class RetainedMediaGC:
     def __init__(self, db):
         self.db = db
+        # Identifies this process in the lease row so a stuck claim can be
+        # attributed during an incident.
+        import os as _os
+        import socket as _socket
+        self._owner = f"{_socket.gethostname()}:{_os.getpid()}"[:64]
         from .schema import ensure_schema
         ensure_schema(db.engine)
 
@@ -315,6 +332,41 @@ class RetainedMediaGC:
             })
         return result
 
+    # -- lease -----------------------------------------------------------
+    def _claim(self, object_id: str, lease_seconds: int = 900) -> bool:
+        """Take a durable, expiring claim on one object.
+
+        Cross-database portable (no RETURNING, no ON CONFLICT): UPDATE an
+        expired/missing lease first, INSERT when there is none, and treat an
+        integrity error as "someone else owns it".
+        """
+        now = time.time_ns()
+        stale = now - int(lease_seconds) * 1_000_000_000
+        changed = self.db.connection.execute(
+            update(gc_leases)
+            .where(gc_leases.c.object_id == object_id,
+                   gc_leases.c.claimed_ns < stale)
+            .values(claimed_ns=now, owner=self._owner))
+        if changed.rowcount:
+            self.db.commit()
+            return True
+        try:
+            self.db.connection.execute(insert(gc_leases).values(
+                object_id=object_id, claimed_ns=now, owner=self._owner))
+        except Exception:
+            self.db.connection.rollback()
+            return False
+        self.db.commit()
+        return True
+
+    def _release(self, object_id: str) -> None:
+        try:
+            self.db.connection.execute(delete(gc_leases).where(
+                gc_leases.c.object_id == object_id))
+            self.db.commit()
+        except Exception:
+            self.db.connection.rollback()
+
     # -- execution -------------------------------------------------------
     async def collect(self, transport, *, scope: str,
                       min_age_seconds: int = DEFAULT_MIN_AGE_SECONDS,
@@ -332,6 +384,17 @@ class RetainedMediaGC:
         report = {"collected": [], "skipped": [], "failed": []}
         for candidate in pending:
             object_id = candidate["object_id"]
+            # One worker per object: without this two collects deleted the
+            # same Telegram messages and the loser rolled back after the
+            # bytes were gone. A lost race is "skipped", not "failed".
+            if not self._claim(object_id):
+                report["skipped"].append({
+                    "object_id": object_id, "bucket": candidate.get("bucket"),
+                    "key": candidate.get("key"),
+                    "reason": "claimed by another collector",
+                    "chunk_count": 0, "bytes": 0,
+                })
+                continue
             try:
                 outcome = await self._collect_object(transport, object_id,
                                                      scope)
@@ -339,6 +402,8 @@ class RetainedMediaGC:
                 report["failed"].append({
                     "object_id": object_id, "reason": str(exc)[:200]})
                 continue
+            finally:
+                self._release(object_id)
             if scope == "queued" and outcome in ("collected", "skipped"):
                 # Drain the request: collected means done, skipped means
                 # the object no longer qualifies (restored, aliased or

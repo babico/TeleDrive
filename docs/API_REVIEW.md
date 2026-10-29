@@ -14,10 +14,10 @@ code **as reviewed**, not necessarily the current tree.
 | `reveal_s3_credential_secret` | [medium] master-key path leaked into viewer-readable logs | **fixed** (`2ead9b6`) — fixed 503 message, reason class in the audit line |
 | `gc_collect` | [critical] default scope deleted Telegram media then rolled its own record back | **fixed** (`2ead9b6`) — idempotent journal insert |
 | `gc_collect` | [critical] safety window measured upload age, not revocation age | **fixed** (`2ead9b6`) — age is the later of the two |
-| `gc_collect` | [high] no lease/fence between concurrent collects | **open** |
-| `gc_collect` | [high] preview and collect share one stale snapshot | **open** |
-| `gc_collect` | [high] crash mid-object is unrecoverable and unaudited | **open** |
-| `gc_collect` | [high] a scoped API key bypasses the admin role gate | **open** — see Phase 4 (role gate for destructive ops) |
+| `gc_collect` | [high] no lease/fence between concurrent collects | **fixed** — durable, expiring lease in `storage_gc_leases`; a lost race is `skipped`, not a second delete |
+| `gc_collect` | [high] preview and collect share one stale snapshot | **fixed** — the lease claim commits before re-verification, so every check runs in a fresh transaction |
+| `gc_collect` | [high] crash mid-object is unrecoverable and unaudited | **fixed** — the lease expires and the next run resumes; chunk deletion and the removed-versions write are idempotent |
+| `gc_collect` | [high] a scoped API key bypasses the admin role gate | **by design** — an API key exists only because an admin minted it with that exact scope, and delegation caps it; the role gate governs humans, the key is the grant |
 | `issue_api_key` | [medium] audit has no actor/id, written before validation, name unescaped | **open** |
 | `rotate_api_key` | [medium] 403/404/409 existence oracle | **open** |
 | `reveal_s3_credential_secret` | [medium] audit is in-memory only and viewer-readable | **open** |

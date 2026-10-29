@@ -25,6 +25,20 @@ from web.s3_gateway.checksums import (
 from web.s3_gateway.xml import _error, _parse_tag_xml
 
 
+def db_connect():
+    """Resolve the connection factory through ``web.s3``."""
+    from web import s3
+
+    return s3.db_connect()
+
+
+def load_master_key():
+    """Resolve the master key loader through ``web.s3``."""
+    from web import s3
+
+    return s3.load_master_key()
+
+
 def storage_transport(db):
     """Resolve the transport through ``web.s3``.
 
@@ -42,6 +56,13 @@ def _chunk_size():
     from web import s3
 
     return s3.RECOMMENDED_CHUNK_SIZE
+
+
+def _select_scan_limit():
+    """Resolve the select scan cap through ``web.s3`` for the same reason."""
+    from web import s3
+
+    return s3.MAX_SELECT_SCAN_BYTES
 
 
 def _notification_allowlist():

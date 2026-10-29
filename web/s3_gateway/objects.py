@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, unquote
 from xml.etree import ElementTree as ET
 
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import web.app as _webapp
 from teledrive.s3.annotations import AnnotationError
@@ -30,7 +30,15 @@ from teledrive.s3.object_metadata import (
     ObjectMetadataError, ObjectMetadataStore, parse_object_metadata,
     signed_header_names,
 )
-from teledrive.s3.restore import restore_header as _restore_header
+from teledrive.s3.restore import (
+    MAX_RESTORE_XML_BYTES, RestoreError, is_applicable as _restore_is_applicable,
+    is_restored as _restore_is_restored, parse_restore_request,
+    restore_header as _restore_header,
+)
+from teledrive.s3.select import (
+    MAX_REQUEST_XML_BYTES as MAX_SELECT_XML_BYTES,
+    SelectError, build_event_stream, parse_select_request, run_select,
+)
 from teledrive.s3.sigv4 import SigV4Error
 from teledrive.s3.tagging import ObjectTagStore, TaggingError
 from teledrive.s3.write_conditions import ExpectedHead, WritePreconditionError
@@ -44,12 +52,14 @@ from teledrive.storage.sse import (
 from web.app import _secure_mkdir
 
 from web.s3_gateway.authorization import (
-    _apply_bucket_owner_preferred, _require_source_acl,
+    _acl_allows, _apply_bucket_owner_preferred, _require_source_acl,
 )
 from web.s3_gateway.checksums import (
     _effective_object_etag, _ssec_response_headers, _verify_upload_sha256,
 )
-from web.s3_gateway.common import _chunk_size, _quota_guard, storage_transport
+from web.s3_gateway.common import (
+    _chunk_size, _quota_guard, _select_scan_limit, storage_transport,
+)
 from web.s3_gateway.ranges import _range
 from web.s3_gateway.xml import NAMESPACE, _error
 
@@ -749,3 +759,226 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
     return StreamingResponse(stream(), status_code=206 if partial else 200, headers=headers)
+
+
+async def _read_verified_xml_body(request: Request, limit: int, error_cls):
+    """Bounded XML body with the signed payload/checksum policy applied."""
+    body = bytearray()
+    async for block in request.stream():
+        body.extend(block)
+        if len(body) > limit:
+            raise error_cls("MalformedXML", "XML request body exceeds its limit")
+    payload = bytes(body)
+    _verify_upload_sha256(
+        request, hashlib.sha256(payload).digest(),
+        md5_digest=hashlib.md5(payload, usedforsecurity=False).digest(),
+        sha1_digest=hashlib.sha1(payload, usedforsecurity=False).digest(),
+        crc64nvme_value=crc64nvme(payload),
+    )
+    return payload
+
+
+async def _handle_object_rename(ctx: _S3RequestContext) -> Response:
+    """PUT ?renameObject: atomically move the current head to this key.
+
+    Wire shape (the AWS directory-bucket shape): the destination key is the
+    request URI key and ``x-amz-rename-source`` carries the source as a local
+    ``bucket/key`` path. This implementation supports standard buckets too —
+    a documented SUPERSET of AWS, which limits RenameObject to directory
+    buckets — because the catalog is metadata-first: no Telegram bytes move.
+    Overwrite is rejected (409); conditional rename headers are unsupported.
+    """
+    request = ctx.request
+    bucket = ctx.bucket
+    destination_key = ctx.key
+    catalog = ctx.catalog
+    owner = ctx.owner
+    source_header = request.headers.get("x-amz-rename-source")
+    if source_header is None:
+        return _error("InvalidRequest", "x-amz-rename-source is required", 400)
+    if "x-amz-rename-source" not in signed_header_names(request):
+        raise SigV4Error("AccessDenied", "x-amz-rename-source must be signed")
+    if any(name.startswith("x-amz-rename-source-if-")
+           for name in request.headers):
+        return _error(
+            "NotImplemented",
+            "Conditional rename is unsupported; the destination must not exist",
+            501,
+        )
+    if source_header.startswith("//") or "://" in source_header or "?" in source_header:
+        return _error("InvalidArgument",
+                      "Rename source must be a local bucket/object path", 400)
+    path = unquote(source_header[1:] if source_header.startswith("/")
+                   else source_header)
+    source_bucket, slash, source_key = path.partition("/")
+    if not slash or not source_bucket or not source_key:
+        return _error("InvalidArgument", "Invalid rename source bucket/object key", 400)
+    if source_bucket != bucket:
+        return _error("InvalidRequest",
+                      "RenameObject source and destination must be in the same bucket",
+                      400)
+    if source_key == destination_key:
+        return _error("InvalidRequest",
+                      "Rename source and destination keys are identical", 400)
+    try:
+        source = catalog.get(bucket, source_key)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "Rename source object does not exist", 404)
+    if catalog.current_marker(bucket, source_key) is not None:
+        return _error("NoSuchKey", "Rename source object does not exist", 404)
+    # The request-level ACL gate only saw the DESTINATION key. Rename needs
+    # READ on the source and WRITE on the destination, both enforced here.
+    if not _acl_allows(catalog, owner, "s3:GetObject", bucket, source_key):
+        raise SigV4Error("AccessDenied", "Access denied by source object ACL")
+    if not _acl_allows(catalog, owner, "s3:PutObject", bucket, destination_key):
+        raise SigV4Error("AccessDenied", "Access denied by destination object ACL")
+    async for block in request.stream():
+        if block:
+            return _error("InvalidRequest", "RenameObject request must have no body", 400)
+    try:
+        catalog.rename_object(
+            bucket, source_key, destination_key,
+            now=int(time.time()),
+            expected_source_id=source.item.id,
+            expected_generation=source.generation,
+        )
+    except FileExistsError:
+        return _error("OperationAborted",
+                      "Rename destination object already exists", 409)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "Rename source object does not exist", 404)
+    except PermissionError as exc:
+        return _error("AccessDenied", str(exc), 403)
+    except ValueError:
+        return _error("OperationAborted",
+                      "Concurrent rename or invalid destination", 409)
+    return Response(status_code=200)
+
+
+async def _handle_select_object_content(ctx: _S3RequestContext) -> Response:
+    """POST ?select&select-type=2: run the bounded SQL subset on real bytes."""
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    owner = ctx.owner
+    if request.query_params.get("select-type") != "2":
+        return _error("InvalidArgument", "select-type=2 is required", 400)
+    if "versionId" in request.query_params:
+        return _error("NotImplemented",
+                      "Versioned SelectObjectContent is unsupported", 501)
+    payload = await _read_verified_xml_body(
+        request, MAX_SELECT_XML_BYTES, SelectError)
+    select_request = parse_select_request(payload)
+    try:
+        current = catalog.get(bucket, key)
+    except FileNotFoundError:
+        return _error("NoSuchKey", "The specified key does not exist", 404)
+    if catalog.current_marker(bucket, key) is not None:
+        return _error("NoSuchKey", "The specified key does not exist", 404)
+    if not _acl_allows(catalog, owner, "s3:GetObject", bucket, key):
+        raise SigV4Error("AccessDenied", "Access denied by object ACL")
+    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+    _secure_mkdir(scratch)
+    fd, name = tempfile.mkstemp(prefix="s3-select-", dir=scratch)
+    stage = Path(name)
+    os.close(fd)
+    try:
+        transport = storage_transport(ctx.db)
+        await transport.verify_target()
+        engine = TelegramObjectStorage(
+            catalog.manifests, transport,
+            chunk_size=_chunk_size(), scratch_directory=scratch,
+        )
+        total = 0
+        with open(stage, "wb") as out:
+            async for piece in engine.iter_bytes(current.item.id):
+                total += len(piece)
+                if total > _select_scan_limit():
+                    raise SelectError(
+                        "EntityTooLarge",
+                        f"Select scan exceeds the {_select_scan_limit()}-byte limit",
+                        413,
+                    )
+                out.write(piece)
+        result = run_select(stage, select_request)
+        body = build_event_stream(result)
+        return Response(body, status_code=200,
+                        media_type="application/vnd.amazon.eventstream")
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+async def _perform_restore(ctx: _S3RequestContext, item,
+                           restore_request) -> Response:
+    """Open a bounded restore window on an archived catalog object.
+
+    The Telegram chunks never moved; this only flips the access gate. The
+    window is a stored nanosecond deadline, so expiry needs no scheduler.
+    """
+    now_ns = time.time_ns()
+    if _restore_is_restored(item, now_ns=now_ns):
+        # AWS RestoreObject answers 409 RestoreAlreadyInProgress while a
+        # restore window is still active for the same object.
+        return _error(
+            "RestoreAlreadyInProgress",
+            "The object restore is already in progress",
+            409,
+        )
+    until_ns = now_ns + restore_request.days * 86_400_000_000_000
+    try:
+        ctx.catalog.db.connection.execute(
+            update(objects).where(objects.c.id == item.id)
+            .values(restore_until_ns=until_ns))
+        ctx.catalog.db.commit()
+    except BaseException:
+        ctx.catalog.db.connection.rollback()
+        raise
+    return Response(status_code=202)
+
+
+async def _handle_restore_object(ctx: _S3RequestContext) -> Response:
+    """POST ?restore: strict AWS RestoreRequest, then the real tier state.
+
+    A STANDARD-class object is already immediately readable, so AWS-conformant
+    behaviour is ``403 InvalidObjectState``. An ARCHIVE_ACCESS/
+    DEEP_ARCHIVE_ACCESS object gets a real restore window (202) and reads work
+    again until that window expires.
+    """
+    request = ctx.request
+    bucket = ctx.bucket
+    key = ctx.key
+    catalog = ctx.catalog
+    payload = await _read_verified_xml_body(
+        request, MAX_RESTORE_XML_BYTES, RestoreError)
+    restore_request = parse_restore_request(payload)
+    if "versionId" in request.query_params:
+        version_id = request.query_params["versionId"]
+        if not version_id or len(version_id) > 80:
+            return _error("InvalidArgument", "Invalid object VersionId", 400)
+        if not catalog.is_visible_version(bucket, key, version_id):
+            return _error("NoSuchVersion", "Object version is not published", 404)
+        try:
+            item = catalog.manifests.get(version_id)
+        except FileNotFoundError:
+            return _error("NoSuchVersion", "Object version is not readable", 404)
+        status = ctx.db.connection.execute(select(objects.c.status).where(
+            objects.c.id == version_id)).scalar_one_or_none()
+        if (item.bucket != bucket or item.key != key or status != "ready"):
+            return _error("NoSuchVersion", "Object version is not readable", 404)
+    else:
+        try:
+            item = catalog.get(bucket, key).item
+        except FileNotFoundError:
+            return _error("NoSuchKey", "The specified key does not exist", 404)
+        if catalog.current_marker(bucket, key) is not None:
+            return _error("NoSuchKey", "The specified key does not exist", 404)
+    if not _restore_is_applicable(item):
+        return _error(
+            "InvalidObjectState",
+            "The operation is not valid for the object's storage class; "
+            "this object is already in an immediately readable class",
+            403,
+        )
+    return await _perform_restore(ctx, item, restore_request)
+

@@ -353,11 +353,21 @@ metadata-level copy+delete and could be supported if a client needs it.
 
 - [x] Commit a machine-readable 116-operation manifest synchronized by CI with the reviewed specification matrix, and add a strict S3 request-parameter allowlist. Upstream AWS additions still require explicit periodic re-audits.
 - [ ] For every supported operation, test normal, missing/auth-failed, malformed, over-limit, retry, multiworker race, signature-tampered and crash/restart cases; assert no partial SQL publication.
-      **Status:** the adversarial classes (missing auth, malformed, over-limit,
-      signature-tampered, unsupported selectors) are covered for every
-      operation by `tests/s3/`; the *exhaustive per-operation matrix* is not.
-      This stays open on purpose rather than being ticked for partial
-      coverage — see `docs/AUDIT_2026_10_29.md`.
+      **Status — five of the eight columns are now table-driven and complete:**
+
+      | Column | Where | Coverage |
+      |---|---|---|
+      | normal | per-operation test files | every operation has at least one happy-path test |
+      | missing / auth-failed | `tests/s3/test_s3_unsigned_matrix.py` | **all 114 supported operations**, asserted as 401/403 with no mutation and no Telegram traffic |
+      | malformed | `tests/s3/test_s3_malformed_matrix.py` | all 14 XML-bodied operations; a 5xx is treated as a failure, not a pass |
+      | over-limit | `tests/s3/test_s3_over_limit_matrix.py` | all 5 body-limited operations, limits imported from the enforcing module and sent as `limit + 1` |
+      | signature-tampered | `tests/s3/test_s3_sigv4_defense.py` | per-class, not per-operation |
+      | retry, multiworker race, crash/restart | per-operation | only for the operations where the state machine makes it meaningful (publish CAS, multipart, GC) |
+
+      Both matrices carry a meta-test that fails when a supported operation is
+      added without an entry, so the coverage cannot rot. What is genuinely
+      still open is the *crash/restart* column for every operation, and the
+      multiworker race column beyond the publish/GC paths.
 - [x] For unsupported operations, add adversarial selector/HTTP method tests: **no accidental HTTP 200 or mutation**; unsupported-sensitive headers must fail before Telegram I/O.
 - [ ] Verify all S3 mutation paths are reflected in REST/local-job heads, version records, tombstones, tags and copy aliases; invariants run against both SQLite and PostgreSQL.
       **Status:** all four write paths converge on `catalog.publish` (or

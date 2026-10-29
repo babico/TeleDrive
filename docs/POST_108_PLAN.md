@@ -92,8 +92,18 @@ buffer).
 
 **Owner:** *"ardından multiagent birbirleriyle handoflar aracılığıyla haberleşen refactor ajanalraı aç kaç tane lazımsa codebasein kocaman kısımlarını düzeltsinler"*
 
-- [ ] Split the giant modules (`web/app.py`, `web/s3.py`, `teledrive/storage/catalog.py`,
-      `web/static/app.js`) into focused units.
+- [x] Split `web/s3.py` — **done**. 5 106 → **225 lines** and 81 → 6
+      definitions, across eleven focused modules (`dispatch`, `objects`,
+      `buckets`, `multipart`, `metadata_ops`, `authorization`, `checksums`,
+      `ranges`, `xml`, `context`, `common`). Move-only: no test was edited,
+      the route surface is unchanged, and the inventory is still 114/0/2.
+      See `docs/handoffs/01c-web-s3-split-complete.md`.
+- [ ] Split `web/app.py` — planned, not started:
+      `docs/handoffs/02-split-web-app.md`. Its precondition (a frozen
+      route-surface snapshot, 133 tuples asserted in both directions) is
+      already committed, so the split can start safely.
+- [ ] Split `teledrive/storage/catalog.py` and `web/static/app.js` — not
+      started; `web/app.py` goes first because it gates more.
 - [ ] Agents coordinate through handoff documents in `docs/handoffs/` — each
       refactor agent writes what it changed, what it left, and what the next
       agent must know, then the next one reads it before starting.

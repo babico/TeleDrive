@@ -11,6 +11,27 @@ checksum order or dispatch order changed. One code commit:
 name. `web/unified.py` (`from web.s3 import app`), `from web.s3 import _page`,
 and the module attributes the tests monkeypatch all keep resolving.
 
+## The one deviation from the brief (accepted)
+
+The scope said `_handle` stays in `web/s3.py`. It did not: `_handle` alone is
+795 lines, so keeping it would have missed the "under ~500 lines" definition
+of done by 300. It moved VERBATIM to `web/s3_gateway/dispatch.py` and is
+re-exported, so `web.s3._handle` still resolves and `ast.dump` matches the
+original exactly.
+
+Accepted because the alternative was either an unmet DoD or a refactor of the
+routing logic, which this step was explicitly not allowed to do. The revert
+path is one import: move the function back and delete the re-export.
+
+## Verified independently after the merge
+
+* `web.s3._handle is web.s3_gateway.dispatch._handle` → True
+* `web.s3.app` is the FastAPI instance `web/unified.py` mounts
+* the call-time proxies actually follow a monkeypatch of `web.s3`:
+  `RECOMMENDED_CHUNK_SIZE`, `db_connect` and `load_master_key` all read the
+  patched value through `common.py`, which is the property the tests rely on
+* `tests/s3` + `tests/meta`: 1407 passed, 46 skipped
+
 ## Final counts
 
 | File | Lines | Top-level defs/classes |

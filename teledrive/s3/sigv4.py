@@ -81,6 +81,48 @@ def _canonical_path(request: Request) -> str:
     return path
 
 
+# S3 Express One Zone operations are signed with the ``s3express`` service
+# name. TeleDrive answers exactly two of them (see directory_buckets.py), so
+# only those permissions may authenticate with that scope.
+_EXPRESS_PERMISSIONS = frozenset({"s3:ListDirectoryBuckets", "s3:CreateSession"})
+_SIGNING_SERVICES = frozenset({"s3", "s3express"})
+
+
+_AUTH_SERVICE_RE = re.compile(
+    r"AWS4-HMAC-SHA256 Credential=[^\s,/]{1,64}/\d{8}/[a-z0-9-]{1,32}/"
+    r"([a-z0-9]{1,16})/aws4_request")
+_PRESIGN_SERVICE_RE = re.compile(
+    r"[^/\s]{1,64}/(\d{8})/[a-z0-9-]{1,32}/([a-z0-9]{1,16})/aws4_request")
+
+
+def signing_service_hint(request: Request) -> str:
+    """The declared credential-scope service, for ROUTING only.
+
+    ``ListBuckets`` and ``ListDirectoryBuckets`` share ``GET /`` and botocore
+    sends no distinguishing query field, so the scope name is the only wire
+    signal. This value is unverified here: it is part of the canonical request
+    that ``verify_header_signature`` recomputes, so a forged value simply
+    fails signature verification. Anything unrecognized is reported as
+    ``s3`` so the normal (stricter) path applies.
+    """
+    auth = request.headers.get("authorization", "")
+    match = _AUTH_SERVICE_RE.match(auth)
+    if match is not None:
+        return match.group(1)
+    credential = request.query_params.get("X-Amz-Credential", "")
+    match = _PRESIGN_SERVICE_RE.fullmatch(credential)
+    return match.group(2).lower() if match is not None else "s3"
+
+
+def _signing_service(permission: str, service: str) -> str:
+    if service not in _SIGNING_SERVICES:
+        raise SigV4Error("AccessDenied", "Unsupported SigV4 service")
+    if service == "s3express" and permission not in _EXPRESS_PERMISSIONS:
+        raise SigV4Error(
+            "AccessDenied", "S3 Express signing is only valid for directory-bucket operations")
+    return service
+
+
 def _presigned_signature(request: Request, lookup_secret, permission: str,
                          now: datetime | None) -> str:
     if request.method not in {"GET", "HEAD", "PUT", "DELETE", "POST"}:
@@ -104,12 +146,13 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
     if "X-Amz-Security-Token" in values:
         raise SigV4Error("InvalidToken", "Temporary AWS session tokens are unsupported")
     credential = re.fullmatch(
-        r"([^/\s]{1,64})/(\d{8})/([a-z0-9-]{1,32})/s3/aws4_request",
+        r"([^/\s]{1,64})/(\d{8})/([a-z0-9-]{1,32})/([a-z0-9]{1,16})/aws4_request",
         values["X-Amz-Credential"],
     )
     if credential is None:
         raise SigV4Error("AccessDenied", "Invalid presigned credential scope")
-    access_key, date, region = credential.groups()
+    access_key, date, region, service = credential.groups()
+    service = _signing_service(permission, service)
     signed_string = values["X-Amz-SignedHeaders"]
     signed = signed_string.split(";")
     if (not signed or signed != sorted(set(signed)) or "host" not in signed
@@ -212,7 +255,7 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
         + "".join(f"{name}:{headers[name]}\n" for name in signed)
         + f"\n{signed_string}\n{canonical_payload}"
     )
-    scope = f"{date}/{region}/s3/aws4_request"
+    scope = f"{date}/{region}/{service}/aws4_request"
     string_to_sign = (
         f"AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{_sha(canonical.encode())}"
     )
@@ -220,7 +263,7 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
     if secret is None:
         raise SigV4Error("AccessDenied", "Unknown, expired, revoked or unauthorized access key")
     key = _hmac(b"AWS4" + secret.encode(), date)
-    for word in (region, "s3", "aws4_request"):
+    for word in (region, service, "aws4_request"):
         key = _hmac(key, word)
     expected = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature):
@@ -287,13 +330,15 @@ def verify_header_signature(request: Request, lookup_secret, permission: str, *,
         return _presigned_signature(request, lookup_secret, permission, now)
     auth = request.headers.get("authorization", "")
     match = re.fullmatch(
-        r"AWS4-HMAC-SHA256 Credential=([^\s,/]{1,64})/(\d{8})/([a-z0-9-]{1,32})/s3/aws4_request,"
+        r"AWS4-HMAC-SHA256 Credential=([^\s,/]{1,64})/(\d{8})/([a-z0-9-]{1,32})/"
+        r"([a-z0-9]{1,16})/aws4_request,"
         r"\s*SignedHeaders=([a-z0-9;\-]+),\s*Signature=([0-9a-f]{64})",
         auth,
     )
     if match is None:
         raise SigV4Error("AccessDenied", "AWS Signature V4 Authorization required")
-    access_key, date, region, headers_part, actual_signature = match.groups()
+    access_key, date, region, service, headers_part, actual_signature = match.groups()
+    service = _signing_service(permission, service)
     signed = headers_part.split(";")
     if signed != sorted(set(signed)) or "host" not in signed or "x-amz-date" not in signed:
         raise SigV4Error("SignatureDoesNotMatch", "Invalid SignedHeaders")
@@ -342,13 +387,13 @@ def verify_header_signature(request: Request, lookup_secret, permission: str, *,
         + "".join(f"{key}:{headers[key]}\n" for key in signed)
         + f"\n{headers_part}\n{payload}"
     )
-    scope = f"{date}/{region}/s3/aws4_request"
+    scope = f"{date}/{region}/{service}/aws4_request"
     to_sign = f"AWS4-HMAC-SHA256\n{request_date}\n{scope}\n{_sha(canonical.encode())}"
     secret = lookup_secret(access_key, permission)
     if secret is None:
         raise SigV4Error("AccessDenied", "Unknown, expired, revoked or unauthorized access key")
     key = _hmac(b"AWS4" + secret.encode(), date)
-    for word in (region, "s3", "aws4_request"):
+    for word in (region, service, "aws4_request"):
         key = _hmac(key, word)
     expected = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, actual_signature):

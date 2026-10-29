@@ -24,7 +24,7 @@ def bucket(service):  # noqa: F401
 @pytest.mark.parametrize("selector,tag,value", [
     ("ownershipControls", "ObjectOwnership", "BucketOwnerEnforced"),
     ("requestPayment", "Payer", "BucketOwner"),
-    ("accelerate", "TransferAcceleratedStatus", "Suspended"),
+    ("accelerate", "Status", "Suspended"),
 ])
 def test_bucket_config_reads_return_fixed_private_answers(service, bucket,
                                                           selector, tag, value):

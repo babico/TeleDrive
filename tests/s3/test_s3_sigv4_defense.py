@@ -67,3 +67,45 @@ def test_query_limits_are_inclusive_not_off_by_one():
     assert _canonical_query(wire) == wire.decode("ascii")
     pairs = b"&".join([b"k=v"] * MAX_QUERY_FIELDS)
     assert _canonical_query(pairs) == pairs.decode("ascii")
+
+
+def _header_request(service: str, permission: str) -> Request:
+    auth = (
+        "AWS4-HMAC-SHA256 "
+        f"Credential=TDTEST/20261013/us-east-1/{service}/aws4_request,"
+        "SignedHeaders=host;x-amz-date,Signature=" + "0" * 64
+    )
+    return Request({
+        "type": "http", "method": "GET",
+        "scheme": "http", "server": ("localhost", 9000),
+        "path": "/", "raw_path": b"/",
+        "query_string": b"", "headers": [
+            (b"host", b"localhost:9000"),
+            (b"x-amz-date", b"20261013T120000Z"),
+            (b"x-amz-content-sha256", b"UNSIGNED-PAYLOAD"),
+            (b"authorization", auth.encode("ascii")),
+        ],
+    })
+
+
+@pytest.mark.parametrize("service,permission", [
+    ("s3express", "s3:GetObject"),
+    ("s3express", "s3:ListAllMyBuckets"),
+    ("kms", "s3:GetObject"),
+    ("iam", "s3:ListDirectoryBuckets"),
+])
+def test_signing_service_scope_is_pinned_per_operation(service, permission):
+    """Only the two S3 Express operations accept an s3express scope.
+
+    The scope is part of the signing key, so accepting it everywhere would let
+    an Express-scoped credential sign ordinary object requests (and vice
+    versa). A cross-service or unknown service name is rejected before the
+    credential lookup.
+    """
+    with pytest.raises(SigV4Error) as error:
+        verify_header_signature(
+            _header_request(service, permission),
+            lambda *_: pytest.fail("Rejected scope reached credential lookup"),
+            permission, now=NOW,
+        )
+    assert error.value.code == "AccessDenied"

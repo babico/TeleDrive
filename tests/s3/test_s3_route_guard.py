@@ -240,9 +240,12 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
     assert len(rows) == len(expected) == len(data["operations"]) == 116
     actual = {item["name"]: item["status"] for item in data["operations"]}
     assert expected == actual
-    assert Counter(actual.values()) == {
-        "supported":110, "partial":2, "unsupported":4,
-    }
+    # Compare Counters on both sides: a status with zero operations has no
+    # Counter key at all, so a plain dict literal would never match once a
+    # status reaches zero (which is the goal for "partial").
+    assert Counter(actual.values()) == Counter(
+        {"supported": 114, "partial": 0, "unsupported": 2}
+    )
     # Every partial is classified by WHY it is partial, and the doc and
     # the manifest agree on the class.
     gap_pattern = re.compile(
@@ -255,7 +258,9 @@ def test_116_operation_manifest_exactly_matches_reviewed_spec():
                      for item in data["operations"]
                      if item["status"] == "partial"}
     assert doc_gaps == manifest_gaps
-    assert Counter(manifest_gaps.values()) == {"by design": 2}
+    # Zero by-design partials means no Counter keys at all; Counter() on both
+    # sides is the only comparison that survives a status reaching zero.
+    assert Counter(manifest_gaps.values()) == Counter({"by design": 0})
     # The remaining two partials are RequestPayment/Accelerate GETs, both
     # "by design": each reports the single state that exists here and the
     # write side rejects the state needing absent infrastructure. P2-B

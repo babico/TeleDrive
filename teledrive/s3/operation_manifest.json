@@ -531,9 +531,8 @@
     },
     {
       "name": "GetBucketRequestPayment",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketRequestPayment",
@@ -542,9 +541,8 @@
     },
     {
       "name": "GetBucketAccelerateConfiguration",
-      "status": "partial",
-      "workstream": "implemented",
-      "gap_class": "by design"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "PutBucketAccelerateConfiguration",
@@ -558,13 +556,13 @@
     },
     {
       "name": "CreateSession",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "ListDirectoryBuckets",
-      "status": "unsupported",
-      "workstream": "P3-H"
+      "status": "supported",
+      "workstream": "implemented"
     },
     {
       "name": "RenameObject",

@@ -180,6 +180,7 @@ jobs:
             tests/s3/test_s3_website.py \
             tests/s3/test_s3_annotations.py \
             tests/s3/test_s3_request_payment_accelerate.py \
+            tests/s3/test_s3_directory_buckets.py \
             tests/s3/test_s3_policy_engine.py \
             tests/s3/test_s3_ownership_abac.py \
             tests/s3/test_s3_report_configs.py \

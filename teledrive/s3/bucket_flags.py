@@ -8,9 +8,12 @@ true for each of these configurations:
   instead of pretending someone will be charged. Nothing is stored: the
   accepted value IS the only state that exists, so a bucket row would only
   duplicate a constant. GET reports that state.
-* ``AccelerateConfiguration`` -> ``TransferAcceleratedStatus=Suspended``.
-  There is no AWS edge network in front of Telegram storage, so ``Enabled``
-  is rejected with 501. GET reports ``Suspended``.
+* ``AccelerateConfiguration`` -> ``Status=Suspended``. AWS's wire shape is
+  ``<AccelerateConfiguration><Status>...</Status></AccelerateConfiguration>``
+  (verified against the botocore S3 model); ``TransferAcceleratedStatus`` is
+  the internal enum name, not a wire element. There is no AWS edge network in
+  front of Telegram storage, so ``Enabled`` is rejected with 501. GET reports
+  ``Status=Suspended``.
 
 That makes the PUT operations honest "supported" operations: they correctly
 manage the only state that exists and refuse the state that would require
@@ -105,12 +108,28 @@ def parse_accelerate_xml(payload: bytes) -> str:
 
 
 def request_payment_xml() -> bytes:
+    """Render the AWS wire document; ``Payer`` is the only member.
+
+    There is exactly one renderable state here, so the function takes no
+    argument: it cannot produce a document the PUT parser would reject.
+    """
     root = ET.Element("RequestPaymentConfiguration", xmlns=NS)
     ET.SubElement(root, "Payer").text = "BucketOwner"
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def accelerate_xml() -> bytes:
+    """Render the AWS wire document; ``Status`` is the only member.
+
+    The botocore model for ``AccelerateConfiguration`` exposes exactly one
+    member named ``Status``. Emitting the internal enum name
+    (``TransferAcceleratedStatus``) makes boto3 parse an empty structure,
+    which is why the previous GET was reported as "partial". The GET path and
+    the PUT parser now share this one canonical shape.
+
+    As with request payment there is one renderable state, so no argument can
+    produce a document the PUT parser would reject.
+    """
     root = ET.Element("AccelerateConfiguration", xmlns=NS)
-    ET.SubElement(root, "TransferAcceleratedStatus").text = "Suspended"
+    ET.SubElement(root, "Status").text = "Suspended"
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)

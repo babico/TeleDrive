@@ -3,6 +3,10 @@
 Both configurations are writable-but-single-state: the accepted value is the
 only state that exists, and the value that would require absent infrastructure
 (requester billing / an edge network) is rejected with an explicit 501.
+
+The GET renderers emit AWS's real wire members — ``Payer`` and ``Status``
+(both verified against the botocore S3 model) — and are the exact documents
+the PUT parsers accept, so PUT-then-GET round-trips byte-identically.
 """
 from __future__ import annotations
 
@@ -11,6 +15,10 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from tests.s3.test_s3_gateway import service, signed
+from teledrive.s3.bucket_flags import (
+    accelerate_xml, parse_accelerate_xml, parse_request_payment_xml,
+    request_payment_xml,
+)
 from teledrive.s3.credentials import S3CredentialStore
 
 BUCKET_OWNER = (
@@ -66,11 +74,36 @@ def test_accelerate_accepts_suspended_and_get_reports_it(service):
     assert signed(service, "PUT", "/flags").status_code == 200
     read = signed(service, "GET", "/flags?accelerate")
     assert read.status_code == 200
-    assert _root_values(read) == {"TransferAcceleratedStatus": "Suspended"}
+    assert _root_values(read) == {"Status": "Suspended"}
     put = signed(service, "PUT", "/flags?accelerate", SUSPENDED)
     assert put.status_code == 200, put.text
     assert _root_values(signed(service, "GET", "/flags?accelerate")) == {
-        "TransferAcceleratedStatus": "Suspended"}
+        "Status": "Suspended"}
+
+
+@pytest.mark.parametrize("selector,parse,render", [
+    ("requestPayment", parse_request_payment_xml, request_payment_xml),
+    ("accelerate", parse_accelerate_xml, accelerate_xml),
+])
+def test_put_then_get_round_trips_byte_identically(service, selector, parse,
+                                                   render):
+    """The GET body is exactly what the PUT parser accepts.
+
+    Round-trip proof: read the canonical document, PUT those same bytes, and
+    read it back byte-for-byte. The PUT parser and the GET renderer are the
+    same wire shape, so a client that re-uploads a GET body cannot drift.
+    """
+    assert signed(service, "PUT", "/flags").status_code == 200
+    first = signed(service, "GET", f"/flags?{selector}")
+    assert first.status_code == 200, first.text
+    # The canonical document parses back to the single real state.
+    assert parse(first.content) in {"BucketOwner", "Suspended"}
+    assert first.content == render()
+    put = signed(service, "PUT", f"/flags?{selector}", first.content)
+    assert put.status_code == 200, put.text
+    second = signed(service, "GET", f"/flags?{selector}")
+    assert second.status_code == 200, second.text
+    assert second.content == first.content
 
 
 def test_accelerate_rejects_enabled_with_honest_501(service):
@@ -80,7 +113,7 @@ def test_accelerate_rejects_enabled_with_honest_501(service):
     assert b"NotImplemented" in refused.content
     assert b"edge network" in refused.content
     assert _root_values(signed(service, "GET", "/flags?accelerate")) == {
-        "TransferAcceleratedStatus": "Suspended"}
+        "Status": "Suspended"}
 
 
 @pytest.mark.parametrize("selector,body,status,fragment", [
@@ -172,3 +205,62 @@ def test_no_bucket_crud_or_object_route_fallback(service):
     assert signed(service, "PUT", "/flags/item?accelerate",
                   SUSPENDED).status_code == 501
     assert signed(service, "GET", "/flags/item").content == b"data"
+
+
+def test_actual_boto3_client_reads_accelerate_and_request_payment(service):
+    """The regression a raw-XML test cannot catch.
+
+    boto3 parses the response against the botocore S3 model. The old
+    accelerate renderer emitted ``TransferAcceleratedStatus``, which the
+    model does not know, so boto3 silently returned an empty dict. This test
+    goes through a real client over an in-process uvicorn listener and would
+    have failed before the shape fix.
+    """
+    import socket
+    import threading
+    import time
+    import uvicorn
+    import boto3
+    from botocore.config import Config
+    import web.s3 as gateway
+
+    _, credential, _, _, _ = service
+    assert signed(service, "PUT", "/flags-ci").status_code == 200
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(
+        gateway.app, host="127.0.0.1", port=port, log_level="error", lifespan="off",
+    ))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert server.started
+        s3 = boto3.client("s3", endpoint_url=f"http://127.0.0.1:{port}",
+                          region_name="us-east-1",
+                          aws_access_key_id=credential.access_key,
+                          aws_secret_access_key=credential.secret_key,
+                          config=Config(signature_version="s3v4",
+                                        s3={"addressing_style": "path"}))
+        accel = s3.get_bucket_accelerate_configuration(Bucket="flags-ci")
+        assert accel["Status"] == "Suspended"
+        payment = s3.get_bucket_request_payment(Bucket="flags-ci")
+        assert payment["Payer"] == "BucketOwner"
+        assert s3.put_bucket_accelerate_configuration(
+            Bucket="flags-ci",
+            AccelerateConfiguration={"Status": "Suspended"},
+        )["ResponseMetadata"]["HTTPStatusCode"] == 200
+        assert s3.put_bucket_request_payment(
+            Bucket="flags-ci", RequestPaymentConfiguration={"Payer": "BucketOwner"},
+        )["ResponseMetadata"]["HTTPStatusCode"] == 200
+        assert s3.get_bucket_accelerate_configuration(
+            Bucket="flags-ci")["Status"] == "Suspended"
+        assert s3.get_bucket_request_payment(
+            Bucket="flags-ci")["Payer"] == "BucketOwner"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

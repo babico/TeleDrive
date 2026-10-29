@@ -13,6 +13,14 @@ from collections.abc import Mapping
 # SDK ?x-id=OperationName is a non-authoritative hint, not a selector; the
 # signed HTTP method and URL are always authoritative for routing/auth.
 _ROOT_BUCKET_LIST = frozenset({"max-buckets", "prefix", "bucket-region", "continuation-token"})
+# ListDirectoryBuckets (S3 Express One Zone) is ALSO GET / with only
+# continuation-token and max-directory-buckets (botocore requestUri "/").
+# TeleDrive has no directory buckets, so the only honest answer is a
+# permanent empty list; the accepted query surface is still AWS's exact one.
+_ROOT_DIRECTORY_LIST = frozenset({"continuation-token", "max-directory-buckets"})
+_DIRECTORY_LIST_HINT = "ListDirectoryBuckets"
+MAX_DIRECTORY_BUCKETS = 1000
+MAX_DIRECTORY_TOKEN_LENGTH = 1024
 _BUCKET_GET_V1 = frozenset({
     "prefix", "delimiter", "marker", "max-keys", "encoding-type",
 })
@@ -41,6 +49,8 @@ _BUCKET_CONTROL = frozenset({
     "metadataConfiguration", "metadataTable",
     "metadataJournalTable", "metadataInventoryTable",
     "metadataAnnotationTable",
+    # CreateSession (S3 Express One Zone). GET /{bucket}?session.
+    "session",
     # Read-only AWS compatibility probes (see web/s3.py _COMPAT_BUCKET_READS).
     "acl", "ownershipControls", "policy", "replication", "website", "logging",
     "notification", "notificationConfiguration", "requestPayment", "accelerate",
@@ -58,6 +68,8 @@ _EMPTY_FLAG = frozenset({
     "intelligent-tiering",
     "metadataConfiguration", "metadataTable", "metadataJournalTable",
     "metadataInventoryTable", "metadataAnnotationTable",
+    # CreateSession (S3 Express One Zone). GET /{bucket}?session.
+    "session",
 })
 # No upper/lower-case folding for S3 query fields: AWS subresources are
 # case-sensitive. A misspelled control may not be silently ignored.
@@ -69,11 +81,52 @@ class S3QueryError(ValueError):
         self.code, self.status = code, status
 
 
-def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> None:
+def _real_params(params) -> set[str]:
+    """Drop SigV4 auth fields and the non-authoritative SDK x-id hint."""
+    return {key for key in params
+            if not key.startswith("X-Amz-") and key != "x-id"}
+
+
+def is_directory_bucket_listing(method: str, bucket: str, object_path: bool,
+                                params, signing_service: str = "s3") -> bool:
+    """Which of the two AWS operations that share ``GET /`` is this?
+
+    ``ListBuckets`` and ``ListDirectoryBuckets`` both use the root URI, and
+    botocore sends NO query field for a default directory listing, so the
+    parameters alone cannot tell them apart. The authoritative discriminator
+    is the SigV4 credential scope: ListDirectoryBuckets is always signed with
+    the ``s3express`` service, ListBuckets with ``s3``. The scope is part of
+    the canonical request, so a forged hint cannot survive signature
+    verification. ``max-directory-buckets`` and the SDK ``x-id`` hint are
+    also honoured for hand-written clients.
+
+    Every other parameter combination keeps the normal ListBuckets
+    interpretation (and its stricter V1/V2 validation).
+    """
+    if method != "GET" or bucket or object_path:
+        return False
+    real = _real_params(params)
+    if "max-directory-buckets" in real:
+        return True
+    # ListBuckets-specific fields decide the other way; everything else is
+    # disambiguated by the signed scope or the SDK hint so that stray fields
+    # become a 400 below instead of silently turning a directory listing into
+    # ListBuckets.
+    if real & {"max-buckets", "prefix", "bucket-region"}:
+        return False
+    if params.getlist("x-id") == [_DIRECTORY_LIST_HINT]:
+        return True
+    return signing_service == "s3express"
+
+
+def validate_s3_query(method: str, bucket: str, object_path: bool, params,
+                      signing_service: str = "s3") -> None:
     """Reject unknown controls before SigV4 resolver/DB/media side effects.
 
     The only exceptions to the enumerated S3 params are AWS SigV4 X-Amz-*
     query fields, verified downstream, and the SDK's non-authoritative x-id.
+    ``signing_service`` is the credential scope's service name; it separates
+    ListBuckets from ListDirectoryBuckets, which share ``GET /``.
     """
     keys = set(params)
     if len(keys) > 64:
@@ -84,8 +137,11 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
         if len(hint) != 1 or len(hint[0]) > 128:
             raise S3QueryError("InvalidArgument", "Invalid SDK operation hint", 400)
 
+    directory_listing = is_directory_bucket_listing(
+        method, bucket, object_path, params, signing_service)
     if not bucket:
-        allowed = _ROOT_BUCKET_LIST if method == "GET" else frozenset()
+        allowed = (_ROOT_DIRECTORY_LIST if directory_listing else
+                   (_ROOT_BUCKET_LIST if method == "GET" else frozenset()))
     elif not object_path:
         control = real & _BUCKET_CONTROL
         if control:
@@ -116,6 +172,8 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
                 "notification": {"GET", "PUT"},
                 "notificationConfiguration": {"GET", "PUT"},
                 "requestPayment": {"GET", "PUT"}, "accelerate": {"GET", "PUT"},
+                # CreateSession is GET /{bucket}?session (botocore model).
+                "session": {"GET"},
                 "encryption": {"GET", "PUT", "DELETE"}, "object-lock": {"GET", "PUT"},
                 # Phase N: report configuration CRUD. The optional `id`
                 # query field selects one configuration; list requests have
@@ -247,6 +305,14 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
 
     forbidden = real - allowed
     if forbidden:
+        # ListDirectoryBuckets is a supported operation with a strict
+        # parameter surface: an unknown field is a malformed request (400),
+        # not an unimplemented AWS extension (501).
+        if directory_listing:
+            raise S3QueryError(
+                "InvalidArgument",
+                "Unknown ListDirectoryBuckets query parameter", 400,
+            )
         # Fail closed: no unexpected list, create, overwrite, delete or
         # anonymous body staging even for a valid signed request.
         raise S3QueryError(
@@ -259,6 +325,28 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params) -> No
             raise S3QueryError("InvalidArgument", "Duplicate S3 query parameter", 400)
         if name in _EMPTY_FLAG and values[0] != "":
             raise S3QueryError("InvalidArgument", "Unexpected selector value", 400)
+
+    if directory_listing:
+        token = params.get("continuation-token")
+        if token is not None and not (1 <= len(token) <= MAX_DIRECTORY_TOKEN_LENGTH):
+            raise S3QueryError(
+                "InvalidArgument",
+                "continuation-token must contain 1 to 1024 characters", 400,
+            )
+        raw_limit = params.get("max-directory-buckets")
+        if raw_limit is not None:
+            if (not raw_limit.isascii() or not raw_limit.isdecimal()
+                    or len(raw_limit) > 4):
+                raise S3QueryError(
+                    "InvalidArgument",
+                    "max-directory-buckets must be an integer from 1 to 1000",
+                    400,
+                )
+            if not 1 <= int(raw_limit) <= MAX_DIRECTORY_BUCKETS:
+                raise S3QueryError(
+                    "InvalidArgument",
+                    "max-directory-buckets must be from 1 to 1000", 400,
+                )
 
     if "uploadId" in real and not params["uploadId"]:
         raise S3QueryError("InvalidArgument", "Missing multipart UploadId", 400)

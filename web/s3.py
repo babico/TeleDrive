@@ -43,12 +43,15 @@ from sqlalchemy import insert, select, text, update
 
 from teledrive.db import Database
 from teledrive.s3.credentials import S3CredentialStore, load_master_key
-from teledrive.s3.route_guard import validate_s3_query, S3QueryError
+from teledrive.s3.route_guard import (
+    validate_s3_query, is_directory_bucket_listing, S3QueryError)
 from teledrive.s3.bucket_listing import list_buckets_xml, BucketListingError
+from teledrive.s3.directory_buckets import (
+    create_session_error, list_directory_buckets_xml)
 from teledrive.s3.checksums import crc32c, crc64nvme
 from teledrive.s3.aws_chunked import AwsChunkedDecoder, streaming_mode
 from teledrive.s3.sigv4 import (STREAMING_MODES, SigV4Error,
-                                verify_header_signature)
+                                signing_service_hint, verify_header_signature)
 from teledrive.s3.post_policy import parse_form, verify_post_policy, FORM_LIMIT
 from teledrive.s3.multipart import MultipartStore, MultipartError, MAX_PARTS
 from teledrive.s3.batch_delete import BatchDeleteError, MAX_XML_BYTES, parse_batch, verify_body
@@ -1939,6 +1942,19 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
     request = ctx.request
     bucket = ctx.bucket
     catalog = ctx.catalog
+    if request.method == "GET" and "session" in request.query_params:
+        # CreateSession issues S3 Express One Zone credentials for a
+        # DIRECTORY bucket. TeleDrive implements no directory buckets, so no
+        # session can ever be issued. The error distinguishes a malformed
+        # name, an existing general-purpose bucket (InvalidRequest) and a
+        # name that simply does not exist here (NoSuchBucket) — see
+        # teledrive/s3/directory_buckets.py for the full justification.
+        error = create_session_error(
+            bucket,
+            bucket_exists=bucket in catalog.list_buckets(),
+            session_mode=request.headers.get("x-amz-create-session-mode"),
+        )
+        return _error(error.code, str(error), error.status)
     if ctx.multi_delete:
         return await _handle_batch_delete(ctx)
     controls = await _handle_bucket_controls(ctx)
@@ -4188,11 +4204,30 @@ async def _handle(request: Request):
             bucket, separator, key = virtual_bucket, "/" if logical else "", logical
         else:
             bucket, separator, key = logical.partition("/")
-        validate_s3_query(request.method, bucket, bool(separator), request.query_params)
+        signing_service = signing_service_hint(request)
+        directory_buckets = is_directory_bucket_listing(
+            request.method, bucket, bool(separator), request.query_params,
+            signing_service)
+        validate_s3_query(request.method, bucket, bool(separator),
+                          request.query_params, signing_service)
+        # S3 Object Lambda's WriteGetObjectResponse is an endpoint-shaped
+        # API (POST /WriteGetObjectResponse), not a bucket. Name the missing
+        # backing instead of degrading into a generic 501.
+        if (request.method == "POST" and not separator
+                and bucket == "WriteGetObjectResponse"):
+            return _error(
+                "NotImplemented",
+                "WriteGetObjectResponse is unavailable: S3 Object Lambda has "
+                "no backing here because TeleDrive has no Lambda runtime",
+                501,
+            )
         if not bucket:
             if request.method != "GET":
                 return _error("MethodNotAllowed", "Use GET to list buckets", 405)
-            action = "s3:ListAllMyBuckets"
+            # ListDirectoryBuckets (S3 Express One Zone) and ListBuckets
+            # share GET /; see route_guard.is_directory_bucket_listing.
+            action = ("s3:ListDirectoryBuckets" if directory_buckets
+                      else "s3:ListAllMyBuckets")
         elif not separator:
             action = {
                 "GET": "s3:ListBucket", "HEAD": "s3:ListBucket",
@@ -4512,6 +4547,10 @@ async def _handle(request: Request):
                 "GET": "s3:GetBucketRequestPayment",
                 "PUT": "s3:PutBucketRequestPayment",
             }.get(request.method)
+        elif not separator and "session" in request.query_params:
+            # CreateSession is a GET on the bucket URI (S3 Express). The
+            # operation has no writable side, so other methods stay 501.
+            action = "s3:CreateSession" if request.method == "GET" else None
         elif not separator and "accelerate" in request.query_params:
             # Phase O6: writable-but-single-state (Suspended only).
             action = {
@@ -4791,6 +4830,11 @@ async def _handle(request: Request):
                 raise SigV4Error("AccessDenied", reason)
 
         if not bucket:
+            if directory_buckets:
+                # True empty listing: TeleDrive has no S3 Express directory
+                # buckets, so there is never a bucket or a next token.
+                return Response(list_directory_buckets_xml(),
+                                media_type="application/xml")
             return Response(
                 list_buckets_xml(catalog, request.query_params, master, owner),
                 media_type="application/xml",

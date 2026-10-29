@@ -33,6 +33,10 @@ credentials = Table(
 )
 PERMISSIONS = frozenset({
     "s3:ListAllMyBuckets", "s3:CreateBucket", "s3:DeleteBucket",
+    # S3 Express One Zone surfaces. TeleDrive has no directory buckets, so
+    # ListDirectoryBuckets is a real always-empty listing and CreateSession
+    # always answers NoSuchBucket, but both still authenticate and authorize.
+    "s3:ListDirectoryBuckets", "s3:CreateSession",
     "s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketLocation", "s3:GetObject", "s3:GetObjectAttributes", "s3:PutObject", "s3:DeleteObject",
     "s3:GetObjectTagging", "s3:PutObjectTagging", "s3:DeleteObjectTagging",
     # Object annotations (Phase O2): a separate store from tags; the four

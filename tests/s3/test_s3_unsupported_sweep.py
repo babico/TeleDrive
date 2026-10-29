@@ -73,8 +73,8 @@ REQUESTS = {
     "PutBucketRequestPayment": ("PUT", "/sweep-bucket?requestPayment"),
     "PutBucketAccelerateConfiguration": ("PUT", "/sweep-bucket?accelerate"),
     "GetObjectTorrent": ("GET", "/sweep-bucket/asset.bin?torrent"),
-    "CreateSession": ("POST", "/sweep-bucket/asset.bin?session"),
-    "ListDirectoryBuckets": ("GET", "/?list-type=directory"),
+    "CreateSession": ("GET", "/sweep-bucket?session"),
+    "ListDirectoryBuckets": ("GET", "/?max-directory-buckets=1"),
     "RenameObject": ("PUT", "/sweep-bucket/asset.bin?rename"),
     "SelectObjectContent": ("POST", "/sweep-bucket/asset.bin?select&select-type=2"),
     "WriteGetObjectResponse": ("POST", "/WriteGetObjectResponse"),
@@ -122,6 +122,9 @@ PROMOTED_AHEAD_OF_MANIFEST = frozenset({
     "PutBucketOwnershipControls", "DeleteBucketOwnershipControls",
     "GetBucketAbac", "PutBucketAbac",
     "DeletePublicAccessBlock",
+    # S3 Express One Zone: a real always-empty ListDirectoryBuckets and an
+    # honest CreateSession rejection (see test_s3_directory_buckets.py).
+    "ListDirectoryBuckets", "CreateSession",
 })
 
 

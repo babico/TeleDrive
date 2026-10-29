@@ -117,6 +117,7 @@ jobs:
             tests/storage/test_telegram_dr_rehearsal.py \
             tests/storage/test_legacy_cutover_acceptance.py \
             tests/storage/test_storage_catalog.py \
+            tests/storage/test_stores.py \
             tests/storage/test_content_index.py \
             tests/storage/test_metadata_backup.py \
             tests/storage/test_storage_sigkill.py \

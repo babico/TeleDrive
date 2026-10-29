@@ -60,6 +60,7 @@ jobs:
             tests/storage/test_storage_ops_health.py tests/meta/test_host_soak.py tests/meta/test_acceptance_cli.py \
             tests/storage/test_storage_gc_retention.py tests/storage/test_gc_reference_planner.py \
             tests/storage/test_storage_catalog.py \
+            tests/storage/test_stores.py \
             tests/storage/test_mtproto_rate_guard.py tests/storage/test_mtproto_multi_credentials.py \
             tests/storage/test_telegram_dr_rehearsal.py \
             tests/storage/test_legacy_cutover_acceptance.py \

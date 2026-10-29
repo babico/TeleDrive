@@ -61,6 +61,7 @@ from teledrive.storage.manifest import ManifestStore, objects
 from sqlalchemy import select as _sa_select
 from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
+from teledrive.stores import shares as _share_store
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
@@ -4215,14 +4216,13 @@ def admin_create_share(bucket: str, request: Request,
             shared = catalog.get(bucket, key).item
         except FileNotFoundError as exc:
             raise HTTPException(404, "Object not found") from exc
-        from sqlalchemy import insert as _insert
-        from teledrive.db import share_links
         token = secrets.token_urlsafe(24)
         now = int(time.time())
         salt = digest = None
         if password is not None:
             salt, digest = _hash_share_password(password)
-        conn.connection.execute(_insert(share_links).values(
+        _share_store.create(
+            conn,
             token=token, bucket=bucket, object_key=key,
             # Pin the exact version. A key-bound link would serve whatever
             # the key pointed at later, and recover after an unlink + re-upload.
@@ -4230,10 +4230,9 @@ def admin_create_share(bucket: str, request: Request,
             created_by=(request.state.user or {}).get("username", "-"),
             created_at=now,
             expires_at=now + expires_in if expires_in else None,
-            max_downloads=max_downloads, download_count=0,
-            password_salt=salt, password_hash=digest, revoked=0,
-        ))
-        conn.connection.commit()
+            max_downloads=max_downloads,
+            password_salt=salt, password_hash=digest,
+        )
     finally:
         conn.close()
     _audit(request, "share.create", target=f"{bucket}/{key}",
@@ -4251,17 +4250,14 @@ def admin_create_share(bucket: str, request: Request,
 def admin_list_shares(_: None = Depends(require_auth)):
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        rows = conn.connection.execute(_text(
-            "SELECT token, bucket, object_key, created_by, created_at, "
-            "expires_at, max_downloads, download_count, "
-            "password_salt IS NOT NULL, revoked FROM share_links "
-            "ORDER BY created_at DESC")).all()
+        rows = _share_store.list(conn)
         now = int(time.time())
         shares = []
-        for (token, bucket, key, author, created, expires, max_downloads,
-             count, has_password, revoked) in rows:
-            if revoked:
+        for share in rows:
+            expires = share["expires_at"]
+            max_downloads = share["max_downloads"]
+            count = share["download_count"]
+            if share["revoked"]:
                 status = "revoked"
             elif expires is not None and expires <= now:
                 status = "expired"
@@ -4270,11 +4266,14 @@ def admin_list_shares(_: None = Depends(require_auth)):
             else:
                 status = "active"
             shares.append({
-                "token": token, "bucket": bucket, "key": key,
-                "created_by": author, "created_at": created,
+                "token": share["token"], "bucket": share["bucket"],
+                "key": share["object_key"],
+                "created_by": share["created_by"],
+                "created_at": share["created_at"],
                 "expires_at": expires, "max_downloads": max_downloads,
-                "download_count": count, "password": bool(has_password),
-                "revoked": bool(revoked), "status": status,
+                "download_count": count,
+                "password": bool(share["has_password"]),
+                "revoked": share["revoked"], "status": status,
             })
         return {"shares": shares, "count": len(shares)}
     finally:
@@ -4290,11 +4289,7 @@ def admin_revoke_share(token: str, request: Request,
         raise HTTPException(404, "Unknown share link")
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        deleted = conn.connection.execute(_text(
-            "DELETE FROM share_links WHERE token = :t"
-        ), {"t": token}).rowcount
-        conn.connection.commit()
+        deleted = _share_store.revoke(conn, token)
     finally:
         conn.close()
     if not deleted:
@@ -5916,14 +5911,7 @@ def _load_active_share(token: str):
         return None
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT token, bucket, object_key, password_salt, password_hash, "
-            "object_id FROM share_links WHERE token = :t AND revoked = 0 "
-            "AND (expires_at IS NULL OR expires_at > :now) "
-            "AND (max_downloads IS NULL OR download_count < max_downloads)"
-        ), {"t": token, "now": int(time.time())}).first()
-        return row
+        return _share_store.resolve_token(conn, token, int(time.time()))
     except Exception:
         return None
     finally:
@@ -5939,11 +5927,10 @@ async def _stream_share(row) -> StreamingResponse:
     link followed the live head by key, so it served replaced content and
     came back to life after an unlink plus a re-upload.
     """
-    token, bucket, key = row[0], row[1], row[2]
-    pinned_id = row[5]
+    token, bucket, key = row["token"], row["bucket"], row["object_key"]
+    pinned_id = row["object_id"]
     conn = db_connect()
     try:
-        from sqlalchemy import text as _text
         manifests = ManifestStore(conn)
         catalog = BucketCatalog(manifests)
         # Resolve BEFORE claiming, and refuse anything that cannot be served.
@@ -5956,14 +5943,7 @@ async def _stream_share(row) -> StreamingResponse:
         # for: if the row no longer does, the link is dead, not re-targeted.
         if item.bucket != bucket or item.key != key:
             raise HTTPException(404, "Link not found or expired")
-        claimed = conn.connection.execute(_text(
-            "UPDATE share_links SET download_count = download_count + 1 "
-            "WHERE token = :t AND revoked = 0 "
-            "AND (expires_at IS NULL OR expires_at > :now) "
-            "AND (max_downloads IS NULL OR download_count < max_downloads)"
-        ), {"t": token, "now": int(time.time())}).rowcount
-        conn.connection.commit()
-        if claimed != 1:
+        if not _share_store.claim_download(conn, token, int(time.time())):
             raise HTTPException(404, "Link not found or expired")
         transport = storage_transport(conn)
         root = Path(STORAGE_SCRATCH_DIR)
@@ -6007,7 +5987,7 @@ async def public_share_get(token: str, request: Request):
         return _share_html(
             "Link unavailable",
             "<h2>Link not found or expired</h2>", status_code=404)
-    if row[3] is not None:  # password protected
+    if row["password_salt"] is not None:  # password protected
         return _share_html(
             "Protected download",
             "<h2>Protected download</h2>"
@@ -6029,15 +6009,15 @@ async def public_share_post(token: str, request: Request):
         return _share_html(
             "Link unavailable",
             "<h2>Link not found or expired</h2>", status_code=404)
-    if row[3] is None:
+    if row["password_salt"] is None:
         return await _stream_share(row)
     # The share form is always application/x-www-form-urlencoded (our
     # own HTML); parse it directly instead of pulling in python-multipart.
     raw = (await request.body()).decode("utf-8", "replace")
     fields = urllib.parse.parse_qs(raw)
     password = str((fields.get("password") or [""])[0])
-    _, candidate = _hash_share_password(password, row[3])
-    if not hmac.compare_digest(candidate, row[4] or ""):
+    _, candidate = _hash_share_password(password, row["password_salt"])
+    if not hmac.compare_digest(candidate, row["password_hash"] or ""):
         _log(f"share password rejected: token={token[:6]}… ip={client_ip}",
              "share")
         return _share_html(

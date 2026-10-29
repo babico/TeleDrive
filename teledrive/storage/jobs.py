@@ -53,6 +53,10 @@ class UploadJobError(ValueError):
     pass
 
 
+class JobQuotaExceeded(UploadJobError):
+    """Publication would breach the bucket quota; the job is failed, not retried."""
+
+
 def _source_identity(path: Path, allowed_root: Path) -> tuple[Path, os.stat_result]:
     """Root-bound regular-file identity: never follow an untrusted final symlink."""
     root = allowed_root.resolve(strict=True)
@@ -286,6 +290,25 @@ class StorageUploadJobs:
         except FileNotFoundError:
             current = None
         if current != candidate:
+            # Quotas are an admin-only control, so every path that can add
+            # bytes must honour them. This worker previously published a
+            # 5000-byte file into a bucket limited to 10 bytes and 1 object,
+            # which made the quota unenforceable for anyone who could enqueue
+            # a job. Enforced here, immediately before publication, on the
+            # real object row.
+            from .quota import QuotaExceeded, enforce_bucket_quota
+            object_row = self.db.connection.execute(
+                select(objects.c.object_key, objects.c.size)
+                .where(objects.c.id == candidate)
+            ).first()
+            if object_row is not None:
+                try:
+                    enforce_bucket_quota(
+                        self.db, row["bucket"], object_row[0],
+                        int(object_row[1] or 0))
+                except QuotaExceeded as exc:
+                    self.fail(ident, token, str(exc), now=now)
+                    raise JobQuotaExceeded(str(exc)) from exc
             fenced = self.db.connection.execute(
                 update(jobs).where(self._owned(ident, token, now))
                 .values(state="publishing", updated_at=now)
@@ -422,6 +445,15 @@ class StorageUploadJobs:
                 )
                 if observed != expected:
                     raise UploadJobError("Source changed since job was queued")
+                # Quota BEFORE any byte reaches Telegram: rejecting at
+                # publication time alone would still spend the upload.
+                from .quota import QuotaExceeded, enforce_bucket_quota
+                try:
+                    enforce_bucket_quota(
+                        self.db, claim["bucket"], claim["object_key"],
+                        int(stat_info.st_size))
+                except QuotaExceeded as exc:
+                    raise JobQuotaExceeded(str(exc)) from exc
                 verify = getattr(transport, "verify_target", None)
                 if callable(verify):
                     await verify()
@@ -459,11 +491,20 @@ class StorageUploadJobs:
                     raise UploadJobError("Job lease lost before staging")
             stop.set()
             await heartbeat
-            if lost.is_set() or not self.finish(
-                ident, token, now=int(time.time())
-            ):
+            try:
+                published = self.finish(ident, token, now=int(time.time()))
+            except JobQuotaExceeded as exc:
+                # A quota breach is a policy outcome, not a crash: the job is
+                # already marked failed, so report it instead of raising.
+                return {"id": ident, "state": "failed",
+                        "last_error": str(exc)}
+            if lost.is_set() or not published:
                 raise UploadJobError("Job lease lost before publication")
             return {"id": ident, "state": "done", "object_id": object_id}
+        except JobQuotaExceeded as exc:
+            self.db.connection.rollback()
+            self.fail(ident, token, str(exc), now=int(time.time()))
+            return {"id": ident, "state": "failed", "last_error": str(exc)}
         except BaseException as exc:
             self.db.connection.rollback()
             self.fail(ident, token, type(exc).__name__, now=int(time.time()))

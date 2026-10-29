@@ -399,3 +399,53 @@ def test_content_search_and_reindex(service):
                    headers=_admin_headers(client), params={"q": "unique-zeta-marker",
                                        "mode": "content"})
     assert len(r.json()["objects"]) == 1
+
+
+def test_share_token_is_a_credential_not_public_metadata(service):
+    """A share token must not leak to a read-only principal.
+
+    Found by the API review: a ``viewer`` could call
+    ``GET /api/v1/admin/storage/shares`` and read every live token, then
+    use ``/share/<token>`` anonymously -- turning a read-only account into
+    a publisher whose access outlives its own revocation. Worse, the audit
+    middleware logged ``request.url.path`` verbatim, so the same token was
+    readable through ``/api/logs``.
+    """
+    client, headers, _, _ = service
+    assert put(client, headers, b"share-token-exposure").status_code in (200, 201)
+    created = _share(client, {"key": "data.bin", "expires_in": 3600})
+    assert created.status_code == 200, created.text
+    token = created.json()["token"]
+
+    # A viewer may not enumerate credentials.
+    db_path = webapp.db_connect().engine.url.database
+    from tests import seed_local_user
+    seed_local_user(lambda: connect_database(db_path),
+                    "peeker", "peeker-password-1", "viewer")
+    from tests import login_headers
+    viewer = login_headers(client, "peeker", "peeker-password-1")
+    assert client.get("/api/v1/admin/storage/shares",
+                      headers=viewer).status_code == 403
+
+    # And no log line may contain the token, including the one the middleware
+    # writes for the anonymous download.
+    assert client.get(f"/share/{token}").status_code == 200
+    logs = client.get("/api/v1/logs", headers=viewer)
+    assert logs.status_code == 200
+    assert token not in logs.text, "share token leaked into the log stream"
+
+
+def test_multibyte_key_is_rejected_before_any_upload(service):
+    """A publish-time key rejection used to orphan uploaded bytes.
+
+    The query parameter bounds the key to 1024 CHARACTERS but the catalog
+    bounds it to 1024 UTF-8 BYTES. A 600-character multibyte key passed the
+    request layer, uploaded the whole payload to Telegram, and only then
+    failed at publish -- leaving a ready manifest with no published version,
+    which physical GC never collects. The key is now validated first.
+    """
+    client, headers, bot, _ = service
+    before = bot.counter
+    reply = put(client, headers, b"x" * 4096, key="é" * 600)
+    assert reply.status_code == 422, reply.text
+    assert bot.counter == before, "bytes reached Telegram for a doomed key"

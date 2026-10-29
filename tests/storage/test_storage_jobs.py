@@ -387,3 +387,42 @@ def test_pending_writer_reclaim_rejects_live_and_unfenced_manifests(queue):
     assert not store.reclaim_writer(legacy, "intruder", now)
     assert store.reclaim_writer(identifier, "recovered", now + 121)
     assert not store.heartbeat_writer(identifier, "current", now + 122)
+
+
+def test_job_publication_respects_the_bucket_quota(queue):
+    """A queued job must not bypass an admin-only quota.
+
+    Found by the API review: ``enqueue`` and ``publish`` never consulted
+    ``bucket_quotas``, so a bucket limited to 10 bytes / 1 object accepted a
+    5000-byte job and published it. An operator or a single-scope key could
+    therefore make an admin-only control meaningless.
+    """
+    from sqlalchemy import text
+
+    first, root, path = queue
+    data = b"q" * 5000
+    source = root / "big.bin"
+    source.write_bytes(data)
+    first.catalog.db.connection.execute(text(
+        "INSERT INTO bucket_quotas (bucket, max_size_bytes, max_objects, "
+        "created_at, updated_at) VALUES ('job-bucket', 10, 1, 1, 1)"))
+    first.catalog.db.connection.commit()
+
+    ident = first.enqueue("job-bucket", "big.bin", source, allowed_root=root)
+    remote = MemoryTelegram()
+    db = connect_database(path)
+    try:
+        runner = StorageUploadJobs(BucketCatalog(ManifestStore(db)))
+        result = asyncio.run(runner.run_next(
+            remote, allowed_root=root, scratch_directory=root,
+        ))
+        assert result["id"] == ident
+        assert result["state"] == "failed", result
+        assert "quota" in (result.get("last_error") or "").lower()
+        heads = db.connection.execute(text(
+            "SELECT COUNT(*) FROM storage_object_heads "
+            "WHERE bucket = 'job-bucket'")).scalar_one()
+        assert heads == 0, "a quota-breaching job published a head"
+        assert remote.uploads == 0, "bytes were sent despite the quota"
+    finally:
+        db.close()

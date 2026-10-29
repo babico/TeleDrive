@@ -102,6 +102,10 @@ telegram_session_pending = Table(
     Column("channel", String(255)),
     Column("strategy", String(32), server_default="round_robin"),
     Column("created_at", BigInteger, nullable=False),
+    # Failed verification attempts. A login code is 5 digits, so an
+    # uncapped retry loop is a brute force against a Telegram account: the
+    # pending row is destroyed after a bounded number of wrong codes.
+    Column("attempts", Integer, nullable=False, server_default="0"),
 )
 
 # Operator-managed placement: uploads to a pinned bucket prefer the

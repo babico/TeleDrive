@@ -293,6 +293,20 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_verification_attempts(ctx: SchemaContext) -> None:
+    """Login-verification attempt counter (append-only migration).
+
+    Added as its own step rather than folded into an existing one: the
+    coordinator records the step count as the schema version, so editing a
+    shipped step would never run on an already-migrated database.
+    """
+    _add_columns(ctx.engine, "telegram_session_pending", [
+        # A 5-digit login code with unlimited retries is a brute force
+        # against the Telegram account; the pending row dies after a cap.
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ])
+
+
 def _step_legacy_columns(ctx: SchemaContext) -> None:
     """Defensive ALTERs for databases created by older releases.
 
@@ -345,6 +359,7 @@ def _step_content_search(ctx: SchemaContext) -> None:
 
 _STEPS: list[tuple[str, Step]] = [
     ("core", _step_core),
+    ("verification_attempts", _step_verification_attempts),
     ("manifest", _step_manifest),
     ("catalog", _step_catalog),
     ("tagging", _step_tagging),

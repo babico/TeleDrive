@@ -1268,10 +1268,27 @@ async def _trusted_host_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_SHARE_TOKEN_PATH = re.compile(
+    r"(?P<prefix>/share/|/api/v1/admin/storage/shares/)"
+    r"(?P<token>[A-Za-z0-9_-]{16,64})(?P<rest>/?$)")
+
+
+def _redact_log_path(path: str) -> str:
+    """Hide share tokens from the request log.
+
+    The token in ``/share/<token>`` is the whole credential: anything that
+    can read it can download the object anonymously. Logging the path (as
+    the audit middleware did) wrote a live credential into a buffer that
+    ``viewer`` can read via /api/logs, so the token segment is masked.
+    """
+    return _SHARE_TOKEN_PATH.sub(
+        lambda m: f"{m.group('prefix')}***{m.group('rest')}", path)
+
+
 @app.middleware("http")
 async def _audit_log_middleware(request: Request, call_next):
     start = time.time()
-    path = request.url.path
+    path = _redact_log_path(request.url.path)
     method = request.method
     # Skip noisy health checks and static assets.
     if path not in {"/api/health", "/__health"} and not path.startswith("/static/"):
@@ -2635,6 +2652,27 @@ class TelegramSessionRequestCode(BaseModel):
     strategy: str | None = None
 
 
+# Wrong-code budget per pending login. Five-digit codes: 5 tries leaves a
+# 1-in-2000 chance of a blind guess, and Telegram's own FloodWait makes the
+# real attack far slower than that.
+_MAX_VERIFY_ATTEMPTS = 5
+
+
+def _record_verify_attempt(token: str) -> None:
+    """Count one failed verification without extending the request's life."""
+    conn = db_connect()
+    try:
+        from sqlalchemy import text as _text
+        conn.connection.execute(_text(
+            "UPDATE telegram_session_pending SET attempts = attempts + 1 "
+            "WHERE token = :token"), {"token": token})
+        conn.connection.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 def _consume_pending_session_token(token: str) -> None:
     conn = db_connect()
     try:
@@ -2847,8 +2885,8 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
         from sqlalchemy import text as _text
         row = conn.connection.execute(_text(
             "SELECT api_id, api_hash, phone, phone_code_hash, session_string, "
-            "channel, strategy, created_at FROM telegram_session_pending "
-            "WHERE token = :token"
+            "channel, strategy, created_at, attempts FROM "
+            "telegram_session_pending WHERE token = :token"
         ), {"token": payload.token}).fetchone()
     finally:
         conn.close()
@@ -2856,7 +2894,18 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
         raise HTTPException(404, "No pending code request (expired, invalid "
                                  "token, or already used). Request a new code.")
     api_id, api_hash, phone, phone_code_hash, request_session, channel, \
-        strategy, created_at = row
+        strategy, created_at, attempts = row
+    # A Telegram login code is five digits. Telegram throttles the send, but
+    # not the verify side reliably, so cap wrong attempts here: past the
+    # budget the pending request is destroyed and a fresh code is required.
+    if int(attempts or 0) >= _MAX_VERIFY_ATTEMPTS:
+        _consume_pending_session_token(payload.token)
+        _log(f"verify-code BLOCKED: {int(attempts)} failed attempts; "
+             f"pending request destroyed", "telegram-session")
+        raise HTTPException(
+            429,
+            "Too many incorrect codes for this request. Request a new code.",
+        )
     _log(f"verify-code: token={payload.token[:8]}... request_age="
          f"{int(time.time()) - int(created_at)}s", "telegram-session")
     if int(time.time()) - int(created_at) > 300:
@@ -2925,9 +2974,10 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
                                  "message (each request invalidates all "
                                  "previous codes).") from exc
     except Exception as exc:
-        # A wrong code must NOT consume the pending request: the user can
-        # retry with the correct code. The token ages out after 5 minutes
-        # and is consumed only on success (below).
+        # A wrong code must NOT consume the pending request outright -- the
+        # user can retry -- but the attempt is counted, and the counter is
+        # what eventually destroys it (see _MAX_VERIFY_ATTEMPTS).
+        _record_verify_attempt(payload.token)
         raise _telegram_error_response(exc, "verify-code") from exc
     # Success: consume the pending token.
     _consume_pending_session_token(payload.token)
@@ -4171,57 +4221,30 @@ class BucketQuotaRequest(BaseModel):
     max_objects: int | None = None
 
 
+# The implementation lives in the storage layer so the job worker enforces
+# the same rules as the REST/S3 handlers (a job previously bypassed them).
 def _bucket_quota(conn, bucket: str) -> tuple[int | None, int | None]:
-    """Return (max_size_bytes, max_objects) for a bucket; (None, None) if unset."""
-    from sqlalchemy import text as _text
-    row = conn.connection.execute(_text(
-        "SELECT max_size_bytes, max_objects FROM bucket_quotas WHERE bucket = :b"
-    ), {"b": bucket}).fetchone()
-    return (row[0], row[1]) if row else (None, None)
+    from teledrive.storage import quota as _quota
+    return _quota.bucket_quota(conn, bucket)
 
 
 def _bucket_current_usage(conn, bucket: str) -> tuple[int, int]:
-    """(object_count, total_size) of a bucket's CURRENT objects (heads join)."""
-    from sqlalchemy import text as _text
-    row = conn.connection.execute(_text(
-        "SELECT COUNT(o.id), COALESCE(SUM(o.size), 0) "
-        "FROM storage_object_heads h "
-        "JOIN storage_objects o ON o.id = h.object_id "
-        "WHERE h.bucket = :b"
-    ), {"b": bucket}).fetchone()
-    return (int(row[0]) if row else 0, int(row[1]) if row else 0)
+    from teledrive.storage import quota as _quota
+    return _quota.bucket_current_usage(conn, bucket)
 
 
 def _bucket_has_current_key(conn, bucket: str, key: str) -> bool:
-    import hashlib as _hl
-    from sqlalchemy import text as _text
-    key_hash = _hl.sha256(key.encode("utf-8")).hexdigest()
-    row = conn.connection.execute(_text(
-        "SELECT COUNT(*) FROM storage_object_heads "
-        "WHERE bucket = :b AND key_hash = :kh"
-    ), {"b": bucket, "kh": key_hash}).scalar()
-    return bool(row)
+    from teledrive.storage import quota as _quota
+    return _quota.has_current_key(conn, bucket, key)
 
 
 def _enforce_bucket_quota(conn, bucket: str, key: str, incoming_size: int) -> None:
-    """TeleDrive-level per-bucket quota enforcement (S3 has no native quota).
-
-    Raises HTTPException 413 when the upload would exceed the configured
-    maximum total size or object count. Overwrites of an existing key do not
-    count against the object limit.
-    """
-    max_size_q, max_objects_q = _bucket_quota(conn, bucket)
-    if max_size_q is None and max_objects_q is None:
-        return
-    if max_size_q is not None:
-        _count, cur_size = _bucket_current_usage(conn, bucket)
-        if cur_size + incoming_size > max_size_q:
-            raise HTTPException(413, "Upload exceeds bucket quota (max size)")
-    if max_objects_q is not None:
-        cur_count, _size = _bucket_current_usage(conn, bucket)
-        if not _bucket_has_current_key(conn, bucket, key) \
-                and cur_count >= max_objects_q:
-            raise HTTPException(413, "Upload exceeds bucket quota (max objects)")
+    """TeleDrive-level per-bucket quota enforcement (HTTP 413 on breach)."""
+    from teledrive.storage import quota as _quota
+    try:
+        _quota.enforce_bucket_quota(conn, bucket, key, incoming_size)
+    except _quota.QuotaExceeded as exc:
+        raise HTTPException(413, str(exc)) from exc
 
 
 @app.get("/api/v1/admin/storage/buckets/{bucket}/quota", tags=["Object catalog"],
@@ -5299,6 +5322,15 @@ def unlink_current_object(bucket: str, key: str = Query(..., min_length=1, max_l
 async def _stream_object_upload(bucket: str, key: str, request: Request,
                                 generation: int | None) -> dict:
     """Shared upload core: validate, stage, enforce quota, upload, publish."""
+    # The key must be valid BEFORE a single byte is staged or uploaded.
+    # The catalog enforces 1..1024 UTF-8 BYTES, while the query parameter
+    # enforces 1024 CHARACTERS, so a multibyte key (e.g. 600 x "é" = 1200
+    # bytes) passed validation, uploaded the whole payload to Telegram, and
+    # only then failed at publish -- leaving a ready manifest with no
+    # published version, which physical GC deliberately never collects.
+    # Unreclaimable bytes are worse than a rejected request.
+    if not isinstance(key, str) or not (1 <= len(key.encode("utf-8")) <= 1024):
+        raise HTTPException(422, "Object key must contain 1..1024 UTF-8 bytes")
     if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/octet-stream":
         raise HTTPException(415, "Content-Type must be application/octet-stream")
     max_size = REST_MAX_UPLOAD_BYTES

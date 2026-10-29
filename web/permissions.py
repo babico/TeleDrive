@@ -79,7 +79,26 @@ _ADMIN_ONLY_PREFIXES = (
     "/api/v1/admin/s3/credentials",
     "/api/v1/admin/s3-credentials",
     "/api/v1/admin/storage/gc",
+    # A share token IS the credential: the anonymous URL needs nothing else.
+    # A read-only viewer who can list them becomes an anonymous publisher
+    # that outlives their own account, so listing and revoking are admin.
+    "/api/v1/admin/storage/shares",
 )
+
+# Binding a Telegram account is a storage-wide act: the bound account becomes
+# the identity every future upload is sent as, and completing a login
+# deactivates the other channels. An operator who can do this owns the
+# backend, so the MUTATING side is an admin (owner) decision.
+#
+# Deliberately enumerated rather than prefix-matched: "/telegram-session" is a
+# prefix of "/telegram-sessions" (the read-only account listing operators
+# need), and the status/floodwait GETs are harmless reads that every role may
+# perform.
+_ADMIN_ONLY_TELEGRAM_SESSION_MUTATIONS = frozenset({
+    "/api/v1/admin/storage/telegram-session",
+    "/api/v1/admin/storage/telegram-session/request-code",
+    "/api/v1/admin/storage/telegram-session/verify-code",
+})
 # Bucket quota and website publishing are owner decisions: quota changes
 # can reject uploads, and public_read publishes objects anonymously.
 _ADMIN_ONLY_BUCKETS_PREFIX = "/api/v1/admin/storage/buckets"
@@ -111,6 +130,9 @@ def is_admin_only(method: str, path: str) -> bool:
     """True when only the admin role may attempt this route."""
     path = canonical_path(path)
     if any(path.startswith(prefix) for prefix in _ADMIN_ONLY_PREFIXES):
+        return True
+    if (str(method).upper() not in READ_METHODS
+            and path in _ADMIN_ONLY_TELEGRAM_SESSION_MUTATIONS):
         return True
     if (path.startswith(_ADMIN_ONLY_BUCKETS_PREFIX)
             and path.endswith(_ADMIN_ONLY_BUCKETS_SUFFIXES)):

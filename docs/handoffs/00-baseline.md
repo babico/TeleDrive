@@ -2,6 +2,10 @@
 
 Written before any refactor. Read this first; it is the shared map.
 
+> **This section describes the tree at the START of the refactor.** The live
+> map is [docs/MODULE_MAP.md](../MODULE_MAP.md) — read that for where code
+> lives today.
+
 ## Current shape
 
 | File | Lines | What it is |

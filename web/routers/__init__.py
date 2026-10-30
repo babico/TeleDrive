@@ -7,7 +7,8 @@ built.
 from web.routers.auth import router as auth_router
 from web.routers.config import router as config_router
 from web.routers.public import router as public_router
+from web.routers.telegram import router as telegram_router
 from web.routers.users import router as users_router
 
 __all__ = ["auth_router", "config_router", "public_router",
-           "users_router"]
+           "telegram_router", "users_router"]

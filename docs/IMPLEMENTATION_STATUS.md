@@ -143,7 +143,7 @@ An incorrect SHA, incomplete drill, duplicate host identity, invalid media proof
 
 **Implemented now:** transactional, version-aware, writer-fenced GC reference graphs and dry-run planning are complete and race-tested (aliases, versions, multipart parts, MTProto intents/receipts, active durable jobs, stale leases, concurrent writers, recycled plans, tampered fingerprints). `StorageGCInventory.inspect`, `preview_failed_retention` and `plan()/verify_plan()` produce integrity-bound plans with an explicit owner-gate checklist; `deletion_permitted` is always False. `RecoveryManager.cleanup` performs ownership-verified physical deletion only when explicitly invoked with dry_run=False and only after every fence passes.
 
-**Not yet authorized/complete:** independently verified media backups, a successful isolated restore drill, complete ownership audit, explicit two-person deletion approval and an owner-authorized single-message trial. Deleted Telegram **message IDs cannot simply be restored from SQL**. Automatic physical GC in WebUI/API remains disabled and no Telegram media has been deleted.
+**Not yet authorized/complete:** independently verified media backups, a successful isolated restore drill, complete ownership audit and an owner-authorized single-message trial. (A two-person deletion approval is **not** a requirement — owner decision.) Deleted Telegram **message IDs cannot simply be restored from SQL**. Automatic physical GC in WebUI/API remains disabled and no Telegram media has been deleted.
 
 Do not enable physical deletion merely because offline integrity tests pass. Require a signed dry-run plan, complete remote inventory, retention/reference validation, independent payload snapshot plus successful restore drill, writer fencing and recorded approval.
 
@@ -207,7 +207,8 @@ Still unsupported or unverified: SSE-S3/SSE-KMS (SSE-C **is** supported), reques
       paragraph above this list); what is missing is an independent backup
       host, an authorized soak, an original-media recovery rehearsal with the
       owner's sealed SQL archive, a signed legacy-cutover decision, and
-      two-person approval through `scripts/ops/verify_production_bundle.py`.
+      optional signed attestation through `scripts/ops/verify_production_bundle.py`
+      (a two-person signature is **not** required).
       `deletion_permitted` stays `False` until all of it exists. No commit
       can close this line.
 - [ ] **Partially done:** unknown-history discovery is an owner/archive

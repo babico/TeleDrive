@@ -73,12 +73,23 @@ object_encryption = Table(
     "storage_object_encryption", metadata,
     Column("object_id", String(36), ForeignKey("storage_objects.id"),
            primary_key=True),
+    # "SSE-C" (client key, never stored) or "SSE-S3" (envelope: per-object
+    # data key wrapped by the deployment master key).
     Column("mode", String(16), nullable=False),
     Column("key_md5", String(24), nullable=False),
     Column("etag", String(64)),
     Column("digest_kind", String(16), nullable=False,
            server_default="plaintext"),
     Column("created_at", BigInteger, nullable=False),
+    # Envelope only: the data key, AES-256-GCM wrapped by the KEK that is
+    # derived from the deployment master key, with the object id as AAD.
+    # NULL for SSE-C, whose key is never persisted in any form.
+    Column("wrapped_key", Text),
+    Column("key_wrap", String(16), server_default="none"),
+    # The identity the wrapped key is bound to (AAD). For a single PUT that is
+    # the object id; for a completed multipart upload it is the upload id,
+    # because the parts were encrypted before the final object existed.
+    Column("envelope_aad", String(64)),
 )
 # Immutable server-side copies reference the original Telegram chunk journal.
 # No duplicate (account, chat_id, message_id) rows are created. Physical GC
@@ -216,42 +227,81 @@ class ManifestStore:
         database.release_setup_snapshot()
 
     def begin(self, bucket: str, key: str, size: int, now: int, *,
-              sse_key_md5: str | None = None) -> str:
+              sse_key_md5: str | None = None,
+              identifier: str | None = None,
+              envelope_kek: bytes | None = None,
+              sse_mode: str | None = None) -> str:
         if not bucket or len(bucket) > 63 or not key or size < 0:
             raise ValueError("Invalid bucket/key/size")
         if sse_key_md5 is not None and (
                 not isinstance(sse_key_md5, str) or len(sse_key_md5) != 24):
             raise ValueError("Invalid SSE-C key fingerprint")
-        identifier = str(uuid4())
+        if identifier is None:
+            identifier = str(uuid4())
+        elif not isinstance(identifier, str) or len(identifier) != 36:
+            raise ValueError("Invalid object identifier")
         self.db.connection.execute(insert(objects).values(
             id=identifier, bucket=bucket, object_key=key, status="pending",
             size=size, sha256=None, created_at=now, updated_at=now,
         ))
-        if sse_key_md5 is not None:
+        if envelope_kek is not None:
+            # Envelope: one fresh data key per object, wrapped by the KEK and
+            # bound to this object id. Only the wrapped form is persisted.
+            from .envelope import new_object_key
+            material = new_object_key(envelope_kek, identifier)
+            self.db.connection.execute(insert(object_encryption).values(
+                object_id=identifier, mode="SSE-S3",
+                key_md5=material.sse_key.key_md5_b64,
+                etag=None, digest_kind="plaintext", created_at=now,
+                wrapped_key=material.wrapped, key_wrap="envelope-v1",
+                envelope_aad=identifier,
+            ))
+        elif sse_key_md5 is not None:
             # Inserted in the SAME transaction as the pending object: a
             # crash can never publish an object whose ciphertext would be
             # mistaken for plaintext.
+            mode = "SSE-S3" if sse_mode == "SSE-S3" else "SSE-C"
             self.db.connection.execute(insert(object_encryption).values(
-                object_id=identifier, mode="SSE-C", key_md5=sse_key_md5,
+                object_id=identifier, mode=mode, key_md5=sse_key_md5,
                 etag=None, digest_kind="plaintext", created_at=now,
+                wrapped_key=None,
+                key_wrap=("envelope-part" if mode == "SSE-S3" else "none"),
             ))
         self.db.commit()
         return identifier
 
+    def envelope_key(self, identifier: str, kek: bytes):
+        """Unwrap this object's data key for reading or encrypting.
+
+        Uses the RAW row, not ``encryption_info``: during an upload the object
+        is still ``pending``, and resolving through the published content id
+        would fail exactly when the key is first needed.
+        """
+        from .envelope import open_object_key
+        info = self.raw_encryption_info(identifier)
+        if info is None or info.get("key_wrap") != "envelope-v1":
+            raise ValueError("Object is not envelope-encrypted")
+        return open_object_key(kek, info.get("wrapped_key"),
+                               info.get("envelope_aad") or identifier)
+
     def raw_encryption_info(self, identifier: str) -> dict | None:
-        """SSE-C marker for any object id, including a pending journal."""
+        """Encryption marker for any object id, including a pending journal."""
         row = self.db.connection.execute(select(
             object_encryption.c.mode, object_encryption.c.key_md5,
             object_encryption.c.etag, object_encryption.c.digest_kind,
+            object_encryption.c.wrapped_key, object_encryption.c.key_wrap,
+            object_encryption.c.envelope_aad,
         ).where(object_encryption.c.object_id == identifier)).mappings().first()
         return dict(row) if row is not None else None
 
     def encryption_info(self, identifier: str) -> dict | None:
-        """SSE-C marker plus response headers data, or None for plaintext."""
+        """Encryption marker plus response headers data, or None for plaintext."""
         current = self.resolve_content_id(identifier)
         row = self.db.connection.execute(select(
             object_encryption.c.mode, object_encryption.c.key_md5,
             object_encryption.c.etag, object_encryption.c.digest_kind,
+            object_encryption.c.wrapped_key, object_encryption.c.key_wrap,
+            object_encryption.c.envelope_aad,
         ).where(object_encryption.c.object_id == current)).mappings().first()
         return dict(row) if row is not None else None
 

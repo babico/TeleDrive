@@ -104,8 +104,10 @@ class TelegramObjectStorage:
 
     async def put_file(self, bucket: str, key: str, source: Path, *,
                        on_begin=None, dedup: bool = True,
-                       sse_key: SSECKey | None = None) -> StoredObject:
-        if sse_key is not None:
+                       sse_key: SSECKey | None = None,
+                       envelope_kek: bytes | None = None,
+                       sse_mode: str | None = None) -> StoredObject:
+        if sse_key is not None or envelope_kek is not None:
             # SSE-C content is deliberately not content-addressed: the same
             # plaintext under another key (or unencrypted) must never share
             # Telegram ciphertext.  AWS has the same property.
@@ -128,7 +130,7 @@ class TelegramObjectStorage:
                     return deduped
             return await self._put_file_inner(
                 bucket, key, source, on_begin=on_begin, replicate=dedup,
-                sse_key=sse_key)
+                sse_key=sse_key, envelope_kek=envelope_kek, sse_mode=sse_mode)
         finally:
             reset_upload_bucket(placement_token)
 
@@ -311,7 +313,9 @@ class TelegramObjectStorage:
 
     async def _put_file_inner(self, bucket: str, key: str, source: Path, *,
                               on_begin=None, replicate: bool = False,
-                              sse_key: SSECKey | None = None
+                              sse_key: SSECKey | None = None,
+                              envelope_kek: bytes | None = None,
+                              sse_mode: str | None = None
                               ) -> StoredObject:
         source = Path(source)
         with _regular_source(source) as handle:
@@ -319,7 +323,13 @@ class TelegramObjectStorage:
             identifier = self.manifests.begin(
                 bucket, key, before.st_size, int(time.time()),
                 sse_key_md5=(sse_key.key_md5_b64 if sse_key else None),
+                envelope_kek=envelope_kek,
+                sse_mode=sse_mode,
             )
+            if envelope_kek is not None:
+                # begin() generated the data key and stored only its wrapped
+                # form; unwrap it here to encrypt this object's chunks.
+                sse_key = self.manifests.envelope_key(identifier, envelope_kek)
             token = secrets.token_hex(24)
             self.manifests.start_writer(identifier, token, int(time.time()), self.writer_ttl_seconds)
             stop = asyncio.Event()
@@ -612,7 +622,8 @@ class TelegramObjectStorage:
     async def iter_bytes(self, identifier: str, *,
                          start: int = 0, end: int | None = None,
                          block_size: int = 1024 * 1024,
-                         sse_key: SSECKey | None = None) -> AsyncIterator[bytes]:
+                         sse_key: SSECKey | None = None,
+                         envelope_kek: bytes | None = None) -> AsyncIterator[bytes]:
         """Stream a half-open [start,end) range, verifying each downloaded chunk.
 
         For an SSE-C object only the chunks overlapping the requested range
@@ -629,6 +640,16 @@ class TelegramObjectStorage:
             return
         parts = self.manifests.parts(identifier)
         info = self.manifests.encryption_info(identifier)
+        if info is not None and info.get("mode") == "SSE-S3":
+            # Envelope: the server holds the key, so a caller that has the
+            # master key does not need to supply one explicitly.
+            if sse_key is None:
+                if envelope_kek is None:
+                    raise SSECError(
+                        "InvalidRequest",
+                        "The object is server-side encrypted; this reader has "
+                        "no master key")
+                sse_key = self.manifests.envelope_key(identifier, envelope_kek)
         if info is not None:
             if sse_key is None:
                 raise SSECError(

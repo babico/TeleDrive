@@ -67,6 +67,28 @@ The unified server dispatches by its actual socket-local listener port, **not** 
 - **The audit trail is durable and admin-only.** Security events (credential and API-key issue/rotate/revoke/reveal, config writes, user changes, physical GC start/finish, presign, share creation) are recorded in `security_audit_events` with the actor, target and a scrubbed detail blob, and are exposed at `GET /api/v1/admin/audit`. The module refuses to store anything shaped like a credential. The in-memory log buffer is admin-only: it carries object keys and request paths.
 - **Default administrator:** the first start inserts the hardcoded local account `admin`/`admin` only when no `admin` row exists; change it immediately (the default is public knowledge, and the WebUI forces the change). An existing `admin` row — password hash, role and enabled flag — is never overwritten. Configuration is not an authentication source: `web.user`/`web.password` are no longer service settings and never authorise a request.
 
+## 5.1 Encryption at rest
+
+Three options exist, and the deployment says which one is active:
+
+| Option | Key holder | Notes |
+| --- | --- | --- |
+| none (default) | nobody | Payloads reach Telegram as plaintext. |
+| SSE-C | the client | Key supplied per request, never stored or logged. Works always. |
+| `storage.encryption: envelope` | the deployment | One AES-256-GCM data key per object, wrapped by a KEK derived (HKDF-SHA256, distinct info string) from the S3 master key. Only the wrapped key is persisted, bound to the object identity as AAD, so a database dump alone yields ciphertext. |
+
+Envelope encryption is the S3 **SSE-S3** shape and is opt-in because it
+disables three plaintext features for encrypted objects: deduplication,
+replication and content search. `teledrive/storage/envelope.py::capabilities()`
+reports that set, and the API/UI surface it rather than leaving an operator to
+discover it.
+
+Two failure modes are deliberate: a rotated/replaced master key makes reads
+fail closed with a named error instead of returning garbage, and asking for
+`AES256` while the setting is `none` is refused with `501` naming the setting
+rather than silently storing plaintext. `aws:kms` is refused because there is
+no AWS KMS here.
+
 ## 6. Database, files and runtime defenses
 
 `state.database_url` accepts synchronous SQLAlchemy dialects without a hardcoded vendor whitelist. Review and pin additional driver packages, use database TLS where available, and scope the SQL principal to the intended schema/database. Initial schema creation/migrations may need DDL privileges; reduce privileges after migrations when operationally feasible.

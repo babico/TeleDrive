@@ -54,6 +54,27 @@ storage:
   # Numeric private channel IDs must be visible in the user's dialogs.
   channel: "YOUR_PRIVATE_CHANNEL_ID_OR_USERNAME"
 
+  # Encryption at rest: none (default) or envelope.
+  #
+  #   none      Payloads reach Telegram as plaintext. SSE-C still works: the
+  #             client supplies a key per request and it is never stored.
+  #   envelope  The SERVER encrypts: one fresh AES-256-GCM data key per
+  #             object, wrapped by a key-encryption key derived from the S3
+  #             master key (TELEDRIVE_S3_MASTER_KEY / storage.s3_master_key_file,
+  #             which you already need for S3 credentials). This is the SSE-S3
+  #             shape: a client sends plaintext and never manages keys, and a
+  #             database dump alone yields ciphertext.
+  #
+  #             The trade-off is explicit and enforced: encrypted objects are
+  #             NOT deduplicated, NOT replicated and NOT content-indexed,
+  #             because all three operate on plaintext. That is why this is
+  #             opt-in and off by default.
+  #
+  # Turning it on is not retroactive: objects already stored stay as they
+  # were. Set a bucket default with PutBucketEncryption (SSEAlgorithm=AES256)
+  # or send x-amz-server-side-encryption: AES256 per request.
+  encryption: none
+
   # Credential rotation across the apis: list below:
   #   single       use only the first set
   #   round_robin  distribute sends across the sets in turn (default)

@@ -99,11 +99,16 @@ def generate(target: Path, *, days: int, hostname: str) -> dict:
 
 
 def test_https(url: str, cert: Path, *, insecure: bool) -> None:
+    # Only ever probe an HTTPS listener; the URL comes from the operator's
+    # own command line, and a file:// read here would be a surprise.
+    if not url.startswith("https://"):
+        raise ValueError("test_https only accepts an https:// URL")
     context = ssl.create_default_context(cafile=str(cert))
     if insecure:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(url, context=context, timeout=10) as response:
+    with urllib.request.urlopen(  # nosec B310 -- https:// checked above
+            url, context=context, timeout=10) as response:
         body = response.read(256)
     print(f"HTTPS OK: {url} responded with HTTP {response.status}")
     if not body:

@@ -174,6 +174,10 @@ def _reload_service_settings() -> None:
     S3_SSL_KEYFILE = settings.s3_ssl_keyfile
     TRUSTED_PROXY = settings.trusted_proxy
     DB_EXTRA_PACKAGES = settings.db_extra_packages
+    # Envelope encryption is a gateway property, so the flag lives on the
+    # gateway module and is read at request time.
+    import web.s3 as _s3_gateway
+    _s3_gateway.ENVELOPE_ENABLED = (settings.encryption_mode == "envelope")
     # Legacy uploader path allowlists read os.environ internally; seed them
     # from the config so the operator never configures them via env.
     os.environ["TELEDRIVE_ALLOWED_SOURCE_ROOTS"] = settings.allowed_source_roots

@@ -73,8 +73,22 @@ def verify_snapshot(path: Path, expected_sha256: str | None = None) -> dict:
                 "JOIN storage_removed_versions r ON r.object_id=h.object_id LIMIT 1"
             ).fetchone():
                 raise InvalidSnapshot("Current HEAD points to a revoked version")
+            # Table names are a hardcoded literal set below, never input;
+            # validating them keeps the interpolated form auditable.
+            _TABLES = {
+                "storage_objects", "storage_object_heads",
+                "storage_published_versions", "storage_removed_versions",
+                "storage_chunks", "storage_multipart_uploads",
+                "storage_replica_chunks", "storage_gc_collected",
+            }
+
             def count(table):
-                return int(db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0])
+                if table not in _TABLES:
+                    raise ValueError("Unexpected table name")
+                # Table name checked against a literal set above.
+                return int(db.execute(
+                    "SELECT COUNT(*) FROM " + table  # nosec B608
+                ).fetchone()[0])
             summary = {
                 "valid": True, "sha256": sha,
                 "objects": count("storage_objects"),

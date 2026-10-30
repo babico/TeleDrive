@@ -380,7 +380,52 @@ create/update/delete, physical GC start/finish, presign and share creation —
 with the actor, target and a scrubbed detail blob. The table is append-only
 and the module refuses to store anything shaped like a credential.
 
-### 7.6 S3 operations that now refuse instead of pretending
+### 7.6 Envelope encryption (SSE-S3) is available, and opt-in
+
+`storage.encryption: envelope` makes encrypted-at-rest a **server** property:
+one fresh AES-256-GCM data key per object, wrapped by a KEK derived from the
+S3 master key you already need, with only the wrapped form persisted. Clients
+send plaintext and never manage keys, which is the S3 SSE-S3 shape.
+
+Enable it, then either set a bucket default or ask per request:
+
+```
+# config.yaml
+storage:
+  encryption: envelope
+```
+
+```
+aws s3api put-bucket-encryption --bucket backups \
+  --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+```
+
+What it costs, stated by the software rather than left to discover:
+
+* **no deduplication** for encrypted objects (identical plaintext must not
+  share ciphertext, and a dedup hit would leak equality),
+* **no replication** for encrypted objects,
+* **no content indexing** for encrypted objects (the index is plaintext).
+
+`envelope.capabilities()` reports exactly those three, and the UI shows them.
+Turning it on is not retroactive: existing objects keep their current form.
+
+`aws:kms` stays `501` in both modes — there is no AWS KMS here — and asking
+for `AES256` while the setting is `none` is also `501` naming the setting,
+because silently storing plaintext after an encryption request is the worst
+possible answer. SSE-C is unchanged and always available.
+
+### 7.7 A two-person deletion approval is no longer required
+
+The physical-GC gate list was: independent backup, restore drill, writer
+barrier and a two-person deletion approval. **The last one is removed by
+owner decision.** The other three still gate `deletion_permitted`, which
+remains `False`, and `scripts/ops/verify_production_bundle.py` still verifies
+the technical evidence and any signature that is supplied — an optional
+attestation must not become an unverified one.
+
+### 7.8 S3 operations that now refuse instead of pretending
 
 - `PUT ?retention` / `?legal-hold` with a streaming payload must carry a
   verifiable `x-amz-checksum-sha256`; otherwise the body is unbound to the

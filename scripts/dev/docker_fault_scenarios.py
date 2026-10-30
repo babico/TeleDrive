@@ -73,6 +73,20 @@ async def read_range(engine, identifier: str, a: int, b: int) -> bytes:
     )])
 
 
+def _open(request, *, timeout=15):
+    """urlopen restricted to http(s).
+
+    The URL is built from a host argument, so an unexpected scheme must be a
+    hard error rather than a silent ``file://`` read.
+    """
+    url = request.full_url if hasattr(request, "full_url") else str(request)
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("Refusing a non-HTTP URL in the fault harness")
+    # The scheme was validated on the line above; this is the single
+    # constrained entry point for the harness.
+    return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
+
+
 def _login(host: str) -> dict:
     payload = json.dumps({"username": "admin", "password": "admin"}).encode()
     request = urllib.request.Request(
@@ -81,7 +95,7 @@ def _login(host: str) -> dict:
         headers={"Content-Type": "application/json",
                  "X-TeleDrive-CSRF": "1"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with _open(request) as response:
         token = json.load(response)["token"]
     return {"Authorization": "Bearer " + token}
 
@@ -94,7 +108,7 @@ def health(host: str, *, authorized=True):
         "http://" + host + ":8080/api/v1/admin/storage/health", headers=headers,
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with _open(req) as response:
             payload = json.load(response)
             assert response.status == 200
             return payload

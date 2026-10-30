@@ -893,7 +893,7 @@ silently.
 | Item | Nature |
 |---|---|
 | Cut the 1.0.8 tag | Operational, after a green SHA. Documentation is ready. |
-| Physical-GC authorization | **Owner only** — backup host, soak, recovery rehearsal, cutover decision, two-person approval. No commit closes this. |
+| Physical-GC authorization | **Owner only** — backup host, soak and recovery rehearsal. A two-person approval is **not** required (owner decision). No commit closes this. |
 | Unknown-history recovery beyond the current engine | Needs the owner's sealed SQL archive. |
 | Long-duration capacity profiling | Needs a real soak window on the owner's hardware. |
 | `web/app.py` router split, `catalog.py` mixins, `app.js` page groups | Engineering, in progress or planned with handoffs in `docs/handoffs/`. |

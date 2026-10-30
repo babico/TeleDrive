@@ -148,7 +148,6 @@ class GCReferenceGuard:
             "writer_barrier_verified": False,
             "independent_payload_backup_verified": False,
             "restore_drill_verified": False,
-            "two_person_deletion_approval_verified": False,
             "deletion_permitted": False,
         }
 

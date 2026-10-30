@@ -143,13 +143,11 @@ class StorageGCInventory:
             "writer_barrier_verified": False,
             "independent_payload_backup_verified": False,
             "restore_drill_verified": False,
-            "two_person_deletion_approval_verified": False,
             "deletion_permitted": False,
             "owner_gates": [
                 "independent_payload_backup_verified",
                 "restore_drill_verified",
                 "writer_barrier_verified",
-                "two_person_deletion_approval_verified",
             ],
             "approved_for_deletion": False,
             "physical_deletion_enabled": False,

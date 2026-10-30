@@ -66,6 +66,10 @@ operator-visible consequences and the migration for each.
   documented defaults (`prefix`, `delimiter`, `max-keys`) were absent from
   the policy context, so the Deny answered 403 for `?prefix=a` and 200 for a
   bare `GET /bucket`, which enumerated everything.
+- **The physical-GC gate no longer requires a two-person approval.** Owner
+  decision: the gate is independent backup, restore drill and writer barrier.
+  An attestation that IS supplied is still signature-verified, so "optional"
+  never means "unverified".
 - **Credential secrets are audited durably.** New `security_audit_events`
   table (schema step 25) and `GET /api/v1/admin/audit`, admin-only. It records
   credential issue/edit/revoke/reveal, API-key issue/rotate, config writes,
@@ -116,6 +120,21 @@ operator-visible consequences and the migration for each.
 
 ### Added
 
+- **Envelope encryption (SSE-S3), opt-in via `storage.encryption: envelope`.**
+  One fresh AES-256-GCM data key per object, wrapped by a KEK derived
+  (HKDF-SHA256, distinct info string) from the S3 master key the deployment
+  already needs; only the wrapped form is persisted, bound to the object
+  identity as AAD. Clients send plaintext and never manage keys — the SSE-S3
+  shape — which is what makes encrypted-at-rest usable by tools that cannot do
+  SSE-C. It is opt-in because it disables deduplication, replication and
+  content search for encrypted objects (all three operate on plaintext), and
+  `envelope.capabilities()` reports exactly that. Enabling it is not
+  retroactive; turn it on per bucket with `PutBucketEncryption` (AES256) or
+  per request with `x-amz-server-side-encryption: AES256`. Asking for AES256
+  while the setting is `none` is `501` naming the setting rather than a
+  silent plaintext write, and `aws:kms` stays `501` because there is no KMS.
+  Data keys come from the OS CSPRNG and the KEK derivation is
+  domain-separated from the credential store's use of the same master secret.
 - **114 supported / 0 partial / 2 unsupported S3 operations.** No partial by
   code or by design. `ListDirectoryBuckets` answers the real AWS answer for a
   deployment with no directory buckets (200, empty result), `CreateSession`

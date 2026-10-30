@@ -51,8 +51,11 @@ def test_even_unreferenced_manifest_has_no_deletion_permission(cat):
     assert len(row["sql_reference_fingerprint"]) == 64
     for name in ("approved_for_deletion", "deletion_permitted",
                  "writer_barrier_verified", "independent_payload_backup_verified",
-                 "restore_drill_verified", "two_person_deletion_approval_verified"):
+                 "restore_drill_verified"):
         assert row[name] is False
+    # Owner decision: a two-person deletion approval is not a requirement, so
+    # it must not appear as a gate at all.
+    assert "two_person_deletion_approval_verified" not in row
 
 
 @pytest.mark.parametrize("source", [
@@ -214,7 +217,7 @@ def test_gc_plan_is_dry_run_with_owner_gates(tmp_path):
     assert plan["rollback_strategy"] == "new_media_upload_and_fresh_sql_identities"
     assert set(plan["owner_gates"]) == {
         "independent_payload_backup_verified", "restore_drill_verified",
-        "writer_barrier_verified", "two_person_deletion_approval_verified",
+        "writer_barrier_verified",
     }
     assert len(plan["sql_reference_fingerprint"]) == 64
     # Re-planning the same candidate yields the same fingerprint.

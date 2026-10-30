@@ -121,7 +121,7 @@ These cannot be completed by a single local agent merely by starting containers:
 | Original-media DR | Original sealed archive, independent checksum, correct credentials/channel, real original bytes and range checks in isolated restore | `BLOCKED_OWNER_ACTION` |
 | Legacy cutover/exemption | Real legacy source + verified owner-controlled cutover via `scripts/ops/verify_legacy_cutover.py`, **or** independent signed no-legacy attestation | `BLOCKED_OWNER_ACTION` |
 | Two-person bundle | Independent owner + operator Ed25519 signatures, matching reviewed SHA; verify with `scripts/ops/verify_production_bundle.py --help` | `BLOCKED_OWNER_ACTION` |
-| GC physical deletion | Independent plaintext-media backup, verified restore, exact target authorization, fenced dry-run, no ambiguous refs, two-person change approval | **DISABLED** |
+| GC physical deletion | Independent plaintext-media backup, verified restore, exact target authorization, fenced dry-run, no ambiguous refs | **DISABLED** |
 
 Do not fabricate a release tag or publish binaries. For a new release candidate require the seven mandatory GitHub Actions workflows **green on its exact commit SHA**, review the Docker image package and supported protocol limits, then request release owner authorization. Development `main` does not retroactively update the v1.0.7 release.
 

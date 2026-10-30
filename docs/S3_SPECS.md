@@ -279,7 +279,7 @@ Implement actual encryption/key lifecycle and enforce per-version retention and 
 
 ### P2-D — Lifecycle, expiration, transitions, replication and restore
 
-Model rules and durable workers without promising AWS transitions that Telegram cannot provide. Physical expiration/deletion requires independent backup, writer fences and two-person authorization.
+Model rules and durable workers without promising AWS transitions that Telegram cannot provide. Physical expiration/deletion requires independent backup and writer fences. A two-person authorization is **not** required (owner decision); an optional signature is verified when supplied.
 
 **To fully support:** PutBucketReplication/DeleteBucketReplication could expose the EXISTING storage-engine cross-account replication (the destination is a second TeleDrive Telegram credential set, not an AWS bucket) — a mapping layer from the S3 replication XML onto the replication runtime is real, bounded work. Expiration/transition rules remain GC-gated (see section 3.3). RestoreObject has no archive tier to restore from — it would require inventing one. Best-effort candidate: the replication configuration surface.
 

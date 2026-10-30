@@ -181,7 +181,7 @@ for the exact commit; PR tests alone do not certify production recovery.
 unknown-history reconciliation without invented metadata; complete
 writer/version/alias-aware GC fencing; physically separate host acceptance;
 owner-approved long-duration capacity/429 telemetry; genuine legacy cutover
-or signed no-legacy exemption; two-person production approval; and
+or signed no-legacy exemption; and
 release-candidate checks on the new exact SHA. The advanced S3 feature
 matrix is tracked separately in [S3 Specs](S3_SPECS.md).
 

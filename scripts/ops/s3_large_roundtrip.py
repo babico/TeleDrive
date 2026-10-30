@@ -155,7 +155,11 @@ def main() -> int:
     endpoint = env("TELEDRIVE_S3_ENDPOINT", "http://127.0.0.1:9000")
     access_key = env("TELEDRIVE_S3_ACCESS_KEY")
     secret_key = env("TELEDRIVE_S3_SECRET_KEY")
-    scratch = Path(env("TELEDRIVE_LARGE_ROUNDTRIP_DIR", "/tmp/teledrive-large-roundtrip"))
+    # A private, predictable-by-owner scratch directory; the default is
+    # created with 0700 rather than a shared /tmp name any user could own.
+    scratch = Path(env("TELEDRIVE_LARGE_ROUNDTRIP_DIR",
+                       str(Path(tempfile.gettempdir())
+                           / "teledrive-large-roundtrip")))
     if not access_key or not secret_key:
         print("Missing TELEDRIVE_S3_ACCESS_KEY / TELEDRIVE_S3_SECRET_KEY",
               file=sys.stderr)

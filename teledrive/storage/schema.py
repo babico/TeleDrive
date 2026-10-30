@@ -293,6 +293,15 @@ def _step_s3_config(ctx: SchemaContext) -> None:
     manifest_metadata.create_all(ctx.engine)
 
 
+def _step_envelope_encryption(ctx: SchemaContext) -> None:
+    """Envelope (SSE-S3) columns on the object encryption marker."""
+    _add_columns(ctx.engine, "storage_object_encryption", [
+        ("wrapped_key", "TEXT"),
+        ("key_wrap", "VARCHAR(16) DEFAULT 'none'"),
+        ("envelope_aad", "VARCHAR(64)"),
+    ])
+
+
 def _step_security_audit(ctx: SchemaContext) -> None:
     """Durable security-event trail (append-only migration).
 
@@ -447,6 +456,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("gc_indexes", _step_gc_indexes),
     ("share_object_id", _step_share_object_id),
     ("security_audit", _step_security_audit),
+    ("envelope_encryption", _step_envelope_encryption),
 ]
 
 # Bump by appending a step; never reorder or remove one.

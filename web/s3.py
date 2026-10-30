@@ -35,6 +35,13 @@ from teledrive.s3.select import MAX_SCAN_BYTES as MAX_SELECT_SCAN_BYTES
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.manifest import ManifestStore
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
+
+# Set from settings at startup (and by tests). When true, an AES256 bucket
+# default or an explicit x-amz-server-side-encryption: AES256 request makes
+# the gateway encrypt server-side with a per-object data key wrapped by the
+# S3 master key. Read at call time from web.s3 so config reloads and tests
+# take effect without re-importing.
+ENVELOPE_ENABLED = False
 import web.app as _webapp
 from web.app import db_connect, storage_transport, _log
 

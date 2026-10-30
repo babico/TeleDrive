@@ -93,3 +93,41 @@ def test_modified_bundle_or_reused_owner_key_fails_closed():
     with pytest.raises(ValueError):
         verify_bundle(sign(data), expected_sha="b"*40,
                       owner_public_key=keys[0], operator_public_key=keys[1])
+
+
+def test_approvals_are_optional_but_a_supplied_one_is_still_verified():
+    """Owner decision: no two-person requirement.
+
+    The technical evidence still has to verify. An optional signature that IS
+    present is still checked, because "optional" must not become "unverified"
+    -- a forged signature is a stronger signal than an absent one.
+    """
+    data, keys, sign = fixture()
+
+    # No approvals block at all: accepted on the technical evidence.
+    bare = copy.deepcopy(data)
+    bare.pop("approvals", None)
+    result = verify_bundle(bare, expected_sha=COMMIT,
+                           owner_public_key=keys[0],
+                           operator_public_key=keys[1])
+    assert result["technical_evidence_verified"] is True
+    assert result["verified_attestations"] == []
+
+    # One signature: verified, and reported.
+    one = copy.deepcopy(data)
+    raw = canonical_payload(one)
+    # Sign with a key whose public half we then declare as the owner key.
+    solo = Ed25519PrivateKey.generate()
+    solo_pub = solo.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    one["approvals"] = {"owner": base64.b64encode(solo.sign(raw)).decode()}
+    single = verify_bundle(one, expected_sha=COMMIT,
+                           owner_public_key=solo_pub,
+                           operator_public_key=keys[1])
+    assert single["verified_attestations"] == ["owner"]
+
+    # A bad signature is still a hard failure.
+    bad = copy.deepcopy(data)
+    bad["approvals"] = {"owner": base64.b64encode(b"x" * 64).decode()}
+    with pytest.raises(ValueError, match="Evidence signature|signature"):
+        verify_bundle(bad, expected_sha=COMMIT,
+                      owner_public_key=keys[0], operator_public_key=keys[1])

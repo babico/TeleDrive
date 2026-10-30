@@ -22,6 +22,7 @@ from sqlalchemy import select, update
 
 import web.app as _webapp
 from teledrive.s3.annotations import AnnotationError
+from teledrive.s3.bucket_encryption import BucketEncryptionStore
 from teledrive.s3.aws_chunked import AwsChunkedDecoder, streaming_mode
 from teledrive.s3.checksums import crc32c, crc64nvme
 from teledrive.s3.conditions import http_last_modified, read_precondition
@@ -58,7 +59,8 @@ from web.s3_gateway.checksums import (
     _effective_object_etag, _ssec_response_headers, _verify_upload_sha256,
 )
 from web.s3_gateway.common import (
-    _chunk_size, _quota_guard, _select_scan_limit, storage_transport,
+    _chunk_size, _quota_guard, _select_scan_limit, envelope_enabled,
+    storage_transport,
 )
 from web.s3_gateway.ranges import _range
 from web.s3_gateway.xml import NAMESPACE, _error
@@ -416,6 +418,60 @@ async def _handle_object_delete(ctx: _S3RequestContext,
     })
 
 
+def _envelope_kek_for_put(ctx: _S3RequestContext, request) -> bytes | None:
+    """Decide whether this PUT is server-side (envelope) encrypted.
+
+    Two triggers, both AWS-shaped:
+    * the request says ``x-amz-server-side-encryption: AES256``, or
+    * the bucket carries a default rule with ``SSEAlgorithm=AES256``.
+
+    Either one needs ``storage.encryption: envelope`` on the deployment; a
+    request for AES256 without it is refused naming the setting rather than
+    silently storing plaintext, because silently ignoring an encryption
+    request is the worst possible answer.
+    """
+    requested = (request.headers.get("x-amz-server-side-encryption") or "").strip()
+    if requested and requested not in {"AES256", "aws:kms", "aws:kms:dsse"}:
+        raise _EnvelopeRequested("InvalidArgument",
+                                 "Unsupported x-amz-server-side-encryption value")
+    if requested in {"aws:kms", "aws:kms:dsse"}:
+        raise _EnvelopeRequested(
+            "NotImplemented",
+            "aws:kms is not supported: there is no AWS KMS here. Use AES256 "
+            "(server-side, when storage.encryption is envelope) or SSE-C", 501)
+    defaulted = False
+    if not requested:
+        # A missing table means "no configuration", not "no default": the
+        # store creates it through the schema coordinator, so an exception
+        # here would silently leave an encrypted bucket storing plaintext.
+        rules = BucketEncryptionStore(ctx.db).get(ctx.bucket) or []
+        defaulted = any(
+            (rule or {}).get("apply_server_side_encryption_by_default", {})
+            .get("sse_algorithm") == "AES256"
+            for rule in rules)
+    if not (requested == "AES256" or defaulted):
+        return None
+    if not envelope_enabled():
+        raise _EnvelopeRequested(
+            "NotImplemented",
+            "Server-side encryption (AES256) requires "
+            "storage.encryption: envelope in config.yaml; use SSE-C headers "
+            "instead", 501)
+    # The KEK is DERIVED from the master key, never the master key itself:
+    # the credential store encrypts with the raw value, and one compromise
+    # must not hand over the other.
+    from teledrive.storage.envelope import derive_kek
+    return derive_kek(ctx.master)
+
+
+class _EnvelopeRequested(Exception):
+    """Raised before staging so the caller can shape an S3 error document."""
+
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code, self.status = code, status
+
+
 async def _handle_object_put(ctx: _S3RequestContext,
                              expected_head: ExpectedHead | None) -> Response:
     """PUT object key: staged upload with checksums, metadata and tags."""
@@ -428,6 +484,12 @@ async def _handle_object_put(ctx: _S3RequestContext,
     # Parse SSE-C before staging any byte: a malformed or unsigned family
     # must fail closed without touching scratch space or Telegram.
     sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
+    envelope_kek = None
+    if sse_key is None:
+        try:
+            envelope_kek = _envelope_kek_for_put(ctx, request)
+        except _EnvelopeRequested as exc:
+            return _error(exc.code, str(exc), exc.status)
     root = Path(_webapp.STORAGE_SCRATCH_DIR)
     _secure_mkdir(root)
     max_bytes = _webapp.REST_MAX_UPLOAD_BYTES
@@ -500,7 +562,8 @@ async def _handle_object_put(ctx: _S3RequestContext,
         )
         http_store = ObjectMetadataStore(catalog)
         tag_store = ObjectTagStore(catalog) if inline_tags is not None else None
-        item = await engine.put_file(bucket, key, stage, sse_key=sse_key)
+        item = await engine.put_file(bucket, key, stage, sse_key=sse_key,
+                                     envelope_kek=envelope_kek)
         http_store.attach_uncommitted(item.id, http_properties)
         if tag_store is not None:
             tag_store.attach_uncommitted(item.id, inline_tags)
@@ -523,6 +586,8 @@ async def _handle_object_put(ctx: _S3RequestContext,
         }
         if sse_key is not None:
             response_headers.update(_ssec_response_headers(sse_key))
+        if envelope_kek is not None:
+            response_headers["x-amz-server-side-encryption"] = "AES256"
         return Response(status_code=200, headers=response_headers)
     finally:
         stage.unlink(missing_ok=True)
@@ -666,7 +731,29 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     item_etag = _effective_object_etag(catalog, item)
     encryption_info = catalog.manifests.encryption_info(item.id)
     sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
-    if encryption_info is not None:
+    server_side = False
+    if encryption_info is not None and encryption_info.get("mode") == "SSE-S3":
+        # Envelope: the server holds the key, so no customer header is sent.
+        if sse_key is not None:
+            return _error(
+                "InvalidRequest",
+                "The object was stored with server-side encryption; remove "
+                "the customer key headers", 400)
+        if not envelope_enabled():
+            return _error(
+                "InvalidRequest",
+                "The object is server-side encrypted but this deployment no "
+                "longer has storage.encryption: envelope enabled", 400)
+        try:
+            from teledrive.storage.envelope import derive_kek
+            sse_key = catalog.manifests.envelope_key(item.id,
+                                                     derive_kek(ctx.master))
+        except (EnvelopeError, ValueError) as exc:
+            return _error(
+                getattr(exc, "code", "InvalidRequest"), str(exc),
+                getattr(exc, "status", 400))
+        server_side = True
+    elif encryption_info is not None:
         if sse_key is None:
             return _error(
                 "InvalidRequest",
@@ -717,7 +804,9 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
             checksum_mode=(checksum_mode == "ENABLED"
                            and encryption_info is None),
         )
-        if sse_key is not None:
+        if server_side:
+            headers["x-amz-server-side-encryption"] = "AES256"
+        elif sse_key is not None:
             headers.update(_ssec_response_headers(sse_key))
         restore_state = _restore_header(item, now_ns=read_now_ns)
         if restore_state is not None:
@@ -750,7 +839,9 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
                        checksum_mode=(checksum_mode == "ENABLED"
                                       and not partial
                                       and encryption_info is None))
-    if sse_key is not None:
+    if server_side:
+        headers["x-amz-server-side-encryption"] = "AES256"
+    elif sse_key is not None:
         headers.update(_ssec_response_headers(sse_key))
     restore_state = _restore_header(item, now_ns=read_now_ns)
     if restore_state is not None:

@@ -5,7 +5,7 @@ Enumerates every SQL reference for one failed object, fingerprints the graph
 and records the owner gates that remain unmet. This command NEVER deletes
 Telegram messages, SQL rows or metadata. Physical deletion stays disabled
 until independent payload backup, verified restore, writer fencing and
-two-person approval are proven.
+the operator gates that remain are proven.
 """
 from __future__ import annotations
 

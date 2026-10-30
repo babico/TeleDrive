@@ -241,6 +241,7 @@ jobs:
             tests/meta/test_route_surface.py \
             tests/meta/test_schema_ddl_is_centralized.py \
             tests/meta/test_no_swallowed_name_errors.py \
+            tests/storage/test_envelope_encryption.py \
             tests/web/test_page_composition.py \
             tests/s3/test_s3_credential_escalation.py \
             tests/s3/test_s3_read_and_lock_gates.py \

@@ -666,7 +666,10 @@ async def _handle(request: Request):
         # requester-payer and governance semantics, including GET/HEAD/DELETE.
         # Ignoring those headers can turn a supposedly protected delete into
         # an ordinary tombstone or pretend to verify a requested checksum.
-        _reject_unimplemented_write_options(request)
+        # Only the object PUT can honour AES256 (envelope encryption); the
+        # form-upload path keeps rejecting the encryption family outright.
+        _reject_unimplemented_write_options(
+            request, allow_envelope=(action == "s3:PutObject"))
         if not is_object_attributes and any(
             name in request.headers for name in
             ("x-amz-max-parts", "x-amz-part-number-marker")

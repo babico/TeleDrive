@@ -50,6 +50,11 @@ class ServiceSettings:
     split_dir: str = "/data/tmp"
     split_min_free_bytes: int = 512 * 1024 * 1024
     lock_dir: str = "/data/tmp"
+    # "none" (default) or "envelope". Envelope makes encrypted-at-rest a
+    # server property: one data key per object, wrapped by a KEK derived from
+    # the S3 master key. It is opt-in because it disables deduplication,
+    # replication and content search for encrypted objects.
+    encryption_mode: str = "none"
 
 
 def _section(cfg: Any, name: str) -> dict:
@@ -82,6 +87,22 @@ def _int(value: Any, default: int, name: str, *, minimum: int = 0) -> int:
     if parsed < minimum:
         raise ValueError(f"Invalid {name} configuration")
     return parsed
+
+
+def _encryption_mode(storage: dict) -> str:
+    """`storage.encryption`: none (default) or envelope.
+
+    Validated here rather than at use time so a typo fails at startup with a
+    clear message instead of silently leaving objects unencrypted.
+    """
+    raw = storage.get("encryption")
+    if raw is None or raw == "":
+        raw = os.environ.get("TELEDRIVE_ENCRYPTION", "none")
+    value = str(raw).strip().lower()
+    if value not in ("none", "envelope"):
+        raise ValueError(
+            "Invalid storage.encryption; expected 'none' or 'envelope'")
+    return value
 
 
 def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
@@ -203,6 +224,7 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
         lock_dir=str(
             paths.get("lock_dir")
             or os.environ.get("TELEDRIVE_LOCK_DIR", "/data/tmp")),
+        encryption_mode=_encryption_mode(storage),
     )
 
 

@@ -1,16 +1,20 @@
-"""Bucket-level encryption configuration (SSE-C only).
+"""Bucket-level encryption configuration.
 
-SSE-C keys are supplied per request and never retained, so there is no
-bucket-level default key to store.  The only honest bucket configuration is
-therefore the explicit *absence* of a server-side default.  AWS-shaped
-documents that ask for default encryption are refused:
+Two modes exist, and the bucket document says which one:
 
-* ``SSEAlgorithm=AES256``  -> 501 (that is SSE-S3, which needs a server key)
-* ``SSEAlgorithm=aws:kms`` -> 501 (no KMS backing)
+* **SSE-C** — the client supplies the key per request and nothing is stored.
+  The bucket default is then the explicit *absence* of a server-side default,
+  which is an empty rule set.
+* **SSE-S3 / envelope** — the server holds the key. ``SSEAlgorithm=AES256``
+  is accepted **only when the deployment has set ``storage.encryption:
+  envelope``**, because that is what makes the claim true: TeleDrive then
+  generates one data key per object and wraps it with a KEK derived from the
+  S3 master key. A deployment that has not enabled it answers 501 naming the
+  setting, rather than storing a rule it cannot honour.
 
-Storing either would silently weaken the promise that "encrypted" means the
-client holds the key.  ``GetBucketEncryption`` returns the real stored
-document (an empty rule set) or an honest 404.
+``aws:kms`` stays 501 in both modes: there is no AWS KMS here, and claiming
+KMS while using a local key would be a lie. ``AES256`` is the honest name for
+"this deployment encrypts for you".
 """
 from __future__ import annotations
 
@@ -35,7 +39,7 @@ bucket_encryption = Table(
     "storage_bucket_encryption", catalog_metadata,
     Column("bucket", String(63), ForeignKey("storage_buckets.name"),
            primary_key=True),
-    # AWS-shaped rule list.  Only the empty list is accepted today.
+    # AWS-shaped rule list: empty (SSE-C) or one AES256 default (envelope).
     Column("rules", String(4096), nullable=False),
     Column("updated_at", BigInteger, nullable=False),
     Column("updated_by", String(64), nullable=False),
@@ -64,8 +68,14 @@ def _algorithm(node) -> str | None:
     return None
 
 
-def parse_encryption_xml(payload: bytes) -> list[dict]:
-    """Strict parse; only an empty rule set is honest for SSE-C."""
+def parse_encryption_xml(payload: bytes, *,
+                         envelope_enabled: bool = False) -> list[dict]:
+    """Strict parse.
+
+    An empty rule set is valid always (it means "no server-side default").
+    ``AES256`` is valid only when envelope encryption is enabled; ``aws:kms``
+    is never valid here.
+    """
     if not payload:
         raise BucketEncryptionError("MalformedXML",
                                     "Server-side encryption XML is empty")
@@ -80,6 +90,7 @@ def parse_encryption_xml(payload: bytes) -> list[dict]:
     if not _valid_namespace(root) or _local(root) != "ServerSideEncryptionConfiguration":
         raise BucketEncryptionError(
             "MalformedXML", "Unexpected server-side encryption document")
+    rules: list[dict] = []
     for child in root:
         if not _valid_namespace(child) or _local(child) != "Rule":
             raise BucketEncryptionError(
@@ -92,14 +103,22 @@ def parse_encryption_xml(payload: bytes) -> list[dict]:
             if name == "ApplyServerSideEncryptionByDefault":
                 algorithm = _algorithm(element)
                 if algorithm == "AES256":
-                    raise BucketEncryptionError(
-                        "NotImplemented",
-                        "Bucket default encryption with AES256 (SSE-S3) is "
-                        "not supported: TeleDrive holds no server-side key "
-                        "for objects the client did not encrypt. Use SSE-C "
-                        "headers on each request instead",
-                        501,
-                    )
+                    if not envelope_enabled:
+                        raise BucketEncryptionError(
+                            "NotImplemented",
+                            "Bucket default encryption with AES256 (SSE-S3) "
+                            "requires storage.encryption: envelope in "
+                            "config.yaml. Without it TeleDrive holds no "
+                            "server-side key; use SSE-C headers per request "
+                            "instead",
+                            501,
+                        )
+                    rules.append({
+                        "apply_server_side_encryption_by_default": {
+                            "sse_algorithm": "AES256",
+                        },
+                    })
+                    continue
                 if algorithm in {"aws:kms", "aws:kms:dsse"}:
                     raise BucketEncryptionError(
                         "NotImplemented",
@@ -119,16 +138,17 @@ def parse_encryption_xml(payload: bytes) -> list[dict]:
                 )
             raise BucketEncryptionError(
                 "MalformedXML", "Unknown server-side encryption rule element")
-    return []
+    return rules
 
 
 def encryption_xml(rules: list[dict]) -> bytes:
-    """Render the stored configuration (currently always an empty rule set)."""
+    """Render the stored configuration."""
     root = ET.Element("ServerSideEncryptionConfiguration", xmlns=NS)
-    # Only the empty list is storable; guard against future silent shapes.
-    if rules:
-        raise BucketEncryptionError("InternalError",
-                                    "Unsupported stored encryption rules", 500)
+    for rule in rules:
+        node = ET.SubElement(root, "Rule")
+        default = ET.SubElement(node, "ApplyServerSideEncryptionByDefault")
+        ET.SubElement(default, "SSEAlgorithm").text = (
+            rule["apply_server_side_encryption_by_default"]["sse_algorithm"])
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -153,9 +173,12 @@ class BucketEncryptionStore:
         return parsed if isinstance(parsed, list) else []
 
     def replace(self, bucket: str, rules: list[dict], actor: str) -> None:
-        if rules:
-            raise BucketEncryptionError("InternalError",
-                                        "Unsupported encryption rules", 500)
+        for rule in rules:
+            if (set(rule) != {"apply_server_side_encryption_by_default"}
+                    or rule["apply_server_side_encryption_by_default"].get(
+                        "sse_algorithm") != "AES256"):
+                raise BucketEncryptionError(
+                    "InternalError", "Unsupported encryption rules", 500)
         now = int(time.time())
         existing = self.db.connection.execute(select(
             bucket_encryption.c.bucket).where(

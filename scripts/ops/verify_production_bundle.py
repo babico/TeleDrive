@@ -34,7 +34,9 @@ def verify_bundle(bundle: dict, *, expected_sha: str,
         raise ValueError("Receipts do not match the reviewed release source")
     if owner_public_key == operator_public_key or len(owner_public_key) != 32 or len(operator_public_key) != 32:
         raise ValueError("Independent owner and operator keys are required")
-    if not {"soak", "dr", "cutover", "topology", "approvals"}.issubset(bundle):
+    # `approvals` is optional by owner decision; the other four families are
+    # the technical evidence and are required.
+    if not {"soak", "dr", "cutover", "topology"}.issubset(bundle):
         raise ValueError("Missing production evidence family")
 
     topology = bundle["topology"]
@@ -107,24 +109,34 @@ def verify_bundle(bundle: dict, *, expected_sha: str,
     ):
         raise ValueError("Cutover is incomplete or ownership not approved")
 
-    approval = bundle["approvals"]
-    if not isinstance(approval, dict) or set(approval) != {"owner", "operator"}:
-        raise ValueError("Independent production approvals missing")
+    # Owner decision: a two-person signature requirement is not wanted. The
+    # technical evidence still has to verify, and any signature that IS
+    # supplied is still checked -- an optional signature must not become an
+    # unverified one -- but its absence is no longer a rejection.
+    approval = bundle.get("approvals") or {}
+    if approval and not isinstance(approval, dict):
+        raise ValueError("Invalid approvals block")
     signed_message = canonical_payload(bundle)
-    for role, key_bytes in (("owner", owner_public_key), ("operator", operator_public_key)):
+    verified_roles = []
+    for role, key_bytes in (("owner", owner_public_key),
+                            ("operator", operator_public_key)):
+        encoded = approval.get(role)
+        if encoded is None:
+            continue
         try:
-            encoded = approval[role]
             if not isinstance(encoded, str):
                 raise ValueError("Invalid approval type")
             signature = base64.b64decode(encoded, validate=True)
-            Ed25519PublicKey.from_public_bytes(key_bytes).verify(signature, signed_message)
+            Ed25519PublicKey.from_public_bytes(key_bytes).verify(
+                signature, signed_message)
         except (ValueError, TypeError, Exception) as exc:
             # Deliberately suppress key contents and signing details.
             raise ValueError("Invalid " + role + " evidence signature") from exc
+        verified_roles.append(role)
 
     return {
         "technical_evidence_verified": True,
-        "two_independent_attestations_verified": True,
+        "verified_attestations": verified_roles,
         "release_sha": expected_sha,
         "bundle_sha256": hashlib.sha256(signed_message).hexdigest(),
         # Real deployment remains an owner-controlled operational decision,

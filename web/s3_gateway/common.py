@@ -51,6 +51,20 @@ def storage_transport(db):
     return s3.storage_transport(db)
 
 
+def envelope_enabled() -> bool:
+    """Is server-side (envelope) encryption configured for this deployment?
+
+    Read from `web.s3` at CALL time, like every other patched name, so a
+    test or a config reload can flip it without re-importing.
+    """
+    return bool(getattr(_webapp_gateway(), "ENVELOPE_ENABLED", False))
+
+
+def _webapp_gateway():
+    import web.s3 as gateway
+    return gateway
+
+
 def _chunk_size():
     """Resolve the chunk size through ``web.s3`` for the same reason."""
     from web import s3
@@ -87,7 +101,8 @@ def _quota_guard(db, bucket: str, key: str, size: int) -> Response | None:
     return None
 
 
-def _reject_unimplemented_write_options(request: Request) -> None:
+def _reject_unimplemented_write_options(request: Request, *,
+                                        allow_envelope: bool = False) -> None:
     """Fail closed for dangerous S3 semantics we cannot yet guarantee.
 
     In particular, acknowledging encryption, retention, ACL or a storage
@@ -111,6 +126,19 @@ def _reject_unimplemented_write_options(request: Request) -> None:
         "x-amz-expected-bucket-owner",
         "x-amz-decoded-content-length",
     }
+    # Envelope (SSE-S3) is implemented for object PUT, so AES256/aws:kms must
+    # reach THAT handler, which either encrypts or names a precise reason.
+    # Every other write path -- notably the browser POST form -- keeps
+    # rejecting the whole family: a form upload that silently stored
+    # plaintext after the client asked for AES256 is the exact failure this
+    # guard exists to prevent.
+    if allow_envelope and (
+            request.headers.get("x-amz-server-side-encryption") or ""
+    ).strip() in {"AES256", "aws:kms", "aws:kms:dsse"}:
+        rejected -= {"x-amz-server-side-encryption",
+                     "x-amz-server-side-encryption-aws-kms-key-id",
+                     "x-amz-server-side-encryption-context",
+                     "x-amz-bucket-key-enabled"}
     if streaming_mode(request) is not None:
         # aws-chunked streaming uploads legitimately carry the trailer
         # declaration and the decoded length; the decoder enforces both

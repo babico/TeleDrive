@@ -530,7 +530,12 @@ async def _handle_bucket_encryption(ctx: _S3RequestContext) -> Response:
                 raise BucketEncryptionError(
                     "MalformedXML", "Encryption XML exceeds 16 KiB")
         _verify_bucket_control_payload(request, bytes(payload))
-        store.replace(bucket, parse_encryption_xml(bytes(payload)), ctx.owner)
+        from web.s3_gateway.common import envelope_enabled
+        store.replace(
+            bucket,
+            parse_encryption_xml(bytes(payload),
+                                 envelope_enabled=envelope_enabled()),
+            ctx.owner)
         return Response(status_code=200)
     if request.method == "DELETE":
         async for block in request.stream():

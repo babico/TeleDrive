@@ -10,96 +10,27 @@ import hashlib
 import re
 import json
 import time
-from dataclasses import dataclass
 from uuid import uuid4
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, ForeignKey, Integer, MetaData, String,
-    Table, Text, Index, and_, or_, delete, false, insert, select, update,
-    inspect, text,
+    and_, or_, delete, insert, select, update, inspect, text,
 )
 from sqlalchemy.exc import IntegrityError
 
+from .catalog_tables import (
+    ObjectHead, bucket_acl_grants, buckets, catalog_metadata, heads,
+    object_acl_grants, published_versions, removed_versions,
+)
 from .manifest import ManifestStore, StoredObject, objects
 
-catalog_metadata = MetaData()
-buckets = Table(
-    "storage_buckets", catalog_metadata,
-    Column("name", String(63), primary_key=True),
-    Column("created_at", BigInteger, nullable=False),
-    # Phase B of the metadata parity plan: AWS-shaped bucket versioning
-    # states. Pre-existing deployments get the column via a defensive
-    # ALTER (see ensure_versioning_column).
-    Column("versioning_state", String(16), nullable=False,
-           server_default="Enabled"),
-    # Phase C: object lock. One-way enable (AWS semantics): once a
-    # bucket has object lock enabled it cannot be disabled.
-    Column("object_lock_enabled", Boolean, nullable=False,
-           server_default=false()),
-    Column("object_lock_default_mode", String(16)),
-    Column("object_lock_default_days", Integer),
-    # Phase E: public access block (four booleans stored as JSON,
-    # default all-true like AWS) and the persisted object ownership
-    # model (BucketOwnerEnforced — the one real model here).
-    # VARCHAR rather than TEXT: MySQL rejects DEFAULT on TEXT/BLOB
-    # columns, and this column carries a real server default. The JSON
-    # payload is ~120 characters, so 512 is ample.
-    Column("public_access_block", String(512), nullable=False,
-           server_default='{"BlockPublicAcls": true, '
-           '"IgnorePublicAcls": true, "BlockPublicPolicy": true, '
-           '"RestrictPublicBuckets": true}'),
-    Column("object_ownership", String(32), nullable=False,
-           server_default="BucketOwnerEnforced"),
-    # Phase I: website hosting is public only after an explicit, audited
-    # admin decision. It defaults to FALSE and is never implied by a
-    # stored website configuration.
-    Column("public_read", Boolean, nullable=False,
-           server_default=false()),
-)
-object_acl_grants = Table(
-    "storage_object_acl_grants", catalog_metadata,
-    Column("bucket", String(63), primary_key=True),
-    Column("key_hash", String(64), primary_key=True),
-    Column("grantee", String(64), primary_key=True),
-    Column("permission", String(16), primary_key=True),
-    Column("owner", String(64), nullable=False),
-)
-bucket_acl_grants = Table(
-    "storage_bucket_acl_grants", catalog_metadata,
-    Column("bucket", String(63), primary_key=True),
-    Column("grantee", String(64), primary_key=True),
-    Column("permission", String(16), primary_key=True),
-    Column("owner", String(64), nullable=False),
-)
-heads = Table(
-    "storage_object_heads", catalog_metadata,
-    Column("bucket", String(63), ForeignKey("storage_buckets.name"), primary_key=True),
-    Column("key_hash", String(64), primary_key=True),
-    Column("object_id", String(36), nullable=False),
-    Column("generation", BigInteger, nullable=False),
-    Column("updated_at", BigInteger, nullable=False),
-)
-published_versions = Table(
-    "storage_published_versions", catalog_metadata,
-    Column("object_id", String(36), primary_key=True),
-    Column("bucket", String(63), nullable=False),
-    Column("key_hash", String(64), nullable=False),
-    Column("committed_ns", BigInteger, nullable=False),
-)
-# Logical S3 VersionId deletion revokes visibility but NEVER removes Telegram
-# media, manifests or aliases. Existing deployments receive an additive table.
-removed_versions = Table(
-    "storage_removed_versions", catalog_metadata,
-    Column("object_id", String(36), primary_key=True),
-    Column("removed_ns", BigInteger, nullable=False),
-)
-# Physical GC asks "is this object a head anywhere?" for every candidate,
-# via EXISTS(heads.object_id == objects.id). The heads primary key is
-# (bucket, key_hash), so that probe scanned the whole table.
-Index("ix_storage_object_heads_object", heads.c.object_id)
-Index("ix_storage_published_versions_key",
-      published_versions.c.bucket, published_versions.c.key_hash,
-      published_versions.c.committed_ns)
+# Re-exported for the existing import sites (``web/s3_gateway/*``, copy.py,
+# gc_collect.py, multipart.py and the tests all import these names from
+# ``teledrive.storage.catalog``).  Declarations live in catalog_tables.py.
+__all__ = [
+    "BucketCatalog", "ObjectHead", "bucket_acl_grants", "buckets",
+    "catalog_metadata", "heads", "object_acl_grants", "published_versions",
+    "removed_versions",
+]
 
 _BUCKET_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?\Z")
 
@@ -114,12 +45,6 @@ def ensure_versioning_column(db) -> None:
     from .schema import ensure_schema
 
     ensure_schema(db.engine)
-
-
-@dataclass(frozen=True)
-class ObjectHead:
-    item: StoredObject
-    generation: int
 
 
 class BucketCatalog:

@@ -362,12 +362,17 @@ metadata-level copy+delete and could be supported if a client needs it.
       | malformed | `tests/s3/test_s3_malformed_matrix.py` | all 14 XML-bodied operations; a 5xx is treated as a failure, not a pass |
       | over-limit | `tests/s3/test_s3_over_limit_matrix.py` | all 5 body-limited operations, limits imported from the enforcing module and sent as `limit + 1` |
       | signature-tampered | `tests/s3/test_s3_sigv4_defense.py` | per-class, not per-operation |
-      | retry, multiworker race, crash/restart | per-operation | only for the operations where the state machine makes it meaningful (publish CAS, multipart, GC) |
+      | crash/restart | `tests/s3/test_s3_restart_matrix.py` | **11 supported operations whose state machine is multi-step**, plus physical GC: PutObject (ready-but-unpublished staging), CompleteMultipartUpload (live/expired completion lease), UploadPart, AbortMultipartUpload, DeleteObject, DeleteObjects, CopyObject, RenameObject, PutBucketPolicy, PutObjectLockConfiguration and RestoreObject; every case opens a NEW `Database`/catalog/store after the crash and asserts no half-publication, no lost chunk accounting and no resurrection |
+      | retry, multiworker race | per-operation | only for the operations where the state machine makes it meaningful (publish CAS, multipart, GC) |
 
-      Both matrices carry a meta-test that fails when a supported operation is
-      added without an entry, so the coverage cannot rot. What is genuinely
-      still open is the *crash/restart* column for every operation, and the
-      multiworker race column beyond the publish/GC paths.
+      Every matrix carries a meta-test that fails when a supported operation
+      is added without an entry, so the coverage cannot rot. The
+      *crash/restart* column is now complete for every operation that has a
+      two-step durable window between Telegram I/O and SQL publication; the
+      remaining operations commit their whole effect in one SQL transaction,
+      so a process death cannot interrupt a half-state. What is genuinely
+      still open is the *retry* column and the *multiworker race* column
+      beyond the publish/multipart/GC paths.
 - [x] For unsupported operations, add adversarial selector/HTTP method tests: **no accidental HTTP 200 or mutation**; unsupported-sensitive headers must fail before Telegram I/O.
 - [ ] Verify all S3 mutation paths are reflected in REST/local-job heads, version records, tombstones, tags and copy aliases; invariants run against both SQLite and PostgreSQL.
       **Status:** all four write paths converge on `catalog.publish` (or

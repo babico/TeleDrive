@@ -240,11 +240,14 @@ jobs:
             tests/web/test_governance_non_destructive.py \
             tests/meta/test_route_surface.py \
             tests/meta/test_schema_ddl_is_centralized.py \
+            tests/meta/test_no_swallowed_name_errors.py \
+            tests/web/test_page_composition.py \
             tests/s3/test_s3_credential_escalation.py \
             tests/s3/test_s3_read_and_lock_gates.py \
             tests/s3/test_s3_unsigned_matrix.py \
             tests/s3/test_s3_over_limit_matrix.py \
             tests/s3/test_s3_malformed_matrix.py \
+            tests/s3/test_s3_restart_matrix.py \
             tests/web/test_settings_persistence.py \
             tests/web/test_website_admin.py \
             tests/web/test_auth_rbac.py \

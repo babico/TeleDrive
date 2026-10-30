@@ -6,7 +6,7 @@ TeleDrive stores object payloads in Telegram and keeps object metadata, upload s
 
 > **Security:** ordinary Telegram cloud chats and Saved Messages are **not end-to-end encrypted**. Encrypt sensitive content before uploading if it must be confidential from Telegram.
 >
-> **Release boundary:** [v1.0.7](https://github.com/babico/TeleDrive/releases/tag/v1.0.7) is the published milestone. Newer `main` features may not be included in those binaries. Refer to [Project Status](docs/IMPLEMENTATION_STATUS.md) before treating unreleased features as production-ready.
+> **Release boundary:** [v1.0.8](https://github.com/babico/TeleDrive/releases/tag/v1.0.8) is the release this tree describes. Newer `main` commits may not be in those binaries. Refer to [Project Status](docs/IMPLEMENTATION_STATUS.md) and the [release notes](docs/RELEASE_v1.0.8.md) before treating anything as production-ready.
 
 ## Documentation
 

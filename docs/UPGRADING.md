@@ -325,7 +325,17 @@ reachable from outside the host.**
 
 If your only credential was the config password, you are locked out until you
 run `scripts/ops/reset_local_password.py`, or delete the `admin` row and
-restart.
+restart. The script prompts twice and accepts any non-empty password (its
+floor is a typo check, not a policy), so it can restore the `admin`/`admin`
+credential itself:
+
+```bash
+python scripts/ops/reset_local_password.py --config config/config.yaml \
+  --username admin --role admin
+```
+
+Either path revokes that user's existing sessions, which is the point: a
+recovery that left old sessions alive would hand access to whoever held them.
 
 ### 7.2 S3 credentials are an interactive-session surface
 

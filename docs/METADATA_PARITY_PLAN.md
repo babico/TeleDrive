@@ -14,12 +14,21 @@
 >
 > The only features that stay by-design are the ones with **no honest
 > backing at all**: billing (request payment) and transfer
-> acceleration. Everything else in the 37 partials has a
-> metadata-backed path below.
+> acceleration. Both are now implemented as the truthful single state
+> (BucketOwner / Suspended) rather than left partial.
 
-Inventory: 19 supported / 37 partial (by design) / 60 unsupported.
-This plan converts up to 35 of the 37 into supported operations, in
-dependency order. Each phase is independently shippable.
+**This plan is COMPLETE. It is kept as the design record, not as open work.**
+
+Inventory when it was written: 19 supported / 37 partial (by design) / 60
+unsupported. Inventory now: **114 supported / 0 partial / 2 unsupported**.
+Every phase below landed; the two remaining operations are permanently
+impossible here (`GetObjectTorrent`, `WriteGetObjectResponse`) and are
+listed with reasons in [S3_SPECS](S3_SPECS.md). Phase K, the only one that
+stayed an open decision at the time, was settled by shipping SSE-C — see its
+section below for why envelope encryption is rejected.
+
+Read the phases that follow as the historical dependency order that was
+executed, not as a backlog.
 
 ---
 
@@ -263,13 +272,19 @@ deployment that needs encrypted-at-rest payloads uses SSE-C.
 | H CORS grammar | S | 2 |
 | I website | M | 1 (+2 later) |
 | J tagging journal | S | 3 |
-| K SSE envelope | L | 1 (owner decision) |
+| K SSE envelope | L | 1 (settled: rejected, see below) |
 
 After A–J: **35 of 37 by-design partials resolved**, inventory lands
 at **54 supported / 2 partial (by design) / 60 unsupported**, with the
 unsupported group also shrinking (ACL/notification/replication/
 website/lock writes promote from section 4). K optionally brings it
 to 55/1/60.
+
+> **These are the projected numbers from when the plan was written, not the
+> landed state.** Phases L, N, M and O continued past J, and the final
+> inventory is **114 supported / 0 partial / 2 unsupported** — see
+> [S3_SPECS](S3_SPECS.md) for the authoritative count and the two permanent
+> exceptions. Phase K was settled as REJECTED (SSE-C shipped instead).
 
 Each phase ships behind the same discipline: SQL state first,
 enforcement on every violating path second, GET observability third,

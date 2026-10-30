@@ -160,7 +160,7 @@ The default REST upload ceiling is 2 GiB, configurable with `web.rest_max_upload
 
 ## 4. S3-compatible API
 
-For the **116-operation AWS S3 API compatibility matrix**, parameter-level limitations, unsupported-operation groups, and the P2 Advanced S3 work plan, see [S3 Specifications](docs/S3_SPECS.md). That document is the authoritative inventory: for this tree it records **110 supported, 2 partial (both by design) and 4 unsupported operations**. Count operations, not request permutations, and treat every partial as partial.
+For the **116-operation AWS S3 API compatibility matrix**, parameter-level limitations, unsupported-operation groups, and the P2 Advanced S3 work plan, see [S3 Specifications](docs/S3_SPECS.md). That document is the authoritative inventory: for this tree it records **114 supported, 0 partial and 2 unsupported operations**. Count operations, not request permutations. The two remaining are permanently impossible here (`GetObjectTorrent` needs a seedable BitTorrent swarm; `WriteGetObjectResponse` needs a Lambda runtime) and both reject with a named reason rather than a generic 501.
 
 The S3 endpoint is **part of the default container**, not a separate Compose profile. It implements a tested **subset** of S3 over the shared Telegram-backed catalog. It is **not AWS S3 feature parity**.
 

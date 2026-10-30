@@ -1,6 +1,25 @@
 # TeleDrive — Full S3 Operation Coverage Plan
 
-**Durum:** 110 supported / 2 partial (0 by code) / 4 unsupported — 116 operasyon.
+> **BU PLAN TAMAMLANDI — tasarım kaydı olarak tutuluyor, açık iş değil.**
+>
+> **Nihai durum: 114 supported / 0 partial / 2 unsupported — 116 operasyon.**
+> Aşağıdaki 110/2/4 satırı planın yazıldığı andaki durumdur (yazıldığı anda
+> doğruydu). Sonradan iki şey değişti:
+>
+> 1. Kalan iki "partial" bir tasarım kararı değil **bug**'tı:
+>    `GetBucketAccelerateConfiguration` `<TransferAcceleratedStatus>` (iç enum
+>    adı) yazıyordu, botocore'un şeması ise tek üye `Status` — boto3 belgeyi
+>    boş dict olarak parse ediyordu. `GetBucketRequestPayment` zaten doğruydu
+>    ve artık gerçek bir boto3 istemcisiyle kanıtlanıyor.
+> 2. "İmkânsız" sayılan iki operasyon dürüst bir alt seviyede mümkündü:
+>    `ListDirectoryBuckets` (directory bucket yoksa gerçek AWS cevabı: boş
+>    200) ve `CreateSession` (isim sınıfına göre dürüst red: 400/404).
+>
+> `GetObjectTorrent` (seeder yok) ve `WriteGetObjectResponse` (Lambda
+> runtime yok) kalıcı olarak unsupported. Yetkili envanter
+> [S3_SPECS](S3_SPECS.md) ve `teledrive/s3/operation_manifest.json`.
+
+**Durum (plan yazıldığında):** 110 supported / 2 partial (0 by code) / 4 unsupported — 116 operasyon.
 **Hedef:** 112 supported / 0 partial / 4 unsupported (96.5%) — pratikte
 ulaşılan dürüst son durum **110 supported / 2 partial / 4 unsupported**;
 `GetBucketRequestPayment` ve `GetBucketAccelerateConfiguration` tasarım

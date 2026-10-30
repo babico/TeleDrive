@@ -12,10 +12,10 @@ state operable without an S3 client. It also moves ports and TLS to the
 environment, persists service settings in SQL, and closes the critical
 findings from the codebase audit.
 
-The release candidate is prepared from this tree. **No tag has been
-published for 1.0.8.** The published binaries remain v1.0.7 until the
-mandatory checks pass on the exact release SHA; do not treat this file as
-a tag, and do not cite a SHA from it.
+**v1.0.8 is tagged at the commit that carries this file.** The tag exists
+only after all six mandatory workflows are green on that exact SHA; the
+checks are per-SHA, not per-branch, so a green commit elsewhere is not
+evidence for this one. Later `main` commits are not part of the release.
 
 ## Upgrade
 

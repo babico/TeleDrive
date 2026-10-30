@@ -101,6 +101,30 @@ split is wrong, not the test.
   foreign key can silently re-attach to a new parent (this caused a session
   resurrection bug).
 
+## Landmine added later (read this before touching routes)
+
+**FastAPI 0.142 does not copy an included router's routes into
+`app.routes`.** `app.include_router(...)` appends one lazy `_IncludedRouter`
+that resolves at request time. Anything that enumerates `app.routes` -- a
+permission registry, a snapshot test, a "what routes exist" script -- silently
+misses every router-included endpoint while the app keeps serving them
+correctly.
+
+This cost 44 routes before it was caught:
+
+* the 19 public routes dropped out of the permission registry the moment
+  `web/routers/public.py` was included, and
+* the 25 S3 governance routes had **never** been in it, because that router
+  was included lazily from the day it was written. `_actor()` still
+  authenticated and role-gated them, so it was not an open door -- but they
+  were absent from `admin:*`'s expansion and from the surface snapshot.
+
+Use `web.permissions.route_views(app)`. It flattens both shapes (a normal
+route, or an included router's effective contexts) and is what the registry
+and `tests/meta/test_route_surface.py` read. Do not mutate
+`app.router.routes` by hand to work around this; that reintroduces a second
+registration path.
+
 ## How to verify a step
 
 ```

@@ -54,12 +54,12 @@ def _mint(client, session, scopes, expires_at=None, name="k"):
 def test_admin_star_covers_the_live_route_table(api):
     """``admin:*`` must be a wildcard over every API route, not nine names."""
     from teledrive.api_keys import expand_scopes
-    from web.permissions import PermissionRegistry
+    from web.permissions import PermissionRegistry, route_views
 
     webapp.permission_registry()
     granted = expand_scopes(["admin:*"])
     live = {entry["name"]
-            for entry in PermissionRegistry(webapp.app.routes).catalog()}
+            for entry in PermissionRegistry(route_views(webapp.app)).catalog()}
     assert live, "registry is empty"
     assert live <= granted, sorted(live - granted)
 

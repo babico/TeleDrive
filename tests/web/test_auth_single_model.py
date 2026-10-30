@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 import web.app as web
 from teledrive.db import connect_database
 from tests import basic_header, login_headers, seed_local_user
-from web.permissions import PermissionRegistry
+from web.permissions import PermissionRegistry, route_views
 
 CSRF = {"X-TeleDrive-CSRF": "1"}
 ADMIN_PASSWORD = "admin-password-1"
@@ -252,7 +252,7 @@ def test_api_keys_keep_their_own_route_scopes(appenv):
 # --------------------------------------------------------------- role/permission map
 
 def test_role_permission_map_covers_every_registry_permission():
-    registry = PermissionRegistry(web.app.routes)
+    registry = PermissionRegistry(route_views(web.app))
     catalog = {entry["name"] for entry in registry.catalog()}
     admin = registry.permissions_for_role("admin")
     operator = registry.permissions_for_role("operator")

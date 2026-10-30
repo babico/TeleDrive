@@ -5163,23 +5163,15 @@ async def get_object_content(
     return await _stream_object_response(bucket, key, request)
 
 
-def _include_router_eagerly(router) -> None:
-    """Register a router's routes directly on the app.
-
-    FastAPI 0.142 defers ``include_router`` behind an ``_IncludedRouter``
-    placeholder, so the routes would not appear in ``app.routes`` — and the
-    permission registry (and the frozen route-surface test) is built from
-    that live table. These routers use absolute paths and need no include-time
-    prefix, tags or dependencies, so the old eager registration is exact.
-    """
-    for route in router.routes:
-        if hasattr(route, "dependency_overrides_provider"):
-            route.dependency_overrides_provider = app
-    app.router.routes.extend(router.routes)
-
-
 from web.routers import config_router, public_router  # noqa: E402  (router import, no app logic)
 from web import s3_governance_api  # noqa: E402  (router import, no app logic)
-_include_router_eagerly(config_router)
-_include_router_eagerly(public_router)
+# FastAPI 0.142 keeps an included router lazy behind an ``_IncludedRouter``
+# placeholder instead of copying its routes into ``app.routes``. Every
+# consumer that reasons about "the routes" -- the permission registry and the
+# frozen surface snapshot -- therefore reads them through
+# ``web.permissions.route_views()``, which flattens both shapes. That is ONE
+# mechanism for all three routers, and it inherits the framework's own
+# include semantics instead of mutating ``app.router.routes`` by hand.
+app.include_router(config_router)
+app.include_router(public_router)
 app.include_router(s3_governance_api.router)

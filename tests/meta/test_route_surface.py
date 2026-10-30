@@ -21,6 +21,12 @@ from web.permissions import PermissionRegistry, is_admin_only
 EXPECTED_SURFACE = {
     ("DELETE", "/api/v1/admin/keys/{identifier}", 'delete:/api/v1/admin/keys/{identifier}', True),
     ("DELETE", "/api/v1/admin/s3-credentials/{identifier}", 'delete:/api/v1/admin/s3-credentials/{identifier}', True),
+    ("DELETE", "/api/v1/admin/s3-governance/{bucket}/ownership", 'delete:/api/v1/admin/s3-governance/{bucket}/ownership', False),
+    ("DELETE", "/api/v1/admin/s3-governance/{bucket}/policy", 'delete:/api/v1/admin/s3-governance/{bucket}/policy', False),
+    ("DELETE", "/api/v1/admin/s3-governance/{bucket}/replication", 'delete:/api/v1/admin/s3-governance/{bucket}/replication', False),
+    ("DELETE", "/api/v1/admin/s3-governance/{bucket}/reports/{kind}/{config_id}", 'delete:/api/v1/admin/s3-governance/{bucket}/reports/{kind}/{config_id}', False),
+    ("DELETE", "/api/v1/admin/s3-governance/{bucket}/tiering/{config_id}", 'delete:/api/v1/admin/s3-governance/{bucket}/tiering/{config_id}', False),
+    ("DELETE", "/api/v1/admin/s3-governance/{bucket}/website", 'delete:/api/v1/admin/s3-governance/{bucket}/website', False),
     ("DELETE", "/api/v1/admin/s3/credentials/{identifier}", 'delete:/api/v1/admin/s3/credentials/{identifier}', True),
     ("DELETE", "/api/v1/admin/storage/buckets/{bucket}", 'delete:/api/v1/admin/storage/buckets/{bucket}', False),
     ("DELETE", "/api/v1/admin/storage/buckets/{bucket}/objects", 'delete:/api/v1/admin/storage/buckets/{bucket}/objects', False),
@@ -44,6 +50,16 @@ EXPECTED_SURFACE = {
     ("GET", "/api/v1/admin/roles", 'get:/api/v1/admin/roles', False),
     ("GET", "/api/v1/admin/s3-credentials", 'get:/api/v1/admin/s3-credentials', True),
     ("GET", "/api/v1/admin/s3-credentials/{identifier}/secret", 'get:/api/v1/admin/s3-credentials/{identifier}/secret', True),
+    ("GET", "/api/v1/admin/s3-governance/signing-credentials", 'get:/api/v1/admin/s3-governance/signing-credentials', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/notifications", 'get:/api/v1/admin/s3-governance/{bucket}/notifications', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/object-lock", 'get:/api/v1/admin/s3-governance/{bucket}/object-lock', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/ownership", 'get:/api/v1/admin/s3-governance/{bucket}/ownership', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/policy", 'get:/api/v1/admin/s3-governance/{bucket}/policy', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/public-access-block", 'get:/api/v1/admin/s3-governance/{bucket}/public-access-block', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/replication", 'get:/api/v1/admin/s3-governance/{bucket}/replication', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/reports", 'get:/api/v1/admin/s3-governance/{bucket}/reports', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/tiering", 'get:/api/v1/admin/s3-governance/{bucket}/tiering', False),
+    ("GET", "/api/v1/admin/s3-governance/{bucket}/website", 'get:/api/v1/admin/s3-governance/{bucket}/website', False),
     ("GET", "/api/v1/admin/s3-multipart/stale", 'get:/api/v1/admin/s3-multipart/stale', False),
     ("GET", "/api/v1/admin/s3/credentials", 'get:/api/v1/admin/s3/credentials', True),
     ("GET", "/api/v1/admin/s3/credentials/{identifier}/secret", 'get:/api/v1/admin/s3/credentials/{identifier}/secret', True),
@@ -92,6 +108,7 @@ EXPECTED_SURFACE = {
     ("GET", "/s3", None, False),
     ("GET", "/s3/buckets", None, False),
     ("GET", "/s3/credentials", None, False),
+    ("GET", "/s3/governance", None, False),
     ("GET", "/server.cer", None, False),
     ("GET", "/server.crt", None, False),
     ("GET", "/settings", None, False),
@@ -137,6 +154,15 @@ EXPECTED_SURFACE = {
     ("POST", "/share/{token}", None, False),
     ("PUT", "/api/config", 'put:/api/config', True),
     ("PUT", "/api/v1/admin/s3-credentials/{identifier}", 'put:/api/v1/admin/s3-credentials/{identifier}', True),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/notifications", 'put:/api/v1/admin/s3-governance/{bucket}/notifications', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/object-lock", 'put:/api/v1/admin/s3-governance/{bucket}/object-lock', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/ownership", 'put:/api/v1/admin/s3-governance/{bucket}/ownership', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/policy", 'put:/api/v1/admin/s3-governance/{bucket}/policy', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/public-access-block", 'put:/api/v1/admin/s3-governance/{bucket}/public-access-block', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/replication", 'put:/api/v1/admin/s3-governance/{bucket}/replication', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/reports/{kind}/{config_id}", 'put:/api/v1/admin/s3-governance/{bucket}/reports/{kind}/{config_id}', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/tiering/{config_id}", 'put:/api/v1/admin/s3-governance/{bucket}/tiering/{config_id}', False),
+    ("PUT", "/api/v1/admin/s3-governance/{bucket}/website", 'put:/api/v1/admin/s3-governance/{bucket}/website', False),
     ("PUT", "/api/v1/admin/s3/credentials/{identifier}", 'put:/api/v1/admin/s3/credentials/{identifier}', True),
     ("PUT", "/api/v1/admin/storage/buckets/{bucket}/content", 'put:/api/v1/admin/storage/buckets/{bucket}/content', False),
     ("PUT", "/api/v1/admin/storage/buckets/{bucket}/cors", 'put:/api/v1/admin/storage/buckets/{bucket}/cors', False),
@@ -156,17 +182,21 @@ EXPECTED_SURFACE = {
 
 
 def _surface():
-    registry = PermissionRegistry(webapp.app.routes)
+    # route_views, not app.routes: FastAPI 0.142 keeps an included router
+    # lazy, so app.routes alone omits every endpoint that lives in
+    # web/routers/*. A snapshot built the naive way would pass while those
+    # routes silently fell out of the authorization map.
+    from web.permissions import route_views
+
+    registry = PermissionRegistry(route_views(webapp.app))
     found = set()
-    for route in webapp.app.routes:
-        path = getattr(route, "path", None)
-        if not path:
-            continue
-        for method in (getattr(route, "methods", ()) or ()):
+    for route in route_views(webapp.app):
+        for method in route.methods:
             if method in {"HEAD", "OPTIONS"}:
                 continue
-            found.add((method, path, registry.permission_for(method, path),
-                       is_admin_only(method, path)))
+            found.add((method, route.path,
+                       registry.permission_for(method, route.path),
+                       is_admin_only(method, route.path)))
     return found
 
 
@@ -201,14 +231,16 @@ def test_every_non_public_route_has_a_permission():
         ("GET", "/s3/buckets"), ("GET", "/s3"),
         ("GET", "/storage"), ("GET", "/{page_name}.html"),
         ("GET", "/{page_name}"), ("GET", "/site/{bucket}"),
-        ("GET", "/site/{bucket}/{path:path}"),
+        ("GET", "/site/{bucket}/{path:path}"), ("GET", "/s3/governance"),
     }
 
-    registry = PermissionRegistry(webapp.app.routes)
+    from web.permissions import route_views
+
+    registry = PermissionRegistry(route_views(webapp.app))
     offenders = []
-    for route in webapp.app.routes:
-        path = getattr(route, "path", "")
-        for method in (getattr(route, "methods", ()) or ()):
+    for route in route_views(webapp.app):
+        path = route.path
+        for method in route.methods:
             if method in {"HEAD", "OPTIONS"}:
                 continue
             if registry.permission_for(method, path) is not None:

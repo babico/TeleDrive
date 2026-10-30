@@ -68,9 +68,13 @@ def permission_registry() -> "PermissionRegistry":
     table (lazily: routes are declared while this module loads)."""
     global _permission_registry_cache, _route_provider_installed
     if _permission_registry_cache is None:
-        from web.permissions import PermissionRegistry
+        from web.permissions import PermissionRegistry, route_views
         from web import app as _application
-        _permission_registry_cache = PermissionRegistry(_application.app.routes)
+        # route_views, not app.routes: FastAPI 0.142 keeps an included
+        # router lazy, so iterating app.routes would omit every route that
+        # lives in web/routers/* and silently drop it from the map.
+        _permission_registry_cache = PermissionRegistry(
+            route_views(_application.app))
         if not _route_provider_installed:
             # The API-key store lives in the teledrive package and cannot
             # import this module, so ``admin:*`` learns the live route table

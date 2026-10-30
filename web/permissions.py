@@ -290,6 +290,51 @@ def _template_pattern(template: str) -> re.Pattern:
     return re.compile("^" + "".join(pieces) + "$")
 
 
+class RouteView:
+    """The four attributes the registry reads, flattened."""
+
+    __slots__ = ("path", "methods", "summary", "endpoint")
+
+    def __init__(self, path, methods, summary=None, endpoint=None):
+        self.path, self.methods = path, set(methods)
+        self.summary, self.endpoint = summary, endpoint
+
+
+def route_views(app) -> list[RouteView]:
+    """Every route the app actually serves, flattened.
+
+    FastAPI 0.142 does NOT copy an included router's routes into
+    ``app.routes``: it appends one lazy ``_IncludedRouter`` that resolves at
+    request time. Anything that reasons about "the routes" by iterating
+    ``app.routes`` therefore silently misses every router-included endpoint --
+    which is exactly how 19 routes dropped out of the permission registry when
+    the public surface moved into ``web/routers/public.py``.
+
+    This helper flattens both shapes so the registry and the surface snapshot
+    see the same set the router does.
+    """
+    views: list[RouteView] = []
+    for route in getattr(app, "routes", ()) or ():
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        if path and methods:
+            views.append(RouteView(path, methods,
+                                   getattr(route, "summary", None),
+                                   getattr(route, "endpoint", None)))
+            continue
+        contexts = getattr(route, "effective_route_contexts", None)
+        if callable(contexts):
+            for context in contexts():
+                child_path = getattr(context, "path", None)
+                child_methods = getattr(context, "methods", None)
+                if child_path and child_methods:
+                    views.append(RouteView(
+                        child_path, child_methods,
+                        getattr(context, "summary", None),
+                        getattr(context, "endpoint", None)))
+    return views
+
+
 class PermissionRegistry:
     """Method+template -> permission, with concrete-request matching."""
 

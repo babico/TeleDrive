@@ -892,7 +892,7 @@ silently.
 
 | Item | Nature |
 |---|---|
-| Cut the 1.0.8 tag | Operational, after a green SHA. Documentation is ready. |
+| ~~Cut the 1.0.8 tag~~ | **DONE** — `v1.0.8` is tagged at `7d2aa77`, all six workflows green on that exact SHA, and the GitHub Release with the service image is published. |
 | Physical-GC authorization | **Owner only** — backup host, soak and recovery rehearsal. A two-person approval is **not** required (owner decision). No commit closes this. |
 | Unknown-history recovery beyond the current engine | Needs the owner's sealed SQL archive. |
 | Long-duration capacity profiling | Needs a real soak window on the owner's hardware. |

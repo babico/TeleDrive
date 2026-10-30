@@ -109,6 +109,21 @@ buffer).
       agent must know, then the next one reads it before starting.
 - [ ] Every step keeps the suite green; no behaviour change without a test.
 
+## Released
+
+`v1.0.8` is tagged at **`7d2aa77`** and published, with the single-container
+service image attached. All six mandatory workflows are green on that exact
+SHA:
+
+```
+CI 1 · Quality        CI 2 · Integration     CI 3 · Image & Resilience
+CI 4 · Live E2E (x2)  CI 5 · Delivery
+```
+
+The release notes (`docs/RELEASE_v1.0.8.md`) describe that tree: 114/0/2
+inventory, 2018 tests, bandit clean, schema version 26. Anything merged after
+`7d2aa77` is post-release and not in the binaries.
+
 ## Standing rules
 
 - Each phase: compileall + bandit + full suite (`-n 4`), then deploy

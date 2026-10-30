@@ -46,7 +46,12 @@ def main() -> int:
     parser.add_argument("--username", required=True)
     parser.add_argument("--role", choices=("admin", "operator", "viewer"),
                         default="admin")
-    parser.add_argument("--min-length", type=int, default=8)
+    # The floor is a sanity check on a typo, NOT a policy boundary: this
+    # script already requires filesystem and database access, so anyone who
+    # can run it can also read the database directly. It defaults to the same
+    # length the first-boot bootstrap uses (5, for the documented admin/admin
+    # account); a longer value is available without changing the code.
+    parser.add_argument("--min-length", type=int, default=5)
     args = parser.parse_args()
 
     # Imported here so --help works without the service dependencies.

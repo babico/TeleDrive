@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from teledrive.db import connect_database
 import web.app as webapp
-from web.permissions import CURATED_PERMISSIONS, PermissionRegistry
+from web.permissions import CURATED_PERMISSIONS, PermissionRegistry, route_views
 
 
 @pytest.fixture()
@@ -39,7 +39,7 @@ def create_key(client, scopes):
 
 
 def test_registry_covers_every_api_route_and_never_drifts():
-    registry = PermissionRegistry(webapp.app.routes)
+    registry = PermissionRegistry(route_views(webapp.app))
     catalog = registry.catalog()
     assert catalog, "registry is empty"
     names = [entry["name"] for entry in catalog]

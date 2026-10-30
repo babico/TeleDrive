@@ -133,8 +133,13 @@ def test_endpoint_catalog_covers_every_bearer_route(keys):
     from pathlib import Path
     from teledrive.api_keys import ENDPOINT_PERMISSIONS
 
-    source = Path("web/app.py").read_text()
-    used = set(re.findall(r'require_api_scope\("([^"]+)"\)', source))
+    # Bearer routes live in web/app.py and in any router module (rest.py
+    # holds the whole /api/v1/buckets data plane). Scan every Python file
+    # under web/ so a future extraction cannot make this pass vacuously.
+    used = set()
+    for path in Path("web").rglob("*.py"):
+        used |= set(re.findall(r'require_api_scope\("([^"]+)"\)',
+                               path.read_text(encoding="utf-8")))
     assert used, "no bearer routes found"
     assert used <= set(ENDPOINT_PERMISSIONS), (
         f"Routes with unregistered permissions: {used - set(ENDPOINT_PERMISSIONS)}")

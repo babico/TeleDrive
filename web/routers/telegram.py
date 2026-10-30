@@ -20,6 +20,7 @@ import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from teledrive.stores import telegram_accounts as _accounts
 from teledrive.stores import telegram_pending as _pending_store
 from web.deps import _same_origin, require_auth
 from web.errors import _telegram_error_response
@@ -68,13 +69,7 @@ async def _probe_telegram_session(api_id: int, api_hash: str,
 def _store_session_health(account: str, authorized: bool) -> None:
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "UPDATE telegram_sessions SET authorized = :a, "
-            "health_checked_at = :now WHERE account = :account"
-        ), {"a": 1 if authorized else 0, "now": int(time.time()),
-            "account": account})
-        conn.connection.commit()
+        _accounts.record_health(conn, account, authorized)
     finally:
         conn.close()
 
@@ -84,16 +79,13 @@ def _probe_account_now(account: str) -> dict:
     import asyncio
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT api_id, api_hash, session_string FROM "
-            "telegram_sessions WHERE account = :account"
-        ), {"account": account}).fetchone()
+        row = _accounts.get_session(conn, account)
     finally:
         conn.close()
     if row is None:
         raise HTTPException(404, "Unknown Telegram session account")
-    api_id, api_hash, session_string = row
+    api_id, api_hash, session_string = (row["api_id"], row["api_hash"],
+                                       row["session_string"])
     try:
         authorized = asyncio.run(
             _probe_telegram_session(api_id, api_hash, session_string))
@@ -120,10 +112,10 @@ async def telegram_session_health_loop() -> None:
         try:
             conn = _webapp().db_connect()
             try:
-                from sqlalchemy import text as _text
-                rows = conn.connection.execute(_text(
-                    "SELECT account, api_id, api_hash, session_string, "
-                    "authorized FROM telegram_sessions")).fetchall()
+                rows = [
+                    (r["account"], r["api_id"], r["api_hash"],
+                     r["session_string"], r["authorized"])
+                    for r in _accounts.all_session_credentials(conn)]
             finally:
                 conn.close()
             for account, api_id, api_hash, session_string, previous in rows:
@@ -170,12 +162,7 @@ def set_telegram_session_quota(account: str, request: Request,
         quota = None
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        changed = conn.connection.execute(_text(
-            "UPDATE telegram_sessions SET soft_quota_bytes = :q, "
-            "updated_at = :now WHERE account = :account"
-        ), {"q": quota, "now": int(time.time()), "account": account}).rowcount
-        conn.connection.commit()
+        changed = _accounts.set_soft_quota(conn, account, quota)
     finally:
         conn.close()
     if not changed:
@@ -204,14 +191,20 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
     now_ms = int(time.time() * 1000)
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        rows = conn.connection.execute(_text(
-            "SELECT account, api_id, phone, channel, strategy, created_at, "
-            "updated_at, authorized, health_checked_at, soft_quota_bytes "
-            "FROM telegram_sessions ORDER BY account")).fetchall()
+        rows = [(r["account"], r["api_id"], r["phone"], r["channel"],
+                 r["strategy"], r["created_at"], r["updated_at"],
+                 r["authorized"], r["health_checked_at"],
+                 r["soft_quota_bytes"])
+                for r in _accounts.list_sessions(conn)]
         # Usage, cooldowns and flood observations live in the storage
         # catalog tables; degrade gracefully when this deployment's web
         # database does not carry them.
+        #
+        # Raw by design: four read-only GROUP BY aggregates (current usage,
+        # retained backlog, cooldowns, flood observations) over tables owned
+        # by the storage and MTProto layers. Nothing mutates here, and each
+        # query is tolerant of a table this deployment does not carry.
+        from sqlalchemy import text as _text
         # CURRENT usage joins the object heads: deleted-but-retained
         # objects (physical GC is owner-gated) do NOT count. The
         # physical chunk totals are reported separately as the retained
@@ -301,6 +294,10 @@ def delete_telegram_session_account(account: str, request: Request,
     # but reads of those objects need the session re-authorized first.
     conn = _webapp().db_connect()
     try:
+        # Deliberately raw: this is a read-only aggregate (COUNT DISTINCT +
+        # SUM) over storage_chunks, a table owned by the storage layer. It
+        # has no store because nothing mutates it here and a typed function
+        # would only wrap one SUM that no other caller needs.
         from sqlalchemy import text as _text
         objects, total = 0, 0
         try:
@@ -337,12 +334,11 @@ def delete_telegram_session_account(account: str, request: Request,
 def get_telegram_session(_: None = Depends(require_auth)):
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT id, api_id, phone, account, channel, strategy, "
-            "created_at, updated_at FROM telegram_sessions "
-            "ORDER BY id DESC LIMIT 1"
-        )).fetchone()
+        latest = _accounts.latest_session(conn)
+        row = (None if latest is None else
+               (latest["id"], latest["api_id"], latest["phone"],
+                latest["account"], latest["channel"], latest["strategy"],
+                latest["created_at"], latest["updated_at"]))
         if row is None:
             return {"configured": False, "session": None}
         return {
@@ -397,12 +393,8 @@ def _record_flood_wait(scope: str, seconds: int, detail: str = "") -> dict:
     expires = now + seconds
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "INSERT INTO flood_waits (scope, started_at, wait_seconds, "
-            "expires_at, detail) VALUES (:s, :n, :w, :e, :d)"
-        ), {"s": scope, "n": now, "w": seconds, "e": expires, "d": detail})
-        conn.connection.commit()
+        _accounts.record_flood_wait(conn, scope=scope, wait_seconds=seconds,
+                                    detail=detail, now=now)
     finally:
         conn.close()
     _webapp()._log(
@@ -421,10 +413,10 @@ def _flood_wait_status() -> dict:
     """Latest FloodWait record with the live remaining countdown."""
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT scope, started_at, wait_seconds, expires_at, detail "
-            "FROM flood_waits ORDER BY id DESC LIMIT 1")).fetchone()
+        last = _accounts.last_flood_wait(conn)
+        row = (None if last is None else
+               (last["scope"], last["started_at"], last["wait_seconds"],
+                last["expires_at"], last["detail"]))
     finally:
         conn.close()
     if row is None:
@@ -656,22 +648,12 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     now = int(time.time())
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        # Remove any previous session for this account.
-        conn.connection.execute(_text(
-            "DELETE FROM telegram_sessions WHERE account = :account"
-        ), {"account": account})
-        conn.connection.execute(_text(
-            "INSERT INTO telegram_sessions (api_id, api_hash, phone, "
-            "session_string, account, channel, strategy, created_at, updated_at) "
-            "VALUES (:api_id, :api_hash, :phone, :session_string, :account, "
-            ":channel, :strategy, :now, :now)"
-        ), {
-            "api_id": api_id, "api_hash": api_hash, "phone": phone,
-            "session_string": session_string, "account": account,
-            "channel": channel, "strategy": strategy, "now": now,
-        })
-        conn.connection.commit()
+        # One row per account: the store updates in place, which is what the
+        # previous delete-then-insert achieved without the window in between.
+        _accounts.upsert_session(
+            conn, api_id=api_id, api_hash=api_hash, phone=phone,
+            session_string=session_string, account=account,
+            channel=channel, strategy=strategy, now=now)
     finally:
         conn.close()
 
@@ -679,31 +661,9 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     if channel:
         conn2 = _webapp().db_connect()
         try:
-            from sqlalchemy import text as _text
-            existing = conn2.connection.execute(_text(
-                "SELECT id FROM telegram_channels WHERE channel_id = :cid"
-            ), {"cid": channel}).fetchone()
-            now2 = int(time.time())
-            if existing:
-                cid = existing[0]
-                conn2.connection.execute(_text(
-                    "UPDATE telegram_channels SET is_active = 0"
-                ))
-                conn2.connection.execute(_text(
-                    "UPDATE telegram_channels SET is_active = 1, strategy = :s, "
-                    "updated_at = :now WHERE id = :id"
-                ), {"s": strategy, "now": now2, "id": cid})
-            else:
-                conn2.connection.execute(_text(
-                    "UPDATE telegram_channels SET is_active = 0"
-                ))
-                conn2.connection.execute(_text(
-                    "INSERT INTO telegram_channels (name, channel_id, strategy, "
-                    "scratch_dir, is_active, created_at, updated_at) "
-                    "VALUES (:name, :cid, :s, :sd, 1, :now, :now)"
-                ), {"name": channel, "cid": channel, "s": strategy,
-                    "sd": "/data/tmp", "now": now2})
-            conn2.connection.commit()
+            _accounts.upsert_channel_by_channel_id(
+                conn2, name=channel, channel_id=channel, strategy=strategy,
+                scratch_dir="/data/tmp", active=True)
         finally:
             conn2.close()
 
@@ -733,9 +693,8 @@ def delete_telegram_session(request: Request, _: None = Depends(require_auth)):
     _webapp()._log("revoke telegram session", "storage")
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text("DELETE FROM telegram_sessions"))
-        conn.connection.commit()
+        for existing in _accounts.list_sessions(conn):
+            _accounts.delete_session(conn, existing["account"])
     finally:
         conn.close()
     _webapp()._schedule_storage_runtime_reload()
@@ -749,11 +708,10 @@ def delete_telegram_session(request: Request, _: None = Depends(require_auth)):
 def list_telegram_channels(_: None = Depends(require_auth)):
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        rows = conn.connection.execute(_text(
-            "SELECT id, name, channel_id, strategy, scratch_dir, is_active, "
-            "created_at, updated_at FROM telegram_channels ORDER BY id"
-        )).fetchall()
+        rows = [(r["id"], r["name"], r["channel_id"], r["strategy"],
+                 r["scratch_dir"], 1 if r["is_active"] else 0,
+                 r["created_at"], r["updated_at"])
+                for r in _accounts.list_channels(conn)]
         return {"channels": [
             {"id": r[0], "name": r[1], "channel_id": r[2], "strategy": r[3],
              "scratch_dir": r[4], "is_active": bool(r[5]),
@@ -783,17 +741,10 @@ def create_telegram_channel(payload: TelegramChannelCreate, request: Request,
     now = int(time.time())
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        result = conn.connection.execute(_text(
-            "INSERT INTO telegram_channels (name, channel_id, strategy, "
-            "scratch_dir, is_active, created_at, updated_at) "
-            "VALUES (:name, :channel_id, :strategy, :scratch_dir, 0, :now, :now) "
-            "RETURNING id"
-        ), {"name": payload.name, "channel_id": payload.channel_id,
-            "strategy": strategy, "scratch_dir": payload.scratch_dir or "/data/tmp",
-            "now": now})
-        new_id = result.scalar()
-        conn.connection.commit()
+        new_id = _accounts.create_channel(
+            conn, name=payload.name, channel_id=payload.channel_id,
+            strategy=strategy,
+            scratch_dir=payload.scratch_dir or "/data/tmp", now=now)
     finally:
         conn.close()
     return {"id": new_id, "name": payload.name, "channel_id": payload.channel_id}
@@ -807,11 +758,7 @@ def delete_telegram_channel(channel_id: int, request: Request,
     _webapp()._log(f"delete channel: id={channel_id}", "storage")
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "DELETE FROM telegram_channels WHERE id = :id"
-        ), {"id": channel_id})
-        conn.connection.commit()
+        _accounts.delete_channel(conn, channel_id)
     finally:
         conn.close()
     return {"ok": True}
@@ -873,10 +820,7 @@ def set_replication_account(request: Request, payload: dict = Body(...),
     if account:
         conn = _webapp().db_connect()
         try:
-            from sqlalchemy import text as _text
-            if not conn.connection.execute(_text(
-                    "SELECT 1 FROM telegram_sessions WHERE account = :a"),
-                    {"a": account}).first():
+            if not _accounts.has_session(conn, account):
                 raise HTTPException(404, "Unknown Telegram session account")
         finally:
             conn.close()
@@ -946,14 +890,7 @@ def activate_telegram_channel(channel_id: int, request: Request,
     _webapp()._log(f"activate channel: id={channel_id}", "storage")
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        conn.connection.execute(_text(
-            "UPDATE telegram_channels SET is_active = 0"
-        ))
-        conn.connection.execute(_text(
-            "UPDATE telegram_channels SET is_active = 1 WHERE id = :id"
-        ), {"id": channel_id})
-        conn.connection.commit()
+        _accounts.activate_channel(conn, channel_id)
     finally:
         conn.close()
     _webapp()._schedule_storage_runtime_reload()
@@ -965,11 +902,10 @@ def activate_telegram_channel(channel_id: int, request: Request,
 def get_active_channel(_: None = Depends(require_auth)):
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        row = conn.connection.execute(_text(
-            "SELECT id, name, channel_id, strategy, scratch_dir FROM "
-            "telegram_channels WHERE is_active = 1 LIMIT 1"
-        )).fetchone()
+        active = _accounts.list_channels(conn, active_only=True)
+        row = (None if not active else
+               (active[0]["id"], active[0]["name"], active[0]["channel_id"],
+                active[0]["strategy"], active[0]["scratch_dir"]))
         if row is None:
             # Fall back to first channel
             row = conn.connection.execute(_text(

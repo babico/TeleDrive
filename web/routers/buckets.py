@@ -753,6 +753,9 @@ async def reindex_object_contents(request: Request,
     try:
         from teledrive.storage.content_index import (
             MAX_INDEX_BYTES, extract_text, index_object_content)
+        # Raw by design: a single read-only candidate query with a portable
+        # LIKE-OR chain and a NOT EXISTS; it mutates nothing and no other
+        # caller needs the same shape.
         from sqlalchemy import text as _text
         candidates = conn.connection.execute(_text(
             "SELECT o.id, o.bucket, o.object_key FROM storage_objects o "
@@ -867,10 +870,8 @@ def admin_put_bucket_pin(bucket: str, request: Request,
         raise HTTPException(422, "account is required")
     conn = _webapp().db_connect()
     try:
-        from sqlalchemy import text as _text
-        if not conn.connection.execute(_text(
-                "SELECT 1 FROM telegram_sessions WHERE account = :a"),
-                {"a": account}).first():
+        from teledrive.stores import telegram_accounts as _accounts
+        if not _accounts.has_session(conn, account):
             raise HTTPException(404, "Unknown Telegram session account")
         _pin_store.set(conn, bucket, account, int(time.time()))
     finally:
@@ -948,6 +949,7 @@ def storage_usage_series(days: int = Query(default=30, ge=1, le=365),
     cutoff_ns = (int(time.time()) - days * 86400) * 1_000_000_000
     conn = _webapp().db_connect()
     try:
+        # Raw by design: a read-only join aggregate for the usage chart.
         from sqlalchemy import text as _text
         try:
             rows = conn.connection.execute(_text(

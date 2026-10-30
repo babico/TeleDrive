@@ -1419,6 +1419,9 @@ def _prom_escape(value: str) -> str:
          summary="Prometheus metrics: jobs, quotas, Telegram sessions, floods")
 def prometheus_metrics(_: None = Depends(require_auth)):
     """Text exposition format 0.0.4; scrape with HTTP auth like any API route."""
+    # Raw by design: a scrape endpoint issues cross-table read-only
+    # aggregates (counts and sums for the exposition format). No store owns
+    # them because nothing mutates here and no other caller needs the shape.
     from sqlalchemy import text as _text, func, select
     from teledrive.storage import quota as _quota
 

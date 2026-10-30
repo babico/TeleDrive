@@ -22,10 +22,13 @@ import time
 
 from sqlalchemy import delete, insert, select, update
 
-from teledrive.db import telegram_channels, telegram_sessions
+from teledrive.db import flood_waits, telegram_channels, telegram_sessions
 
+# api_id is metadata (the numeric app id), not a credential: only api_hash
+# and session_string are secrets, and those are what the listing excludes.
 _SESSION_LIST_COLUMNS = (
     telegram_sessions.c.id, telegram_sessions.c.account,
+    telegram_sessions.c.api_id,
     telegram_sessions.c.phone, telegram_sessions.c.channel,
     telegram_sessions.c.strategy, telegram_sessions.c.created_at,
     telegram_sessions.c.updated_at, telegram_sessions.c.authorized,
@@ -213,3 +216,97 @@ def delete_channel(db, channel_id: int) -> bool:
             telegram_channels.c.id == channel_id))
     db.commit()
     return bool(changed.rowcount)
+
+
+# ---------------------------------------------------------------------------
+# Flood waits
+# ---------------------------------------------------------------------------
+
+def record_flood_wait(db, *, scope: str, wait_seconds: int, detail,
+                      now: int | None = None) -> dict:
+    """Append a FloodWait observation and return the reported window."""
+    now = int(time.time()) if now is None else now
+    seconds = int(wait_seconds)
+    db.connection.execute(insert(flood_waits).values(
+        scope=scope, started_at=now, wait_seconds=seconds,
+        expires_at=now + seconds, detail=detail))
+    db.commit()
+    return {"active": True, "remaining_seconds": seconds,
+            "expires_at": now + seconds}
+
+
+def last_flood_wait(db) -> dict | None:
+    """The most recent observation, newest first, deterministic."""
+    row = db.connection.execute(
+        select(flood_waits.c.scope, flood_waits.c.started_at,
+               flood_waits.c.wait_seconds, flood_waits.c.expires_at,
+               flood_waits.c.detail)
+        .order_by(flood_waits.c.started_at.desc(), flood_waits.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Whole-table reads the runtime needs (credentials included, never listed)
+# ---------------------------------------------------------------------------
+
+def all_session_credentials(db) -> list[dict]:
+    """Every account's api credentials and session string, for the runtime.
+
+    Deliberately NOT named "list": this returns secrets, so a caller has to
+    ask for credentials by name. Nothing logs or returns these to a request.
+    """
+    rows = db.connection.execute(
+        select(telegram_sessions.c.account, telegram_sessions.c.api_id,
+               telegram_sessions.c.api_hash,
+               telegram_sessions.c.session_string,
+               telegram_sessions.c.authorized)
+        .order_by(telegram_sessions.c.account)
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def latest_session(db) -> dict | None:
+    """The most recently inserted session, for the single-account status view."""
+    row = db.connection.execute(
+        select(telegram_sessions.c.id, telegram_sessions.c.api_id,
+               telegram_sessions.c.phone, telegram_sessions.c.account,
+               telegram_sessions.c.channel, telegram_sessions.c.strategy,
+               telegram_sessions.c.created_at, telegram_sessions.c.updated_at)
+        .order_by(telegram_sessions.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def upsert_channel_by_channel_id(db, *, name: str, channel_id: str,
+                                 strategy: str, scratch_dir: str,
+                                 active: bool = False,
+                                 now: int | None = None) -> int:
+    """Create the channel, or update the row that already has this channel_id.
+
+    Portable: no `RETURNING` (MySQL has none), so the id is read back after
+    the write.
+    """
+    now = int(time.time()) if now is None else now
+    existing = db.connection.execute(
+        select(telegram_channels.c.id)
+        .where(telegram_channels.c.channel_id == str(channel_id))
+        .order_by(telegram_channels.c.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        db.connection.execute(
+            update(telegram_channels)
+            .where(telegram_channels.c.id == existing)
+            .values(name=name, strategy=strategy, scratch_dir=scratch_dir,
+                    is_active=1 if active else 0, updated_at=now))
+        db.commit()
+        return int(existing)
+    identifier = create_channel(db, name=name, channel_id=channel_id,
+                                strategy=strategy, scratch_dir=scratch_dir,
+                                now=now)
+    if active:
+        activate_channel(db, identifier, now=now)
+    return identifier

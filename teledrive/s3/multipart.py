@@ -193,15 +193,6 @@ class MultipartStore:
         ).all()
         return rows[:limit], len(rows) > limit
 
-    def list_parts(self, identifier: str, bucket: str, key: str, owner: str):
-        """Legacy internal unpaged result for recovery/metadata callers."""
-        self.require(identifier, bucket, key, owner)
-        return self.db.connection.execute(
-            select(parts.c.number, parts.c.size, parts.c.etag).where(
-                parts.c.upload_id == identifier
-            ).order_by(parts.c.number)
-        ).all()
-
     def list_parts_page(self, identifier: str, bucket: str, key: str, owner: str,
                         *, marker: int = 0, limit: int = 1000):
         """Bounded S3 ListParts page selected in SQL, never Python slicing."""
@@ -293,6 +284,12 @@ class MultipartStore:
             last_cursor = (value, "") if kind == "prefix" else (value.object_key, value.id)
         return page, truncated, last_cursor
 
+    def _part_object_id(self, identifier: str, number: int) -> str | None:
+        """Read the staged object currently recorded for one part slot."""
+        return self.db.connection.execute(select(parts.c.object_id).where(
+            parts.c.upload_id == identifier, parts.c.number == number
+        )).scalar_one_or_none()
+
     def record_part(self, identifier: str, bucket: str, key: str, owner: str,
                     *, number: int, object_id: str, etag: str) -> None:
         if number < 1 or number > MAX_PARTS or not re.fullmatch(
@@ -303,24 +300,39 @@ class MultipartStore:
             raise MultipartError("InvalidPart", "Part object ownership mismatch")
         # Conditional state check blocks publishing a part after Abort/Complete.
         self.require(identifier, bucket, key, owner)
-        old = self.db.connection.execute(select(parts.c.object_id).where(
-            parts.c.upload_id == identifier, parts.c.number == number
-        )).scalar_one_or_none()
+        old = self._part_object_id(identifier, number)
         now = int(time.time())
-        if old is None:
-            try:
-                with self.db.connection.begin_nested():
-                    self.db.connection.execute(insert(parts).values(
-                        upload_id=identifier, number=number, object_id=object_id,
-                        etag=etag, size=obj.size, updated_at=now,
-                    ))
-            except IntegrityError as exc:
-                raise MultipartError("OperationAborted", "Concurrent part update", 409) from exc
-        else:
-            self.db.connection.execute(update(parts).where(
+        for attempt in (0, 1):
+            if old is None:
+                try:
+                    with self.db.connection.begin_nested():
+                        self.db.connection.execute(insert(parts).values(
+                            upload_id=identifier, number=number, object_id=object_id,
+                            etag=etag, size=obj.size, updated_at=now,
+                        ))
+                except IntegrityError as exc:
+                    raise MultipartError("OperationAborted", "Concurrent part update", 409) from exc
+                break
+            changed = self.db.connection.execute(update(parts).where(
                 parts.c.upload_id == identifier, parts.c.number == number,
                 parts.c.object_id == old,
             ).values(object_id=object_id, etag=etag, size=obj.size, updated_at=now))
+            if changed.rowcount == 1:
+                break
+            if attempt == 1:
+                # Two successive losers: report the conflict instead of
+                # acknowledging a part the table does not hold.
+                self.db.connection.rollback()
+                raise MultipartError(
+                    "OperationAborted", "Concurrent part update", 409)
+            # Lost the CAS: another UploadPart replaced this slot after our
+            # read. Re-read the winning value and retry once, so the 200 the
+            # client receives really describes this part, not the loser's ETag.
+            old = self._part_object_id(identifier, number)
+            if old is None:
+                self.db.connection.rollback()
+                raise MultipartError(
+                    "OperationAborted", "Concurrent part update", 409)
         # Compare-and-update the upload row, rejecting races with completion.
         live = self.db.connection.execute(update(uploads).where(
             uploads.c.id == identifier, uploads.c.state == "active"
@@ -336,6 +348,11 @@ class MultipartStore:
             uploads.c.id == identifier, uploads.c.state == "active"
         ).values(state="aborted"))
         if changed.rowcount == 1:
+            # An aborted upload can never be completed, so its staged HTTP
+            # metadata would otherwise leak forever. Drop it in the same
+            # transaction as the state change.
+            ObjectMetadataStore(self.catalog).delete_upload_uncommitted(
+                identifier)
             # Multipart abort is a logical removal in TeleDrive: no object was
             # published, but the staged key's session is gone. Emit the honest
             # ObjectRemoved event in the same transaction as the state change.
@@ -507,7 +524,13 @@ class MultipartStore:
 
     @staticmethod
     def _validate_selection(selected: list[tuple[int, str]]) -> None:
-        if not selected or len(selected) > MAX_PARTS:
+        if not selected:
+            # AWS rejects an empty CompleteMultipartUpload body shape as
+            # MalformedXML, not as a reference to a missing part.
+            raise MultipartError(
+                "MalformedXML",
+                "CompleteMultipartUpload must contain at least one Part")
+        if len(selected) > MAX_PARTS:
             raise MultipartError("InvalidPart", "A multipart completion must select 1..10000 parts")
         previous = 0
         for number, etag in selected:

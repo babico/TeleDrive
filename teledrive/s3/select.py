@@ -125,7 +125,12 @@ def _single_text(element) -> str:
 
 
 def _one_character(element, name: str, default: str) -> str:
-    value = _single_text(element)
+    # Do NOT strip here: a CR record delimiter arrives as the character
+    # reference &#13; and stripping would discard the very delimiter asked
+    # for. Every accepted value is exactly one character anyway.
+    if _children(element):
+        raise SelectError("MalformedXML", f"{name} must be text")
+    value = element.text or ""
     if len(value) != 1:
         raise SelectError("MalformedXML", f"{name} must be exactly one character")
     return value
@@ -629,6 +634,16 @@ def _records_csv(path: Path, spec: CSVInput):
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = _csv_reader(handle, spec)
             for row in reader:
+                if not spec.allow_quoted_record_delimiter and any(
+                        "\n" in value or "\r" in value for value in row):
+                    # Python's csv reader accepts a quoted newline by default;
+                    # AWS requires the explicit opt-in before a record may
+                    # span physical lines.
+                    raise SelectError(
+                        "InvalidRequest",
+                        "Quoted record delimiter requires "
+                        "AllowQuotedRecordDelimiter=true",
+                    )
                 if first and spec.file_header_info == "USE":
                     if not row or any(not name for name in row):
                         raise SelectError(

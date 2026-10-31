@@ -45,54 +45,10 @@ ENVELOPE_ENABLED = False
 import web.app as _webapp
 from web.app import db_connect, storage_transport, _log
 
-from web.s3_gateway.checksums import (
-    _effective_object_etag, _ssec_response_headers,
-    _verify_bucket_control_payload, _verify_upload_sha256,
-)
-from web.s3_gateway.ranges import (
-    _cursor_decode, _cursor_encode, _page, _range, _virtual_host_bucket,
-)
+from web.s3_gateway.ranges import _page, _virtual_host_bucket
 
-from web.s3_gateway.authorization import (
-    _ABAC_CONTROL_EXEMPT, _LIST_DEFAULTS, _acl_allows, _apply_bucket_owner_preferred,
-    _authorize_resource, _ownership_model, _policy_context, _require_source_acl,
-)
-
-from web.s3_gateway.buckets import (
-    _handle_batch_delete, _handle_bucket_controls, _handle_bucket_encryption,
-    _handle_bucket_metadata_configuration, _handle_bucket_route,
-    _handle_form_upload, _list_bucket_versions, _list_objects,
-    _replication_destinations,
-)
-from web.s3_gateway.common import (
-    _COMPAT_BUCKET_READS, _COMPAT_OBJECT_READS, _initial_tags,
-    _parse_initial_tags, _quota_guard, _reject_unimplemented_write_options,
-    _tag_request_tags,
-)
-from web.s3_gateway.context import _S3RequestContext
 from web.s3_gateway.dispatch import _handle
-from web.s3_gateway.multipart import (
-    _handle_multipart, _list_multipart_uploads, _mpu_complete, _mpu_initiate,
-    _mpu_list_parts, _mpu_upload_part, _mpu_upload_part_copy,
-)
-from web.s3_gateway.metadata_ops import (
-    ObjectLockError, _handle_bucket_acl, _handle_bucket_object_lock,
-    _handle_object_acl, _handle_object_annotations, _handle_object_encryption,
-    _handle_object_lock_controls, _handle_object_tagging, _iso8601_ns,
-    _parse_iso8601_ns, _read_acl_body, _validated_acl,
-)
-from web.s3_gateway.objects import (
-    _handle_copy_object, _handle_object_delete, _handle_object_put,
-    _handle_object_read, _handle_object_rename, _handle_restore_object,
-    _handle_select_object_content, _handle_version_delete, _headers,
-    _object_attributes, _perform_restore, _read_verified_body,
-    _read_verified_xml_body,
-)
-from web.s3_gateway.xml import (
-    _canned_private_acl_xml, _compat_bucket_read_response,
-    _compat_object_read_response, _error, _list_xml, _parse_tag_xml,
-    _tag_xml, _xml, _xml_ok,
-)
+from web.s3_gateway.xml import _error
 
 NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 app = FastAPI(title="TeleDrive S3 (initial compatibility subset)", docs_url=None,
@@ -163,6 +119,9 @@ async def _route_encoded_control_keys(request: Request, call_next):
         except SigV4Error as exc:
             return _error(exc.code, exc.message, 400)
         bucket = virtual_bucket if virtual_bucket is not None else logical.split("/", 1)[0]
+        # The root path (ListBuckets) has no bucket: the lookup below is
+        # skipped, but the response still needs a defined "no rule matched".
+        matched = None
         if bucket:
             connection = None
             try:

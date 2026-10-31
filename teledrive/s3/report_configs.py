@@ -582,14 +582,3 @@ class ReportConfigStore:
             report_configs.c.config_id == config_id))
         self.db.commit()
         return removed.rowcount > 0
-
-
-def rows_for_runner(connection) -> list[dict]:
-    """Snapshot all configured reports, including scheduler receipts."""
-    statement = select(
-        report_configs.c.bucket, report_configs.c.kind,
-        report_configs.c.config_id, report_configs.c.document,
-        report_configs.c.last_run_ns, report_configs.c.last_attempt_ns,
-    ).order_by(report_configs.c.bucket, report_configs.c.kind,
-               report_configs.c.config_id)
-    return [dict(row) for row in connection.execute(statement).mappings().all()]

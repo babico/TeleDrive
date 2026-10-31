@@ -1015,12 +1015,23 @@ def _list_bucket_versions(ctx: _S3RequestContext) -> Response:
         key_marker = request.query_params.get("key-marker", "")
         version_marker = request.query_params.get("version-id-marker", "")
         prefix = request.query_params.get("prefix", "")
-        entries, has_more = catalog.list_bucket_versions(
-            bucket, prefix=prefix, key_marker=key_marker,
-            version_marker=version_marker, limit=maximum,
-        )
     except ValueError:
         return _error("InvalidArgument", "Invalid version list cursor or limit", 400)
+    if maximum < 0:
+        return _error("InvalidArgument", "Invalid version list cursor or limit", 400)
+    # AWS accepts max-keys=0 (an empty, untruncated page) and clamps larger
+    # values to 1000 rather than rejecting them.
+    maximum = min(maximum, 1000)
+    if maximum == 0:
+        entries, has_more = [], False
+    else:
+        try:
+            entries, has_more = catalog.list_bucket_versions(
+                bucket, prefix=prefix, key_marker=key_marker,
+                version_marker=version_marker, limit=maximum,
+            )
+        except ValueError:
+            return _error("InvalidArgument", "Invalid version list cursor or limit", 400)
     # Delimiter grouping: keys sharing the prefix up to the first
     # delimiter collapse into one CommonPrefixes entry, counted against
     # max-keys exactly like AWS (versions + prefixes share the budget).
@@ -1142,11 +1153,17 @@ def _list_objects(ctx: _S3RequestContext) -> Response:
         limit = int(request.query_params.get("max-keys", "1000"))
     except ValueError:
         return _error("InvalidArgument", "Invalid max-keys", 400)
-    if limit < 1 or limit > 1000:
-        return _error("InvalidArgument", "max-keys must be between 1 and 1000", 400)
-    keys, common, last, skipped, more = _page(
-        catalog, bucket, prefix, delimiter, after, limit, skip_prefix
-    )
+    if limit < 0:
+        return _error("InvalidArgument", "Invalid max-keys", 400)
+    # AWS: 0 is a valid empty page, values above 1000 are clamped (not an
+    # InvalidArgument). Both behaviours are relied on by paginating SDKs.
+    limit = min(limit, 1000)
+    if limit == 0:
+        keys, common, last, skipped, more = [], [], after, skip_prefix, False
+    else:
+        keys, common, last, skipped, more = _page(
+            catalog, bucket, prefix, delimiter, after, limit, skip_prefix
+        )
     next_token = (_cursor_encode(master, bucket, prefix, delimiter, last, skipped)
                   if more and not version_one else None)
     next_marker = (max([item.item.key for item in keys] + common)

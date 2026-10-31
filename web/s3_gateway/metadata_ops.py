@@ -38,7 +38,7 @@ from web.app import _secure_mkdir
 
 from web.s3_gateway.checksums import (
     _ssec_response_headers, _verify_bucket_control_payload,
-    _verify_upload_sha256,
+    _verify_crc_checksums, _verify_upload_sha256,
 )
 from web.s3_gateway.common import (
     _chunk_size, _tag_request_tags, storage_transport,
@@ -82,8 +82,14 @@ async def _read_acl_body(request: Request, *, bucket_level: bool) -> bytes:
     if bucket_level:
         _verify_bucket_control_payload(request, bytes(body))
     else:
+        # Object ACLs were previously verified without their MD5 digest, so
+        # every correct Content-MD5 was rejected as BadDigest. Pass the digest
+        # this body actually produced and check the 32-bit CRCs too.
+        _verify_crc_checksums(
+            request, bytes(body), message="Object ACL checksum mismatch")
         _verify_upload_sha256(
             request, hashlib.sha256(body).digest(),
+            md5_digest=hashlib.md5(body, usedforsecurity=False).digest(),
             crc64nvme_value=crc64nvme(body),
         )
     return bytes(body)

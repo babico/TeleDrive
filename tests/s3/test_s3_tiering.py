@@ -310,3 +310,50 @@ def test_empty_configuration_list_is_well_formed(service):
     assert listed.status_code == 200
     root = ET.fromstring(listed.content)
     assert root.tag.rsplit("}", 1)[-1] == "ListBucketIntelligentTieringConfigurationsResult"
+
+
+def test_apply_due_budget_is_not_double_deducted_across_buckets(service):
+    """The per-pass limit is a global budget, not a per-bucket reset.
+
+    One transition in the first bucket used to be subtracted twice from the
+    second bucket's remaining budget, starving a due object and returning
+    fewer changes than the requested limit.
+    """
+    day = 86_400
+    now = int(time.time())
+    buckets = ("tier-a", "tier-b")
+    for bucket in buckets:
+        assert signed(service, "PUT", f"/{bucket}").status_code == 200
+        config = signed(service, "PUT",
+                        f"/{bucket}?intelligent-tiering&id=t",
+                        _document(config_id="t", prefix=""))
+        assert config.status_code == 200, config.text
+    seeded = {
+        ("tier-a", "deep-a.bin"): now - 3 * day,
+        ("tier-b", "deep-b.bin"): now - 3 * day,
+        ("tier-b", "archive-b.bin"): now - int(1.5 * day),
+    }
+    for bucket, key in seeded:
+        assert signed(service, "PUT", f"/{bucket}/{key}",
+                      b"x").status_code == 200
+    catalog = _catalog(service)
+    try:
+        for (bucket, key), created in seeded.items():
+            catalog.db.connection.execute(
+                update(objects).where(
+                    objects.c.bucket == bucket,
+                    objects.c.object_key == key,
+                ).values(created_at=created, last_accessed_ns=None))
+        catalog.db.commit()
+
+        changed = TieringStore(catalog).apply_due(
+            now_ns=time.time_ns(), limit=3)
+        assert changed == 3
+        classes = dict(catalog.db.connection.execute(
+            select(objects.c.object_key, objects.c.storage_class).where(
+                objects.c.bucket.in_(buckets))).all())
+    finally:
+        catalog.db.close()
+    assert classes["deep-a.bin"] == "DEEP_ARCHIVE_ACCESS"
+    assert classes["deep-b.bin"] == "DEEP_ARCHIVE_ACCESS"
+    assert classes["archive-b.bin"] == "ARCHIVE_ACCESS"

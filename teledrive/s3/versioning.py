@@ -1,8 +1,10 @@
 """Safe, immutable S3 bucket-versioning compatibility.
 
 TeleDrive versions are always-on: every published object keeps its original
-VersionId and prior data. "Suspended" is NOT supported because acknowledging
-it without implementing null-version semantics would risk client data loss.
+VersionId and prior data. "Suspended" is supported as a real state: it turns
+deletes into unversioned-style removal of the current head (no delete marker)
+while the published history stays readable by VersionId; see
+``catalog_buckets.py`` and ``catalog_versions.py``.
 """
 from __future__ import annotations
 

@@ -44,6 +44,7 @@ from teledrive.s3.sigv4 import SigV4Error
 from teledrive.s3.tagging import ObjectTagStore, TaggingError
 from teledrive.s3.write_conditions import ExpectedHead, WritePreconditionError
 from teledrive.storage.copy import CopyConflict, copy_object
+from teledrive.storage.envelope import EnvelopeError
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.gc_collect import RetainedMediaGC
 from teledrive.storage.manifest import objects
@@ -56,7 +57,8 @@ from web.s3_gateway.authorization import (
     _acl_allows, _apply_bucket_owner_preferred, _require_source_acl,
 )
 from web.s3_gateway.checksums import (
-    _effective_object_etag, _ssec_response_headers, _verify_upload_sha256,
+    _effective_object_etag, _ssec_response_headers, _verify_crc_checksums,
+    _verify_upload_sha256,
 )
 from web.s3_gateway.common import (
     _chunk_size, _quota_guard, _select_scan_limit, envelope_enabled,
@@ -94,6 +96,61 @@ def _headers(item, etag: str | None = None,
         else:
             headers[name] = value
     return headers
+
+
+# GET/HEAD may override these response headers through signed query
+# parameters. Presigned download URLs rely on them (boto3
+# generate_presigned_url("get_object", Params={"ResponseContentType": ...})).
+_RESPONSE_OVERRIDE_PARAMS = {
+    "response-content-type": "Content-Type",
+    "response-content-disposition": "Content-Disposition",
+    "response-cache-control": "Cache-Control",
+    "response-content-encoding": "Content-Encoding",
+    "response-content-language": "Content-Language",
+    "response-expires": "Expires",
+}
+# An HTTP header value is small by definition; anything larger is an attempt
+# to smuggle a second header or exhaust a proxy, never a legitimate override.
+_MAX_RESPONSE_OVERRIDE_BYTES = 2048
+
+
+def _response_header_overrides(request) -> dict[str, str]:
+    """Validated response-* query overrides for GetObject/HeadObject."""
+    overrides: dict[str, str] = {}
+    for parameter, header in _RESPONSE_OVERRIDE_PARAMS.items():
+        value = request.query_params.get(parameter)
+        if value is None:
+            continue
+        if (len(value.encode("utf-8")) > _MAX_RESPONSE_OVERRIDE_BYTES
+                or any(ord(character) < 32 or ord(character) == 127
+                       for character in value)):
+            # CR/LF (or any control character) would make this a header
+            # injection primitive rather than a response override.
+            raise SigV4Error(
+                "InvalidArgument", "Invalid response header override")
+        overrides[header] = value
+    return overrides
+
+
+def _if_range_matches(value: str, etag: str, created_at: int) -> bool:
+    """RFC 7233 If-Range: only a matching validator permits the 206."""
+    value = value.strip()
+    if not value:
+        return False
+    if value.startswith("W/"):
+        # A weak validator can never satisfy If-Range for a byte range.
+        return False
+    if value.startswith('"') or value.endswith('"'):
+        return value.strip('"') == etag
+    try:
+        moment = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return False
+    if moment is None or moment.tzinfo is None:
+        return False
+    # The representation changed after the client's copy: serve the full
+    # body instead of a range that no longer lines up.
+    return moment.timestamp() >= created_at
 
 
 async def _read_verified_body(request: Request, store, permission: str, *,
@@ -227,9 +284,6 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
         if store.resolve(owner, "s3:PutObjectTagging") is None:
             raise SigV4Error("AccessDenied", "Copy tag replacement needs PutObjectTagging")
 
-    if (request.headers.get("x-amz-metadata-directive") is not None
-            and "x-amz-metadata-directive" not in signed_headers):
-        raise SigV4Error("AccessDenied", "Metadata directive must be signed")
     # A signed CopySource may name a specific historical version.
     # Never treat arbitrary query selectors or duplicate VersionIds as
     # part of the object key; URI escapes are decoded only afterwards.
@@ -709,6 +763,9 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
             response.headers.update({
                 "x-amz-delete-marker": "true", "x-amz-version-id": version_id,
                 "Last-Modified": http_last_modified(int(status_row[1])),
+                # AWS tells the caller the only meaningful method here is
+                # DELETE (removing the tombstone), not a plain GET.
+                "Allow": "DELETE",
             })
             return response
         try:
@@ -730,6 +787,11 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
             return _error("NoSuchKey", "The specified key does not exist", 404)
     item_etag = _effective_object_etag(catalog, item)
     encryption_info = catalog.manifests.encryption_info(item.id)
+    # Only SSE-C suppresses checksums: the stored digest may be the
+    # ciphertext digest, which the client cannot verify. SSE-S3 (envelope) is
+    # decrypted by the server, so AWS still returns the plaintext checksum.
+    sse_c = (encryption_info is not None
+             and encryption_info.get("mode") != "SSE-S3")
     sse_key = parse_ssec_headers(request.headers, signed_header_names(request))
     server_side = False
     if encryption_info is not None and encryption_info.get("mode") == "SSE-S3":
@@ -801,18 +863,24 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     if request.method == "HEAD":
         headers = _headers(
             item, item_etag, http_properties,
-            checksum_mode=(checksum_mode == "ENABLED"
-                           and encryption_info is None),
+            checksum_mode=(checksum_mode == "ENABLED" and not sse_c),
         )
         if server_side:
             headers["x-amz-server-side-encryption"] = "AES256"
         elif sse_key is not None:
             headers.update(_ssec_response_headers(sse_key))
+        headers.update(_response_header_overrides(request))
         restore_state = _restore_header(item, now_ns=read_now_ns)
         if restore_state is not None:
             headers["x-amz-restore"] = restore_state
         return Response(status_code=200, headers=headers)
-    start, end, partial = _range(request.headers.get("range"), item.size)
+    range_header = request.headers.get("range")
+    if_range = request.headers.get("if-range")
+    if (range_header is not None and if_range is not None
+            and not _if_range_matches(if_range, item_etag, item.created_at)):
+        # The validator is stale: ignore Range and serve the full 200.
+        range_header = None
+    start, end, partial = _range(range_header, item.size)
     transport = storage_transport(db)
     scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
     _secure_mkdir(scratch)
@@ -838,11 +906,12 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     headers = _headers(item, item_etag, http_properties,
                        checksum_mode=(checksum_mode == "ENABLED"
                                       and not partial
-                                      and encryption_info is None))
+                                      and not sse_c))
     if server_side:
         headers["x-amz-server-side-encryption"] = "AES256"
     elif sse_key is not None:
         headers.update(_ssec_response_headers(sse_key))
+    headers.update(_response_header_overrides(request))
     restore_state = _restore_header(item, now_ns=read_now_ns)
     if restore_state is not None:
         headers["x-amz-restore"] = restore_state
@@ -860,6 +929,8 @@ async def _read_verified_xml_body(request: Request, limit: int, error_cls):
         if len(body) > limit:
             raise error_cls("MalformedXML", "XML request body exceeds its limit")
     payload = bytes(body)
+    _verify_crc_checksums(
+        request, payload, message="XML request checksum mismatch")
     _verify_upload_sha256(
         request, hashlib.sha256(payload).digest(),
         md5_digest=hashlib.md5(payload, usedforsecurity=False).digest(),

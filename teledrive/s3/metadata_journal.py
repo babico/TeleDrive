@@ -607,20 +607,6 @@ class MetadataJournalStore:
                 "oldest_ns": int(row[1]) if row[1] is not None else None,
                 "newest_ns": int(row[2]) if row[2] is not None else None}
 
-    def rows(self, bucket: str, *, limit: int = 1000) -> list[dict]:
-        """Bounded inspection helper (never exposed by an S3 GET body)."""
-        if not 1 <= limit <= 1000:
-            raise ValueError("Invalid journal page limit")
-        rows = self.db.connection.execute(
-            select(metadata_journal.c.seq, metadata_journal.c.object_key,
-                   metadata_journal.c.version_id, metadata_journal.c.event,
-                   metadata_journal.c.actor, metadata_journal.c.recorded_ns,
-                   metadata_journal.c.detail)
-            .where(metadata_journal.c.bucket == bucket)
-            .order_by(metadata_journal.c.seq).limit(limit)
-        ).mappings().all()
-        return [dict(row) for row in rows]
-
     def trim_expired(self, *, now_ns: int | None = None,
                      batch: int = DEFAULT_TRIM_BATCH) -> int:
         """Delete journal rows older than each bucket's retention window.

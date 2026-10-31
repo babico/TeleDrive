@@ -33,7 +33,9 @@ from teledrive.storage.sse import SSECError, parse_ssec_headers
 from web.app import _secure_mkdir
 
 from web.s3_gateway.authorization import _require_source_acl
-from web.s3_gateway.checksums import _ssec_response_headers, _verify_upload_sha256
+from web.s3_gateway.checksums import (
+    _ssec_response_headers, _verify_crc_checksums, _verify_upload_sha256,
+)
 from web.s3_gateway.common import _chunk_size, _quota_guard, storage_transport
 from web.s3_gateway.xml import NAMESPACE, _error, _xml
 
@@ -284,7 +286,26 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
         content.extend(block)
         if len(content) > 1024 * 1024:
             raise MultipartError("MalformedXML", "Complete XML exceeds 1 MiB")
-    if hashlib.sha256(content).hexdigest() != request.headers.get("x-amz-content-sha256"):
+    # Deliberately NOT verifying x-amz-checksum-crc32/crc32c here: on this
+    # operation those headers describe the assembled object (COMPOSITE or
+    # FULL_OBJECT), not the completion XML. They are verified against the
+    # staged bytes further down; comparing them to the XML would reject every
+    # correct request.
+    declared_payload = request.headers.get("x-amz-content-sha256", "")
+    if declared_payload == "UNSIGNED-PAYLOAD":
+        # SigV4 permits UNSIGNED-PAYLOAD here when an integrity header is
+        # signed. The strict hex equality below cannot apply (there is no
+        # payload digest in the header). ONLY Content-MD5 describes the
+        # completion XML on this operation; the x-amz-checksum-* family
+        # describes the assembled object and is verified against the staged
+        # bytes further down, so it must not be compared to the XML.
+        if request.headers.get("content-md5") is not None:
+            _verify_upload_sha256(
+                request, hashlib.sha256(content).digest(),
+                md5_digest=hashlib.md5(
+                    content, usedforsecurity=False).digest(),
+            )
+    elif hashlib.sha256(content).hexdigest() != declared_payload:
         raise MultipartError("XAmzContentSHA256Mismatch", "Completion XML checksum mismatch")
     if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
         raise MultipartError("MalformedXML", "XML entities are not accepted")
@@ -375,7 +396,7 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
     _secure_mkdir(scratch)
     # Enforce bucket quota using the total selected part size
     # before any assembly/publish work begins. Query the parts
-    # table directly: list_parts() enforces upload ownership and
+    # table directly: the paged list helper enforces upload ownership and
     # would reject the idempotent repeat of an already-completed
     # upload.
     selected_numbers = {number for number, _ in selected}

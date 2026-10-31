@@ -97,9 +97,15 @@ def _verify_upload_sha256(
     raise SigV4Error("XAmzContentSHA256Mismatch", "Signed upload checksum mismatch")
 
 
-def _verify_bucket_control_payload(request: Request, body: bytes) -> None:
-    """Exact signed checksum policy for small S3 bucket-control XML payloads."""
-    import zlib
+def _verify_crc_checksums(request: Request, body: bytes, *,
+                          message: str) -> None:
+    """Verify the 32-bit CRC declarations on a small control-plane body.
+
+    ``_verify_upload_sha256`` compares digests of the payload; CRC32/CRC32C
+    are computed over the bytes themselves, so every caller that reads a
+    bounded body must ask for them explicitly. Unchecked is not an option:
+    acknowledging a declared CRC without verifying it misleads strict clients.
+    """
     for header, actual in (
         ("x-amz-checksum-crc32", zlib.crc32(body) & 0xffffffff),
         ("x-amz-checksum-crc32c", crc32c(body)),
@@ -108,7 +114,13 @@ def _verify_bucket_control_payload(request: Request, body: bytes) -> None:
         if declared is not None and not hmac.compare_digest(
             declared, base64.b64encode(actual.to_bytes(4, "big")).decode(),
         ):
-            raise SigV4Error("BadDigest", "Bucket XML checksum mismatch")
+            raise SigV4Error("BadDigest", message)
+
+
+def _verify_bucket_control_payload(request: Request, body: bytes) -> None:
+    """Exact signed checksum policy for small S3 bucket-control XML payloads."""
+    _verify_crc_checksums(
+        request, body, message="Bucket XML checksum mismatch")
     _verify_upload_sha256(
         request, hashlib.sha256(body).digest(),
         md5_digest=hashlib.md5(body, usedforsecurity=False).digest(),

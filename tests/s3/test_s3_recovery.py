@@ -112,7 +112,7 @@ def test_recovery_fences_old_writer_and_preserves_staged_parts(service):
         assert mpu.recover_stale_completion(uid, dry_run=False, min_age_seconds=3600)
         assert mpu._renew_completion(uid, token, int(time.time()), 120) is False
         assert mpu._reset_owned_completion(uid, token) is False
-        assert mpu.list_parts(uid, "backup-bucket", "asset.bin", service[1].access_key)[0].etag == etag.strip('"')
+        assert mpu.list_parts_page(uid, "backup-bucket", "asset.bin", service[1].access_key)[0][0].etag == etag.strip('"')
     finally:
         db.close()
     done = complete(service, uid, [(1, etag)])

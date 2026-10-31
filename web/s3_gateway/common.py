@@ -20,7 +20,8 @@ from teledrive.s3.tagging import TaggingError, validate_tags
 
 from web.app import _enforce_bucket_quota
 from web.s3_gateway.checksums import (
-    _verify_bucket_control_payload, _verify_upload_sha256,
+    _verify_bucket_control_payload, _verify_crc_checksums,
+    _verify_upload_sha256,
 )
 from web.s3_gateway.xml import _error, _parse_tag_xml
 
@@ -220,6 +221,10 @@ async def _tag_request_tags(request: Request, *, bucket: bool = False) -> list[t
     if bucket:
         _verify_bucket_control_payload(request, bytes(body))
     else:
+        # Object tagging is an object-level control body, so it follows the
+        # same CRC32/CRC32C policy as bucket controls (CRC needs the bytes).
+        _verify_crc_checksums(
+            request, bytes(body), message="Object tagging checksum mismatch")
         _verify_upload_sha256(
             request, hashlib.sha256(body).digest(), crc64nvme_value=crc64nvme(body),
         )

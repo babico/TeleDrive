@@ -180,7 +180,6 @@ def test_unknown_object_control_never_falls_back_to_data_or_delete(
     ("GET", "/guard-bucket?tagging&prefix=secret"),
     ("GET", "/guard-bucket?uploads&versions"),
     ("POST", "/guard-bucket?delete&uploads"),
-    ("GET", "/guard-bucket/data?response-content-type=text/plain"),
     ("PUT", "/guard-bucket/data?prefix=x"),
     ("DELETE", "/guard-bucket/data?versioning"),
     ("DELETE", "/guard-bucket/data?lifecycle"),

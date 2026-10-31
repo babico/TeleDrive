@@ -78,7 +78,7 @@ def test_version_listing_cursor_prefix_and_invalid_marker(service):
         filtered.content
     ).findall(NS + "Version")] == ["b.bin"]
     for query in (
-        "?versions&max-keys=0", "?versions&version-id-marker=missing",
+        "?versions&version-id-marker=missing",
         "?versions&key-marker=a.bin&version-id-marker=missing",
         "?versions&versions", "?versions&encoding-type=xml",
     ):

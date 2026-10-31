@@ -104,8 +104,18 @@ def create_config(service, *, bucket=BUCKET, **kwargs):
 def journal_rows(service, bucket=BUCKET):
     db = service[3]()
     try:
-        store = MetadataJournalStore(BucketCatalog(ManifestStore(db)))
-        return store.rows(bucket)
+        from sqlalchemy import select
+
+        MetadataJournalStore(BucketCatalog(ManifestStore(db)))  # ensure tables
+        rows = db.connection.execute(
+            select(metadata_journal.c.seq, metadata_journal.c.object_key,
+                   metadata_journal.c.version_id, metadata_journal.c.event,
+                   metadata_journal.c.actor, metadata_journal.c.recorded_ns,
+                   metadata_journal.c.detail)
+            .where(metadata_journal.c.bucket == bucket)
+            .order_by(metadata_journal.c.seq)
+        ).mappings().all()
+        return [dict(row) for row in rows]
     finally:
         db.close()
 

@@ -327,8 +327,8 @@ def case_upload_part_survives(service):
 
     db, mpu = _fresh_mpu(connection)
     try:
-        stored = mpu.list_parts(uid, "backup-bucket", "asset.bin",
-                                service[1].access_key)
+        stored = mpu.list_parts_page(uid, "backup-bucket", "asset.bin",
+                                     service[1].access_key)[0]
         assert [(row[0], row[2]) for row in stored] == [
             (1, etag.strip('"'))]
     finally:
@@ -761,8 +761,8 @@ def case_abort_multipart_survives(service):
             mpu.require(uid, "backup-bucket", "asset.bin",
                         service[1].access_key)
         with pytest.raises(MultipartError):
-            mpu.list_parts(uid, "backup-bucket", "asset.bin",
-                           service[1].access_key)
+            mpu.list_parts_page(uid, "backup-bucket", "asset.bin",
+                                service[1].access_key)
     finally:
         db.close()
 

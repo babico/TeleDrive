@@ -57,6 +57,14 @@ _BUCKET_CONTROL = frozenset({
     "encryption", "object-lock", "abac",
 })
 _OBJECT_CONTROL = frozenset({"tagging", "annotation", "attributes", "uploads", "uploadId", "versionId", "encryption"})
+# GetObject/HeadObject may override response headers through signed query
+# parameters (used by presigned downloads). They are not control selectors:
+# only a plain object read, optionally for one VersionId, accepts them.
+_RESPONSE_OVERRIDES = frozenset({
+    "response-content-type", "response-content-disposition",
+    "response-cache-control", "response-content-encoding",
+    "response-content-language", "response-expires",
+})
 _EMPTY_FLAG = frozenset({
     "location", "cors", "tagging", "annotation", "versioning", "publicAccessBlock",
     "lifecycle", "policyStatus", "uploads", "versions", "delete", "attributes",
@@ -285,8 +293,13 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params,
         elif "versionId" in real:
             allowed = (frozenset({"versionId"})
                        if method in {"GET", "HEAD", "DELETE"} else frozenset())
+            if method in {"GET", "HEAD"}:
+                allowed |= _RESPONSE_OVERRIDES
         else:
-            allowed = frozenset()
+            # A bare object GET/HEAD is the only operation that honours the
+            # response-* header overrides.
+            allowed = (_RESPONSE_OVERRIDES if method in {"GET", "HEAD"}
+                       else frozenset())
 
     # A recognized ListObjects cursor in the wrong API dialect is an
     # InvalidArgument (400), not an unsupported AWS extension (501).

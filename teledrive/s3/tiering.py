@@ -478,7 +478,7 @@ class TieringStore:
                     conditions,
                     objects.c.storage_class.in_(("STANDARD", "ARCHIVE_ACCESS"))
                     & (idle_ns >= deep_ns),
-                    "DEEP_ARCHIVE_ACCESS", limit=remaining - changed)
+                    "DEEP_ARCHIVE_ACCESS", limit=remaining)
                 changed += self._transition(
                     conditions,
                     (objects.c.storage_class == "STANDARD")
@@ -503,12 +503,3 @@ def _idle_expression():
     from sqlalchemy import func
     return func.coalesce(objects.c.last_accessed_ns,
                          objects.c.created_at * 1_000_000_000)
-
-
-def rows_for_runner(connection) -> list[dict]:
-    """Snapshot all configurations (used by operators/tests)."""
-    statement = select(
-        tiering_configs.c.bucket, tiering_configs.c.config_id,
-        tiering_configs.c.document, tiering_configs.c.updated_ns,
-    ).order_by(tiering_configs.c.bucket, tiering_configs.c.config_id)
-    return [dict(row) for row in connection.execute(statement).mappings().all()]

@@ -67,7 +67,7 @@ from web.s3_gateway.objects import (
     _handle_select_object_content, _handle_version_delete,
 )
 from web.s3_gateway.ranges import _virtual_host_bucket
-from web.s3_gateway.xml import _compat_object_read_response, _error
+from web.s3_gateway.xml import _error
 
 
 async def _handle(request: Request):
@@ -750,14 +750,6 @@ async def _handle(request: Request):
 
         if "acl" in request.query_params:
             return await _handle_object_acl(ctx)
-
-        if compat_object_read is not None:
-            # The probe must address an existing current object.
-            try:
-                catalog.get(bucket, key)
-            except FileNotFoundError:
-                return _error("NoSuchKey", "The requested resource does not exist", 404)
-            return _compat_object_read_response(compat_object_read, owner)
 
         if is_object_annotation:
             return await _handle_object_annotations(ctx)

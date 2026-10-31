@@ -121,8 +121,8 @@ def test_telegram_read_failure_during_complete_leaves_staging_retryable(
     try:
         assert manager.require(uid, "backup-bucket", "asset.bin",
                                service[1].access_key)["state"] == "active"
-        assert len(manager.list_parts(uid, "backup-bucket", "asset.bin",
-                                      service[1].access_key)) == 1
+        assert len(manager.list_parts_page(uid, "backup-bucket", "asset.bin",
+                                           service[1].access_key)[0]) == 1
     finally:
         db.close()
     before = service[2].uploads

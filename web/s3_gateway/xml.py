@@ -148,14 +148,12 @@ def _canned_private_acl_xml(owner: str) -> bytes:
 
 
 def _compat_bucket_read_response(selector: str, owner: str) -> Response:
-    """AWS-shaped read response for an optional, unconfigured bucket feature."""
-    if selector == "acl":
-        return Response(_canned_private_acl_xml(owner), media_type="application/xml")
-    if selector == "ownershipControls":
-        root = ET.Element("OwnershipControls", xmlns=NAMESPACE)
-        rule = ET.SubElement(root, "Rule")
-        ET.SubElement(rule, "ObjectOwnership").text = "BucketOwnerEnforced"
-        return _xml_ok(root)
+    """AWS-shaped read response for an optional, unconfigured bucket feature.
+
+    Only the two single-state bucket flags reach here: every other name in
+    ``_COMPAT_BUCKET_READS`` has a dedicated handler that returns before
+    ``_handle_bucket_route`` calls this function.
+    """
     if selector == "requestPayment":
         # Writable-but-single-state (Phase O6): PUT accepts only
         # Payer=BucketOwner and rejects Requester with 501. This GET
@@ -165,32 +163,4 @@ def _compat_bucket_read_response(selector: str, owner: str) -> Response:
         # Writable-but-single-state (Phase O6): PUT accepts only
         # Suspended and rejects Enabled with 501 (no edge network).
         return Response(accelerate_xml(), media_type="application/xml")
-    if selector in ("notification", "notificationConfiguration"):
-        return _xml_ok(ET.Element("NotificationConfiguration", xmlns=NAMESPACE))
-    if selector == "logging":
-        return _xml_ok(ET.Element("BucketLoggingStatus", xmlns=NAMESPACE))
-    if selector == "policy":
-        return _error("NoSuchBucketPolicy", "The bucket policy does not exist", 404)
-    if selector == "website":
-        return _error("NoSuchWebsiteConfiguration",
-                      "The specified bucket does not have a website "
-                      "configuration", 404)
-    if selector == "encryption":
-        return _error("ServerSideEncryptionConfigurationNotFoundError",
-                      "The server side encryption configuration was not "
-                      "found", 404)
-    if selector == "object-lock":
-        return _error("ObjectLockConfigurationNotFoundError",
-                      "Object Lock configuration does not exist for this "
-                      "bucket", 404)
     raise AssertionError(f"unknown compat selector: {selector}")
-
-
-def _compat_object_read_response(selector: str, owner: str) -> Response:
-    """AWS-shaped read response for optional object features."""
-    if selector == "acl":
-        return Response(_canned_private_acl_xml(owner), media_type="application/xml")
-    # Object Lock (retention/legal-hold) is never configured in TeleDrive.
-    return _error("NoSuchObjectLockConfiguration",
-                  "The specified object does not have a ObjectLock "
-                  "configuration", 404)

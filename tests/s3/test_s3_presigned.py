@@ -237,3 +237,25 @@ def test_checksum_bound_presigned_create_once_rejects_replay(service):
     assert b"PreconditionFailed" in replay.content
     assert remote.uploads == count
     assert signed(service, "GET", "/backup-bucket/create-once.bin").content == body
+
+
+def test_presigned_get_response_header_overrides(service):
+    """boto3's ResponseContentType & friends are signed query parameters."""
+    client, _, _, _, _ = service
+    assert signed(service, "PUT", "/backup-bucket").status_code == 200
+    assert signed(service, "PUT", "/backup-bucket/download.bin",
+                  b"payload").status_code == 200
+    url = sdk(service).generate_presigned_url(
+        "get_object",
+        Params={"Bucket": "backup-bucket", "Key": "download.bin",
+                "ResponseContentType": "text/plain",
+                "ResponseContentDisposition": "attachment; filename=\"data.txt\"",
+                "ResponseCacheControl": "no-store"},
+        ExpiresIn=120,
+    )
+    result = request_url(client, "GET", url)
+    assert result.status_code == 200, result.text
+    assert result.content == b"payload"
+    assert result.headers["content-type"] == "text/plain"
+    assert result.headers["content-disposition"] == 'attachment; filename="data.txt"'
+    assert result.headers["cache-control"] == "no-store"

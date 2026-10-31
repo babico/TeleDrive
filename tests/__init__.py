@@ -6,11 +6,10 @@ CSRF = {"X-TeleDrive-CSRF": "1"}
 
 def seed_local_user(connect, username: str, password: str,
                     role: str = "admin", enabled: bool = True) -> None:
-    """Insert a real local user for tests that authenticate with Basic.
+    """Insert a real local user row for session-cookie tests.
 
-    HTTP Basic is verified against the users table (there is no
-    config-password fallback), so a fixture must seed the principal it
-    intends to use.
+    The row carries a PBKDF2 password hash from the real hashing helper,
+    so login flows exercise the same credential check as production.
     """
     import time
 

@@ -15,7 +15,7 @@ code **as reviewed**, not necessarily the current tree.
 | `gc_collect` | [critical] default scope deleted Telegram media then rolled its own record back | **fixed** (`2ead9b6`) — idempotent journal insert |
 | `gc_collect` | [critical] safety window measured upload age, not revocation age | **fixed** (`2ead9b6`) — age is the later of the two |
 | `gc_collect` | [high] no lease/fence between concurrent collects | **fixed** — durable, expiring lease in `storage_gc_leases`; a lost race is `skipped`, not a second delete |
-| `gc_collect` | [high] preview and collect share one stale snapshot | **fixed** — the lease claim commits before re-verification, so every check runs in a fresh transaction |
+| `gc_collect` | [high] preview and collect share one stale snapshot | **fixed** — the lease claim commits before re-verification, so every check runs in a fresh transaction; the prescribed second-connection regression test now exists and the send-intent probe fails closed instead of swallowing every error |
 | `gc_collect` | [high] crash mid-object is unrecoverable and unaudited | **fixed** — the lease expires and the next run resumes; chunk deletion and the removed-versions write are idempotent |
 | `gc_collect` | [high] a scoped API key bypasses the admin role gate | **by design** — an API key exists only because an admin minted it with that exact scope, and delegation caps it; the role gate governs humans, the key is the grant |
 | `issue_api_key` | [medium] audit has no actor/id, written before validation, name unescaped | **fixed** — the line is written after the row exists, with the actor and the new key id; `_log` sanitises newlines for the buffer *and* the file |

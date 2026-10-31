@@ -390,7 +390,7 @@ Repository layout:
 python -m pip install -r requirements.txt -r requirements-dev.txt
 # Fast local run: parallel across cores (each test FILE stays on one
 # worker, which is what the tmp databases and module fixtures expect).
-python -m pytest -q -n auto
+python -m pytest -q -n auto --dist loadfile
 # Serial run, for debugging a failure in isolation:
 python -m pytest -q
 python -m compileall -q teledrive web tests

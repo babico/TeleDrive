@@ -68,7 +68,7 @@ jobs:
         if: steps.configured.outputs.enabled == 'true'
         run: |
           python -m pip install -e .
-          python -m pip install pytest
+          python -m pip install pytest "pytest-xdist>=3.6,<4"
       - name: Real Telegram upload, retrieval, checksum and Range
         if: steps.configured.outputs.enabled == 'true'
         run: python -m pytest -q --durations=25 tests/e2e/test_telegram_storage_e2e.py

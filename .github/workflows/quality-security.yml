@@ -34,7 +34,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest httpx bandit pip-audit boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx bandit pip-audit boto3
       - name: Compile
         run: python -m compileall -q teledrive web tests
       - name: Packaged import and entrypoint
@@ -46,6 +46,7 @@ jobs:
         run: |
           python -m pytest -q --durations=25 \
             tests/meta/test_ci_workflows.py \
+            tests/meta/test_docs.py \
             tests/web/test_api_keys.py \
             tests/web/test_rest_api.py \
             tests/storage/test_storage_user_mode.py \
@@ -97,7 +98,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest httpx boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
       - name: Storage regression tests
         run: |
           python -m pytest -q --durations=25 \
@@ -154,7 +155,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest httpx boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
       - name: S3 regression tests
         run: |
           python -m pytest -q --durations=25 \
@@ -185,6 +186,9 @@ jobs:
             tests/s3/test_s3_ownership_abac.py \
             tests/s3/test_s3_report_configs.py \
             tests/s3/test_s3_report_runner.py \
+            tests/s3/test_s3_quota_gateway.py \
+            tests/s3/test_s3_review_fixes.py \
+            tests/s3/test_s3_select_csv_options.py \
             tests/s3/test_s3_rename.py \
             tests/s3/test_s3_select.py \
             tests/s3/test_s3_restore.py \
@@ -221,7 +225,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest httpx boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
       - name: Web, UI and meta regression tests
         run: |
           python -m pytest -q --durations=25 \

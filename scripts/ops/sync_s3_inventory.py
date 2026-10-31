@@ -7,7 +7,7 @@ silently when a phase promotes operations:
 
 * docs/S3_SPECS.md                     — the human-readable inventory totals
 * tests/s3/test_s3_route_guard.py      — the Counter assertion
-* tests/meta/test_ci_workflows.py      — the docs total assertion string
+* tests/meta/test_docs.py              — the docs total assertion string
 
 This script recomputes the counts from the manifest and rewrites those
 exactly, so a phase only has to update the manifest and add its spec rows.
@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "teledrive/s3/operation_manifest.json"
 SPECS = ROOT / "docs/S3_SPECS.md"
 ROUTE_GUARD = ROOT / "tests/s3/test_s3_route_guard.py"
-META = ROOT / "tests/meta/test_ci_workflows.py"
+META = ROOT / "tests/meta/test_docs.py"
 
 
 class SyncError(RuntimeError):

@@ -9,7 +9,7 @@ Line counts are indicative; the point is the boundary, not the number.
 
 | Module | What belongs there |
 |---|---|
-| `web/app.py` | App construction, the middleware stack, startup/shutdown, `include_router` calls, the shared upload/read cores (`_stream_object_upload`, `_stream_object_response`, `_rest_read_gate`), and re-exports of every name the tests reach. **1622 lines**, from 6027 at the start of the refactor. |
+| `web/app.py` | App construction, the middleware stack, startup/shutdown, `include_router` calls, the shared upload/read cores (`_stream_object_upload`, `_stream_object_response`, `_rest_read_gate`), and re-exports of every name the tests reach. **1576 lines**, from 6027 at the start of the refactor. |
 | `web/routers/rest.py` | The REST data plane: `/api/v1/buckets/**` authorized by per-route API-key scopes. Reaches the shared cores through `_webapp()`. |
 | `web/routers/auth.py` | Login, logout, me, password change, session helpers, login throttling. |
 | `web/routers/users.py` | User CRUD, role changes, password reset, session revocation, `GET /admin/audit`. |

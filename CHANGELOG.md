@@ -159,6 +159,88 @@ operator-visible consequences and the migration for each.
   fails if the server enforces a scope the UI cannot show, and the secret is
   proven never to reach localStorage, sessionStorage, a cookie or a URL.
 
+### Fixed
+
+- **Full-codebase review wave: 51 findings, all closed.** Six parallel
+  reviewers read the whole tree (Python, JS, SQL, tests, CI YAML) and every
+  claim was verified before a fix. The load-bearing ones:
+  - **CopyObject permanently broke envelope-encrypted objects.** The copy
+    wrote an alias with no encryption marker, so the server resolved the
+    destination to SSE-S3 and then looked the marker up by the alias id:
+    COPY returned 200 and every later GET answered 400. Marker lookup now
+    follows the alias chain (bounded, cycle-safe) and unwraps with the AAD
+    of the id the key was actually wrapped for.
+  - **`publish()` applied a bucket's default object lock after its commit.**
+    A crash in the window left a COMPLIANCE-retention version with no
+    retention row, which `delete_version` would happily delete — WORM
+    silently broken. Retention is now written in the same transaction as the
+    head, as `copy_object` already did.
+  - **The GC re-verify fence swallowed every error.** `except Exception:
+    pass` around the send-intent probe meant any failure silently disabled a
+    fence arm; a candidate is now skipped (fail closed) unless the table is
+    provably absent. The regression test the review prescribed —
+    publish a new head from a second connection between preview and collect —
+    now exists.
+  - **Physical-GC dedup race could create an unreadable object.** The alias
+    was committed without re-checking the base's `status`; if the collector
+    won in between, the PUT answered 200 and the GET raised. The alias now
+    re-verifies its base inside the transaction and falls back to a real
+    upload.
+  - **Two unbound names left by the router split.** `EnvelopeError` was
+    never imported (a corrupt SSE-S3 marker produced a bare 500 instead of
+    an XML error) and CORS `matched` was assigned only inside the bucket
+    branch (a cross-origin bucket list 500'd). A third, `_text` in
+    `get_active_channel`, was a regression from the store rewiring and broke
+    the dashboard on any deployment with no active channel.
+  - **The admin log websocket had no authorization.** Any viewer could
+    stream the admin-only log (credential ids, presigned-URL lines) that the
+    REST twin refuses with 403; it now closes 4403, and `route_views()`
+    finally enumerates websocket routes so the frozen surface test covers
+    them.
+  - **Report generation was never wired.** Inventory/analytics/metrics
+    configuration PUTs answered 200 while no report object was ever written;
+    `run_due_reports` is now an hourly scheduler task.
+  - **The strategy and replication setters were silently reverted.** They
+    wrote only config.yaml while the SQL settings document stays
+    authoritative, so the next request rewrote the file from the document.
+  - **`telegram_sessions.account` and `telegram_channels.channel_id` had no
+    unique constraint** although the new store's race recovery assumed one:
+    two concurrent logins produced duplicate rows and a broken Prometheus
+    scrape (duplicate sample). Schema 27 dedupes existing rows and adds the
+    indexes.
+  - **`PutObjectAcl` rejected a correct `Content-MD5`** (the digest was never
+    passed to the verifier), and object-level control bodies never verified
+    `x-amz-checksum-crc32`/`crc32c` values.
+  - **A concurrent UploadPart on the same part number silently lost.** The
+    CAS `rowcount` was unchecked: the loser got 200 + its own ETag, the table
+    kept the winner, and Complete failed with a confusing `InvalidPart`.
+  - **`set_bucket_quota` could accept a quota it never stored** (any error
+    was treated as a lost race and the recovery UPDATE could touch zero
+    rows).
+  - **The reindex candidate query used `||`**, which is string concatenation
+    on PostgreSQL but logical OR on MySQL: MySQL returned a silently wrong
+    (near-empty) candidate set.
+  - **`scopes_for_identifier` returned scopes for revoked and expired keys**
+    despite its docstring; `purge_expired`, `delete_for_bucket` and
+    `run_due_reports` were written and never wired.
+  - **S3 semantics:** `If-Range` is honoured (mismatch serves the full body),
+    `max-keys=0` returns an empty page and values above 1000 clamp, the
+    delete-marker 405 carries `Allow: DELETE`, an empty complete selection is
+    `MalformedXML`, checksums are returned for SSE-S3 (suppressed only for
+    SSE-C), the six `response-*` overrides work (including in boto3
+    presigned URLs), and tiering no longer double-subtracts its budget.
+  - **WebUI deletes now obey the same WORM/versioning rules as REST**, the
+    public share stream applies the same read gate as every other surface,
+    and public website reads count as object access so tiering cannot demote
+    an actively-served page.
+  - **Login throttling keyed on the proxy address**, letting one attacker
+    lock every user behind a reverse proxy out of the admin account; the
+    client identity now comes from `X-Forwarded-For` only when
+    `TRUSTED_PROXY` is configured.
+  - **Trusted-host middleware now runs outermost**, so a bad `Host` is
+    rejected before a 32 MiB body is buffered and DB lookups are made, and
+    the startup DDL block can no longer leak its connection.
+
 ### Changed
 
 - **`web/s3.py` split: 5 106 → 225 lines, 81 → 6 definitions**, across eleven
@@ -175,6 +257,25 @@ operator-visible consequences and the migration for each.
   identical definitions; it is now one table in `teledrive/api_keys.py`.
 - **DDL is issued by one place**, and a meta-test enforces it after a
   duplicate `users.enabled` ALTER was found hiding in `web/app.py`.
+- **Dead code removed, not deprecated.** The test tree carried drifted copies
+  of two production modules (1 086 lines nothing imported); `web/s3.py` kept
+  ~57 unused re-exports and `web/app.py` ~120 unused imports plus 38 dead
+  re-exports; `teledrive/uploader.py` was an empty shell of 18 unused imports
+  and settings no runtime read; `teledrive/db.py` still carried the legacy
+  scan-loop `files`/`account_status` layer. All removed. Upload settings that
+  no longer do anything (`retry_*`, `sleep_*`, `max_files_per_*`,
+  `caption_template`, `send_mode`, session/api keys) are gone from the config
+  schema — `docs/UPGRADING.md` §7.9 lists them.
+- **Schema 27** adds the unique identity indexes; the migration dedupes
+  first (newest `updated_at`, lowest id wins) so an existing database
+  upgrades instead of failing.
+- **Test realism:** `--dist loadfile` is now actually in `addopts` (the
+  comment claimed it), the schema-init race suite runs in the job that has
+  real PostgreSQL/MySQL, the unsupported sweep lost 44 perpetual skips, the
+  ~300-line docs lint moved to `tests/meta/test_docs.py`, and CI contracts
+  now require a referenced test to sit in a real `python -m pytest` step
+  without an `if:`.
+- **License:** the project is now under the WTFPL.
 
 ## [1.0.8] - 2026-10-28
 

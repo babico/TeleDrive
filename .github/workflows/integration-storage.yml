@@ -33,7 +33,7 @@ jobs:
       - name: Install API and test runtime
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest httpx boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
           python -m pip check
       - name: Compile API and storage
         run: python -m compileall -q teledrive web tests
@@ -98,7 +98,7 @@ jobs:
       - name: Install API and test runtime
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest httpx boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
           python -m pip check
       - name: Install actual AWS CLI and rclone clients
         run: |
@@ -207,10 +207,10 @@ jobs:
       - name: Install application and DB drivers
         run: |
           python -m pip install -e .
-          python -m pip install pytest "psycopg[binary]>=3.2,<4" "PyMySQL>=1.1,<2" "defusedxml==0.7.1" "cryptography>=50,<51"
+          python -m pip install pytest "pytest-xdist>=3.6,<4" "psycopg[binary]>=3.2,<4" "PyMySQL>=1.1,<2" "defusedxml==0.7.1" "cryptography>=50,<51"
           python -m pip check
       - name: Run live PostgreSQL/MySQL integration tests
-        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py
+        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py tests/storage/test_schema_init_race.py
       - name: Seed realistic metadata before native database backup
         run: |
           python scripts/ops/rehearse_native_database_restore.py seed --url-env DB_TEST_POSTGRES_URL --receipt "$RUNNER_TEMP/pg-dr.json" --source "$RUNNER_TEMP/pg-source.bin"

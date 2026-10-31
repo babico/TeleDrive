@@ -137,11 +137,6 @@
           this.groupDescriptions = groupDesc;
         } catch(e){ /* catalog is best-effort; manual scope entry still works */ }
       },
-      toggleAllEndpoints(on){
-        const names = this.endpointPermissions.map(p => p.name);
-        if(on){ this.selectedScopes = [...new Set([...this.selectedScopes, ...names])]; }
-        else { this.selectedScopes = this.selectedScopes.filter(s => !names.includes(s) && s !== 'admin:*'); }
-      },
       toggleEndpointCategory(cat){
         const names = this.endpointCategories[cat]||[];
         if(this.categoryFullySelected(cat)){

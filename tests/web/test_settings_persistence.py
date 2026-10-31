@@ -64,7 +64,6 @@ def app_env(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
     monkeypatch.setattr(webapp, "_CONFIG_CACHE",
                         {"mtime": None, "config": None})
-    webapp._SETTINGS_CACHE.update({"document": None, "generation": 0})
     return {"webapp": webapp, "config_path": config_path, "db_path": db_path,
             "key": key}
 
@@ -153,6 +152,42 @@ def test_retired_auth_settings_never_round_trip(app_env):
                                      by="admin")
     webapp.read_raw_config()  # invalidate the cache
     assert "password" not in webapp.read_raw_config()["web"]
+
+
+def test_strategy_put_survives_a_new_connection(app_env, monkeypatch):
+    """Regression: the storage-strategy setter must persist through the
+    SQL settings document, not only config.yaml.
+
+    The document is authoritative whenever a master key exists, and every
+    db_connect() re-materializes the file from it -- a file-only write
+    was silently reverted by the next request.
+    """
+    webapp = app_env["webapp"]
+    webapp.read_raw_config()  # seed the SQL document from the file
+
+    from fastapi.testclient import TestClient
+    from teledrive.db import connect_database
+    from tests import CSRF, seed_local_user
+
+    connect = lambda: connect_database(f"sqlite:///{app_env['db_path']}")
+    monkeypatch.setattr(webapp, "db_connect", connect)
+    seed_local_user(connect, "admin", "admin-password-1", "admin")
+    client = TestClient(webapp.app, base_url="http://localhost:8080")
+    login = client.post("/api/v1/auth/login", headers=CSRF,
+                        json={"username": "admin",
+                              "password": "admin-password-1"})
+    assert login.status_code == 200, login.text
+
+    r = client.put("/api/v1/admin/storage/strategy", headers=CSRF,
+                   json={"strategy": "round_robin"})
+    assert r.status_code == 200, r.text
+
+    # A fresh read resolves the authoritative SQL document; the change
+    # must still be there (the buggy version lost it here).
+    assert webapp.read_raw_config()["storage"]["strategy"] == "round_robin"
+    # And the file mirror agrees.
+    on_disk = yaml.safe_load(app_env["config_path"].read_text("utf-8"))
+    assert on_disk["storage"]["strategy"] == "round_robin"
 
 
 def test_store_rejects_oversized_documents(store):

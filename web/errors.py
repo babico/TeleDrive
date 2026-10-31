@@ -24,6 +24,20 @@ def _scrub_text(value: str) -> str:
     return _QUERY_SECRET_RE.sub(r"\1***", value)
 
 
+# A Telegram failure can echo the phone number back in its text. A phone
+# number is a credential identifier (and the account name), so it never
+# belongs in an HTTP error body. Match digit runs with the separators real
+# numbers use, then mask only when at least seven digits are present.
+_PHONE_RE = re.compile(r"\+?\d(?:[\d\s().-]{5,}\d)")
+
+
+def _scrub_phone(value: str) -> str:
+    def _mask(match: re.Match) -> str:
+        return "***" if sum(c.isdigit() for c in match.group(0)) >= 7 \
+            else match.group(0)
+    return _PHONE_RE.sub(_mask, value)
+
+
 def _credential_error(exc: Exception) -> HTTPException:
     """Map a credential-store failure without leaking the master-key path."""
     if isinstance(exc, (RuntimeError, OSError)):
@@ -60,6 +74,6 @@ def _telegram_error_response(exc: Exception, action: str) -> HTTPException:
     )
     message = next((hint for cls, hint in hints if isinstance(exc, cls)), None)
     if message is None:
-        message = _scrub_text(str(exc)) or name
+        message = _scrub_phone(_scrub_text(str(exc))) or name
     _log(f"{action} FAILED: {name}: {message}", "telegram-session")
     return HTTPException(400, f"{message} [{name}]")

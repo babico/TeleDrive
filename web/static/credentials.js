@@ -484,7 +484,6 @@
     }
 
     return {
-      s3Groups() { return C.GROUPS; },
       s3Presets() { return C.PRESETS; },
 
       // Live search across group title, group description and scope name.
@@ -505,24 +504,10 @@
       },
       s3GroupOpen(id) { return !this.s3Collapsed[id] || !!this.s3Search; },
       s3ToggleCollapse(id) { this.s3Collapsed[id] = !this.s3Collapsed[id]; },
-      s3SearchCount() {
-        var q = (this.s3Search || '').trim().toLowerCase();
-        if (!q) return 0;
-        return model(this).filter(function (p) { return p.toLowerCase().indexOf(q) >= 0; }).length;
-      },
-
-      s3Model() { return model(this); },
       s3Total() { return C.ALL.length; },
       s3SelectedCount() { return model(this).length; },
       s3GroupSelection(group) { return C.groupSelection(group, model(this)); },
 
-      s3PermSelected(scope) { return model(this).indexOf(scope) >= 0; },
-      s3TogglePerm(scope) {
-        var m = model(this);
-        var i = m.indexOf(scope);
-        if (i >= 0) m.splice(i, 1); else m.push(scope);
-        this.s3PresetTouched = true;
-      },
       s3SelectGroup(group) {
         var m = model(this);
         group.perms.forEach(function (p) { if (m.indexOf(p) < 0) m.push(p); });
@@ -553,14 +538,11 @@
       },
 
       s3RiskFor(scope) { return C.riskFor(scope); },
-      s3Risks() { return C.risksIn(model(this)); },
       s3RiskCount() { return C.risksIn(model(this)).length; },
       s3GroupRisks(group) {
         var self = this;
         return C.risksIn(group.perms.filter(function (p) { return model(self).indexOf(p) >= 0; }));
       },
-      s3HasRisk(scope) { return !!C.riskFor(scope); },
-
       s3ApplyPreset(id) {
         var preset = C.byId(id);
         var m = model(this);

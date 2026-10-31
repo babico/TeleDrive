@@ -178,6 +178,11 @@ EXPECTED_SURFACE = {
     ("PUT", "/api/v1/admin/users/{user_id}/role", 'put:/api/v1/admin/users/{user_id}/role', True),
     ("PUT", "/api/v1/buckets/{bucket}/content", 'rest:objects:put', False),
     ("PUT", "/api/v1/config", 'put:/api/v1/config', True),
+    # The log stream socket: same admin-only classification as GET
+    # /api/v1/logs (credential ids and presigned URLs flow through it).
+    # WebSocket routes are enumerated with a synthetic method because
+    # Starlette gives them no ``methods`` attribute.
+    ("WEBSOCKET", "/api/v1/logs/stream", 'websocket:/api/v1/logs/stream', True),
 }
 
 

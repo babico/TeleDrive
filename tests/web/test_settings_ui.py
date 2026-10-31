@@ -63,6 +63,40 @@ def test_channels_crud(admin):
     assert r.status_code == 200, r.text
 
 
+def test_active_channel_without_any_channel(admin):
+    """Regression: the no-channel branch answers 200/None, never a 500.
+
+    A removed raw-SQL import once left a NameError on exactly this path
+    (dashboard and settings pages both call the endpoint), so the empty
+    table is pinned here.
+    """
+    client = admin
+    r = client.get("/api/v1/admin/storage/active-channel")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"active": None}
+
+
+def test_active_channel_falls_back_to_first_inactive_channel(admin):
+    """Channels exist but none is flagged active: the first one is served."""
+    client = admin
+    first = client.post("/api/v1/admin/storage/channels",
+                        headers=CSRF,
+                        json={"name": "alpha", "channel_id": "ChAlpha",
+                              "strategy": "single", "scratch_dir": "/data/tmp"})
+    assert first.status_code == 201, first.text
+    second = client.post("/api/v1/admin/storage/channels",
+                         headers=CSRF,
+                         json={"name": "beta", "channel_id": "ChBeta",
+                               "strategy": "single", "scratch_dir": "/data/tmp"})
+    assert second.status_code == 201, second.text
+    # New channels are created inactive, so the fallback branch runs.
+    r = client.get("/api/v1/admin/storage/active-channel")
+    assert r.status_code == 200, r.text
+    active = r.json()["active"]
+    assert active["id"] == first.json()["id"]
+    assert active["name"] == "alpha"
+
+
 def test_telegram_session_status(admin):
     client = admin
     r = client.get("/api/v1/admin/storage/telegram-session")

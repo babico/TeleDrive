@@ -312,7 +312,26 @@ def route_views(app) -> list[RouteView]:
 
     This helper flattens both shapes so the registry and the surface snapshot
     see the same set the router does.
+
+    WebSocket routes carry no ``methods`` attribute, so without help they
+    fall through both loops and stay invisible to the surface freeze. They
+    are enumerated with a synthetic ``WEBSOCKET`` method so the registry
+    classifies them through the same ``is_admin_only`` map as their REST
+    twins (the log stream must be admin-only exactly like ``GET
+    /api/v1/logs``).
     """
+    from starlette.routing import WebSocketRoute
+
+    def _websocket_view(route) -> "RouteView | None":
+        if not isinstance(route, WebSocketRoute):
+            return None
+        path = getattr(route, "path", None)
+        if not path:
+            return None
+        return RouteView(path, ("WEBSOCKET",),
+                         getattr(route, "summary", None),
+                         getattr(route, "endpoint", None))
+
     views: list[RouteView] = []
     for route in getattr(app, "routes", ()) or ():
         path = getattr(route, "path", None)
@@ -321,6 +340,10 @@ def route_views(app) -> list[RouteView]:
             views.append(RouteView(path, methods,
                                    getattr(route, "summary", None),
                                    getattr(route, "endpoint", None)))
+            continue
+        websocket_view = _websocket_view(route)
+        if websocket_view is not None:
+            views.append(websocket_view)
             continue
         contexts = getattr(route, "effective_route_contexts", None)
         if callable(contexts):
@@ -332,6 +355,13 @@ def route_views(app) -> list[RouteView]:
                         child_path, child_methods,
                         getattr(context, "summary", None),
                         getattr(context, "endpoint", None)))
+                    continue
+                # A websocket context leaves path/methods unpopulated; the
+                # original route underneath still knows both.
+                websocket_view = _websocket_view(
+                    getattr(context, "original_route", None))
+                if websocket_view is not None:
+                    views.append(websocket_view)
     return views
 
 

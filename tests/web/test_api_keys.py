@@ -30,7 +30,11 @@ def test_credentials_are_hashed_never_listed_and_persisted(keys):
     assert keys.authorize(created.value, "rest:objects:get", now=101)
     assert keys.authorize(created.value, "rest:objects:put", now=102)
     assert not keys.authorize(created.value, "rest:objects:delete", now=103)
-    assert keys.list()[0]["last_used_at"] == 102
+    # last_used_at is deliberately throttled to once per minute: the 102 hit is
+    # inside the window opened by 101, so the stored value stays 101.
+    assert keys.list()[0]["last_used_at"] == 101
+    assert keys.authorize(created.value, "rest:objects:get", now=200)
+    assert keys.list()[0]["last_used_at"] == 200
 
 
 def test_read_only_and_wrong_key_do_not_escalate(keys):

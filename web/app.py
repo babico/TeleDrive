@@ -15,94 +15,50 @@ existing per-route scope semantics unchanged. See ``docs/UPGRADING.md``.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import copy
-import html as _html
-import secrets
-import tempfile
 import os
 import gzip
 import shutil
 import logging
-import threading
 from logging.handlers import RotatingFileHandler
 import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-import urllib.parse
-from urllib.parse import quote as _url_quote, urlsplit
 from typing import Any
 
 import yaml
-from fastapi import (Body, Depends, FastAPI, HTTPException, Query, Request,
-                     WebSocket, WebSocketDisconnect, status)
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from pydantic import BaseModel, Field
 from typing import Literal
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 
 from teledrive import uploader
 from teledrive.db import redact_database_url
 from teledrive.api_keys import ApiKeyStore
-from teledrive.s3.credentials import S3CredentialStore, load_master_key, DEFAULT_PERMISSIONS
-from teledrive.s3.multipart import MultipartStore
-from teledrive.s3.object_metadata import ObjectMetadataStore
-from teledrive.s3.website import (
-    WebsiteConfigStore, WebsiteError, validate_document_name,
-)
-from teledrive.storage.gc import StorageGCInventory
-from teledrive.storage.gc_collect import RetainedMediaGC
-from teledrive.storage.manifest import ManifestStore, objects
-from sqlalchemy import select as _sa_select
-from teledrive.storage.jobs import StorageUploadJobs, UploadJobError, jobs as storage_job_rows
+from teledrive.s3.credentials import load_master_key
+from teledrive.storage.manifest import ManifestStore
+from teledrive.storage.jobs import StorageUploadJobs, jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
-from teledrive.stores import content_index as _content_store
-from teledrive.stores import pins as _pin_store
 from teledrive.stores import sessions as _session_store
-from teledrive.stores import shares as _share_store
-from teledrive.stores import telegram_pending as _pending_store
+from teledrive.stores import telegram_accounts as _accounts
 from teledrive.stores import users as _user_store
-from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 from teledrive.storage.user_mode import (
     UserSessionRuntime, UserSendJournal, UnifiedUserTransport, transport_mode,
 )
-from teledrive.storage.history_inventory import inventory_channel
-from teledrive.storage.mtproto_rate_guard import MtprotoRateGuard
-from web.permissions import READ_METHODS, is_admin_only
 from web.deps import (
-    _ROLE_ADMIN, _ROLE_READ, _ROLE_WRITE, _delegation_limit,
-    _enforce_role_policy, _require_interactive_session,
-    _require_within_delegation, _require_within_lifetime, _required_roles,
-    _same_origin, bearer_auth, permission_registry, require_api_scope,
-    require_auth,
+    _same_origin, permission_registry, require_auth,
 )
-from web.errors import (
-    _QUERY_SECRET_RE, _credential_error, _scrub_text, _telegram_error_response,
-)
+from web.errors import _scrub_text, _telegram_error_response
 from web.routers.public import (
-    _SHARE_RATE_LIMIT, _SHARE_RATE_WINDOW, _SITE_CSP, _SITE_MIME,
-    _hash_share_password, _load_active_share, _serve_site, _serve_static_page,
-    _share_html, _share_rate, _share_rate_limited, _share_rate_lock,
-    _site_content_type, _site_headers, _site_not_found, _site_path,
-    _stream_share, index, login_page, page_html, page_route,
-    public_certificate_der, public_certificate_pem, public_share_get,
-    public_share_post, public_website_object, public_website_root,
-    s3_buckets_page, s3_credentials_page, s3_legacy_redirect,
-    settings_general_page, settings_legacy_redirect, settings_telegram_page,
-    storage_legacy_redirect,
+    _hash_share_password, _serve_static_page, _share_rate, _site_path, index,
 )
-from web.routers.config import (
-    OKResponse, _FILE_ONLY_STATE_KEYS, _reject_file_only_settings,
-    get_config, health, logs, logs_stream, put_config,
-)
-from web.routers.buckets import BucketCreateRequest
+from web.routers.config import health
 mtproto_storage_runtime = UserSessionRuntime()
 
 CONFIG_PATH = Path(os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml"))
@@ -540,9 +496,6 @@ def _settings_store() -> "SettingsStore | None":
         return None
 
 
-_SETTINGS_CACHE: dict[str, Any] = {"document": None, "generation": 0}
-
-
 def read_raw_config() -> dict[str, Any]:
     """Authoritative settings: SQL document, else the bootstrap file.
 
@@ -569,8 +522,6 @@ def read_raw_config() -> dict[str, Any]:
         _seed_settings_document(file_document)
         return file_document
     document = _drop_retired_auth_settings(stored.document)
-    _SETTINGS_CACHE["document"] = document
-    _SETTINGS_CACHE["generation"] += 1
     return copy.deepcopy(document)
 
 
@@ -802,6 +753,9 @@ async def lifecycle_scheduler_loop() -> None:
         try:
             from teledrive.s3.lifecycle import BucketLifecycleStore
             connection = db_connect()
+            # Abandoned login sessions otherwise accumulate forever. The
+            # purge runs first so a lifecycle failure cannot starve it.
+            _session_store.purge_expired(connection, int(time.time()))
             cat = BucketCatalog(ManifestStore(connection))
             BucketLifecycleStore(cat).apply_due(now=int(time.time()), limit=100)
         except asyncio.CancelledError:
@@ -859,6 +813,42 @@ async def notification_scheduler_loop() -> None:
             if connection is not None:
                 connection.close()
         await asyncio.sleep(30 if delivered else 60)
+
+
+async def report_scheduler_loop() -> None:
+    """Generate due analytics/inventory/metrics report objects hourly.
+
+    The configuration PUTs only store intent; without this pass no report
+    object is ever produced. The runner is itself bounded and records a
+    per-configuration failure in ``last_error`` instead of raising.
+    """
+    while True:
+        connection = None
+        try:
+            from teledrive.s3.report_runner import run_due_reports
+            connection = db_connect()
+            cat = BucketCatalog(ManifestStore(connection))
+            scratch = Path(STORAGE_SCRATCH_DIR)
+            _secure_mkdir(scratch)
+            await run_due_reports(
+                cat, int(time.time()),
+                transport=storage_transport(connection),
+                scratch_directory=scratch,
+            )
+        except asyncio.CancelledError:
+            raise
+        except HTTPException as exc:
+            # No Telegram session yet: expected on an unconfigured install.
+            message = f"report scheduler idle: {exc.detail}"
+            if _SCHEDULER_IDLE_NOTICE.get("reports") != message:
+                _log(message, "scheduler")
+                _SCHEDULER_IDLE_NOTICE["reports"] = message
+        except Exception as exc:
+            _log("report scheduler: " + type(exc).__name__, "scheduler")
+        finally:
+            if connection is not None:
+                connection.close()
+        await asyncio.sleep(3600)
 
 
 def folder_watch_scan() -> dict:
@@ -929,7 +919,7 @@ async def lifespan(_: FastAPI):
     global upload_job_scheduler_task, lifecycle_scheduler_task
     global notification_scheduler_task
     global folder_watch_task
-    global tiering_scheduler_task
+    global tiering_scheduler_task, report_scheduler_task
     os.umask(0o077)
     # Settings first: ensure_config() mkdirs AUTH_DIR, which must already
     # reflect the config/env override (Docker only worked by accident
@@ -986,6 +976,7 @@ async def lifespan(_: FastAPI):
         _log(_scrub_text(f"user session warning: {exc}"), "storage")
     global _main_event_loop
     _main_event_loop = asyncio.get_running_loop()
+    conn = None
     try:
         conn = db_connect()
         # Notification/logging tables are created here, outside any request
@@ -1004,13 +995,18 @@ async def lifespan(_: FastAPI):
         # created at startup, never inside a mutation transaction.
         from teledrive.s3.metadata_journal import ensure_metadata_tables
         ensure_metadata_tables(conn.engine)
-        conn.close()
     except Exception as exc:
         _log(_scrub_text(f"startup database warning: {exc}"), "startup")
+    finally:
+        # A failing ensure_* must not leak the connection; startup has no
+        # pool to return it to.
+        if conn is not None:
+            conn.close()
     upload_job_scheduler_task = asyncio.create_task(upload_job_scheduler_loop())
     lifecycle_scheduler_task = asyncio.create_task(lifecycle_scheduler_loop())
     tiering_scheduler_task = asyncio.create_task(tiering_scheduler_loop())
     notification_scheduler_task = asyncio.create_task(notification_scheduler_loop())
+    report_scheduler_task = asyncio.create_task(report_scheduler_loop())
     folder_watch_task = asyncio.create_task(folder_watch_loop())
     session_health_task = asyncio.create_task(telegram_session_health_loop())
     yield
@@ -1026,6 +1022,9 @@ async def lifespan(_: FastAPI):
     if notification_scheduler_task:
         notification_scheduler_task.cancel()
         await asyncio.gather(notification_scheduler_task, return_exceptions=True)
+    if report_scheduler_task:
+        report_scheduler_task.cancel()
+        await asyncio.gather(report_scheduler_task, return_exceptions=True)
     if folder_watch_task:
         folder_watch_task.cancel()
         await asyncio.gather(folder_watch_task, return_exceptions=True)
@@ -1059,16 +1058,6 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
-@app.middleware("http")
-async def _trusted_host_middleware(request: Request, call_next):
-    # ALLOWED_HOSTS reloads from config.yaml at runtime; resolve it per
-    # request instead of capturing the import-time default.
-    host = (request.headers.get("host") or "").split(":")[0]
-    if host and host not in ALLOWED_HOSTS:
-        return JSONResponse(status_code=400, content={"detail": "Invalid host header"})
-    return await call_next(request)
-
-
 _SHARE_TOKEN_PATH = re.compile(
     r"(?P<prefix>/share/|/api/v1/admin/storage/shares/)"
     r"(?P<token>[A-Za-z0-9_-]{16,64})(?P<rest>/?$)")
@@ -1164,6 +1153,20 @@ async def security_middleware(request: Request, call_next):
             or request.url.path.startswith("/site/")):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# Registered LAST: Starlette wraps the stack in reverse registration order,
+# so the most recently registered middleware is outermost. The host check
+# must run before the audit logger (which opens a database connection) and
+# before the security middleware buffers a 32MB request body.
+@app.middleware("http")
+async def _trusted_host_middleware(request: Request, call_next):
+    # ALLOWED_HOSTS reloads from config.yaml at runtime; resolve it per
+    # request instead of capturing the import-time default.
+    host = (request.headers.get("host") or "").split(":")[0]
+    if host and host not in ALLOWED_HOSTS:
+        return JSONResponse(status_code=400, content={"detail": "Invalid host header"})
+    return await call_next(request)
 
 
 class StartRequest(BaseModel):
@@ -1473,22 +1476,26 @@ def prometheus_metrics(_: None = Depends(require_auth)):
             except Exception:
                 pass  # catalog tables live in another database
 
-        sessions = conn.connection.execute(_text(
-            "SELECT account, authorized FROM telegram_sessions")).fetchall()
+        # Session health and soft quotas go through the typed store: the
+        # web layer does not scan the telegram_sessions table directly.
+        # Sorted by id so the exposition stays byte-identical to the
+        # previous un-ordered scan (SQLite served it in rowid = id order).
+        sessions = sorted(_accounts.list_sessions(conn),
+                          key=lambda row: row["id"])
         if sessions:
             lines += [
                 "# HELP teledrive_telegram_session_authorized "
                 "1 = authorized, 0 = expired/revoked.",
                 "# TYPE teledrive_telegram_session_authorized gauge",
             ]
-        quotas = conn.connection.execute(_text(
-            "SELECT account, soft_quota_bytes FROM telegram_sessions"
-        )).fetchall()
-        for account, authorized in sessions:
+        for row in sessions:
+            account, authorized = row["account"], row["authorized"]
             label = 'account="%s"' % _prom_escape(account)
             if authorized is not None:
                 lines.append("teledrive_telegram_session_authorized{%s} %d"
                              % (label, int(authorized)))
+        quotas = [(row["account"], row["soft_quota_bytes"])
+                  for row in sessions]
         if quotas:
             lines += ["# HELP teledrive_telegram_session_soft_quota_bytes "
                       "Configured soft quota (omitted = unlimited).",
@@ -1541,71 +1548,15 @@ from web.routers import (auth_router, buckets_router, config_router,
                         public_router, rest_router, s3admin_router,
                         telegram_router,
                         users_router)  # noqa: E402  (router import, no app logic)
-from web.routers.auth import (  # noqa: E402  (re-exports during the split)
-    AUTH_FAILURES, _auth_failure_record, _auth_throttle_blocked,
-    _auth_throttle_check, _default_admin_password_in_use,
-    _dummy_password_hash, _get_current_user, _hash_password,
-    _invalidate_default_admin_cache, _session_token_digest,
-    _verify_password, change_user_password, login, logout, me,
+from web.routers.auth import (  # noqa: E402  (re-exports used via web.app)
+    AUTH_FAILURES, _get_current_user, _hash_password,
+    _invalidate_default_admin_cache, _session_token_digest, _verify_password,
 )
-from web.routers.users import (  # noqa: E402  (re-exports during the split)
-    _USERNAME_RE, _assert_not_last_admin, _validate_username,
-    UserCreateRequest, change_user_role, create_user, delete_user,
-    get_user_detail, list_roles, list_security_audit, list_users,
-    revoke_user_sessions, update_user,
+from web.routers.telegram import (  # noqa: E402  (re-exports used via web.app)
+    _MAX_VERIFY_ATTEMPTS, _record_flood_wait, telegram_session_health_loop,
 )
-from web.routers.telegram import (  # noqa: E402  (re-exports during the split)
-    TelegramChannelCreate, TelegramSessionRequestCode,
-    TelegramSessionVerifyCode, _MAX_VERIFY_ATTEMPTS,
-    _consume_pending_session_token, _flood_wait_status, _mask_phone,
-    _probe_account_now, _probe_telegram_session, _record_flood_wait,
-    _record_verify_attempt, activate_telegram_channel, create_telegram_channel,
-    delete_telegram_channel, delete_telegram_session,
-    delete_telegram_session_account, get_active_channel,
-    get_replication_status, get_telegram_session, list_telegram_channels,
-    list_telegram_sessions, repair_replication, request_telegram_session_code,
-    set_replication_account, set_storage_strategy, set_telegram_session_quota,
-    telegram_floodwait_status, telegram_session_health_check,
-    telegram_session_health_loop, verify_telegram_session_code,
-)
-from web.routers.buckets import (  # noqa: E402  (re-exports during the split)
-    BucketQuotaRequest, ObjectCopyRequest, VersionIndexRequest,
-    VersionRestoreRequest, _public_s3_origin,
-    admin_copy_object, admin_create_bucket, admin_create_share,
-    admin_delete_bucket, admin_delete_bucket_pin, admin_delete_object,
-    admin_download_object, admin_get_bucket_cors, admin_get_bucket_pin,
-    admin_get_bucket_website, admin_get_quota, admin_list_buckets,
-    admin_list_object_versions, admin_list_objects,
-    admin_list_published_versions, admin_list_shares, admin_presign_object,
-    admin_put_bucket_cors, admin_put_bucket_pin, admin_put_bucket_website,
-    admin_revoke_share, admin_search_objects, admin_set_quota,
-    admin_upload_object, index_legacy_current_versions,
-    reindex_object_contents, restore_published_version, storage_usage_series,
-)
-from web.routers.s3admin import (  # noqa: E402  (re-exports during the split)
-    DEFAULT_NEW_CREDENTIAL_PERMISSIONS, GCCollectRequest, GCToggleRequest,
-    KeyCreateRequest, LegacyFolderImportRequest, PendingUploadRecoveryRequest,
-    S3CompletionRecoveryRequest, S3KeyCreateRequest, StorageUploadJobRequest,
-    abandon_stale_pending_object, cancel_storage_upload_job,
-    create_storage_upload_job, gc_collect, gc_status, gc_toggle,
-    get_storage_gc_audit, import_legacy_folder_jobs,
-    inspect_user_channel_history, issue_api_key, issue_s3_credentials,
-    list_api_key_permissions, list_api_keys, list_s3_credentials,
-    list_stale_pending_objects, list_stale_s3_completions,
-    list_storage_gc_candidates, list_storage_upload_jobs,
-    list_unresolved_mtproto_sends, recover_stale_s3_completion,
-    retry_storage_upload_job, reveal_s3_credential_secret,
-    revoke_api_key, revoke_s3_credentials, rotate_api_key,
-    run_next_storage_upload_job, storage_operations_health,
-    update_s3_credentials,
-)
-from web.routers.rest import (  # noqa: E402  (re-exports during the split)
-    _stream_object_upload,
-    list_storage_buckets, create_storage_bucket, remove_storage_bucket,
-    list_published_object_versions, list_current_objects,
-    unlink_current_object, put_object_content, head_object_content,
-    get_object_content,
-)
+from web.routers.buckets import _public_s3_origin  # noqa: E402
+from web.routers.rest import _stream_object_upload  # noqa: E402
 from web import s3_governance_api  # noqa: E402  (router import, no app logic)
 # FastAPI 0.142 keeps an included router lazy behind an ``_IncludedRouter``
 # placeholder instead of copying its routes into ``app.routes``. Every

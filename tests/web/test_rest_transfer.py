@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -245,6 +246,113 @@ def test_share_link_streams_object_without_auth(service):
     entry = next(s for s in listing.json()["shares"] if s["token"] == token)
     assert entry["download_count"] == 1
     assert entry["status"] == "active"
+
+
+def _admin_delete_object(client, key):
+    return client.delete(
+        "/api/v1/admin/storage/buckets/backup-bucket/objects",
+        params={"key": key},
+        headers={**_admin_headers(client), "x-teledrive-csrf": "1"})
+
+
+def test_webui_delete_refuses_retention_held_object(service):
+    """The WebUI delete mirrors the REST unlink's WORM checks.
+
+    It called ``remove_current`` directly, so an object under retention was
+    deletable through the admin page while the same key answered 403 on the
+    REST surface.
+    """
+    client, headers, _, _ = service
+    uploaded = put(client, headers, b"worm-bytes")
+    assert uploaded.status_code in (200, 201)
+
+    db = webapp.db_connect()
+    try:
+        from sqlalchemy import text
+        db.connection.execute(text(
+            "UPDATE storage_objects SET retention_until_ns = :until "
+            "WHERE id = :id"),
+            {"until": time.time_ns() + 86_400 * 1_000_000_000,
+             "id": uploaded.json()["id"]})
+        db.commit()
+    finally:
+        db.close()
+
+    refused = _admin_delete_object(client, "data.bin")
+    assert refused.status_code == 403
+    assert "retention" in refused.text.lower()
+    still_there = client.get("/api/v1/buckets/backup-bucket/content",
+                             params={"key": "data.bin"}, headers=headers)
+    assert still_there.status_code == 200
+    assert still_there.content == b"worm-bytes"
+
+
+def test_webui_delete_on_versioned_bucket_writes_a_delete_marker(service):
+    """A versioning-Enabled bucket must keep history through the WebUI too."""
+    client, headers, _, _ = service
+    uploaded = put(client, headers, b"versioned-bytes")
+    assert uploaded.status_code in (200, 201)
+
+    db = webapp.db_connect()
+    try:
+        from teledrive.storage.catalog import BucketCatalog
+        from teledrive.storage.manifest import ManifestStore
+        BucketCatalog(ManifestStore(db)).set_versioning("backup-bucket",
+                                                        "Enabled")
+        db.commit()
+    finally:
+        db.close()
+
+    deleted = _admin_delete_object(client, "data.bin")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["unlinked"] is True
+    assert deleted.json()["delete_marker"]
+    # The head is gone but the previous version remains recoverable.
+    assert client.get("/api/v1/buckets/backup-bucket/content",
+                      params={"key": "data.bin"}, headers=headers).status_code == 404
+
+
+def test_share_link_refuses_archived_object_like_rest(service):
+    """The public share stream must apply the same read gate as REST.
+
+    It did not: an ARCHIVE_ACCESS object answered 403 InvalidObjectState
+    through ``GET /api/v1/buckets/.../content`` but the share token streamed
+    it anyway. The refusal also must happen BEFORE the download slot is
+    claimed.
+    """
+    client, headers, _, _ = service
+    uploaded = put(client, headers, b"archived-bytes")
+    assert uploaded.status_code in (200, 201)
+    object_id = uploaded.json()["id"]
+
+    db = webapp.db_connect()
+    try:
+        from sqlalchemy import text
+        db.connection.execute(text(
+            "UPDATE storage_objects SET storage_class = 'ARCHIVE_ACCESS' "
+            "WHERE id = :id"), {"id": object_id})
+        db.commit()
+    finally:
+        db.close()
+
+    rest = client.get("/api/v1/buckets/backup-bucket/content",
+                      params={"key": "data.bin"}, headers=headers)
+    assert rest.status_code == 403
+    assert "InvalidObjectState" in rest.text
+
+    webapp._share_rate.clear()
+    created = _share(client, {"key": "data.bin", "expires_in": 3600})
+    assert created.status_code == 200, created.text
+    token = created.json()["token"]
+
+    shared = client.get(f"/share/{token}")
+    assert shared.status_code == 403, shared.text
+    assert "InvalidObjectState" in shared.text
+
+    listing = client.get("/api/v1/admin/storage/shares",
+                         headers=_admin_headers(client))
+    entry = next(s for s in listing.json()["shares"] if s["token"] == token)
+    assert entry["download_count"] == 0
 
 
 def test_share_link_password_gate(service):

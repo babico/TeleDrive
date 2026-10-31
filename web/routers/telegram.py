@@ -317,10 +317,9 @@ def delete_telegram_session_account(account: str, request: Request,
                            "objects requires re-authorizing the account.",
                 "account": account, "objects": objects, "bytes": total,
             })
-        deleted = conn.connection.execute(_text(
-            "DELETE FROM telegram_sessions WHERE account = :account"
-        ), {"account": account}).rowcount
-        conn.connection.commit()
+        # Typed store call. The store returns whether a row was removed;
+        # the handler's response shape keeps the historical 0/1 rowcount.
+        deleted = 1 if _accounts.delete_session(conn, account) else 0
     finally:
         conn.close()
     _webapp()._log(f"telegram session deleted: account={account} rows={deleted}",
@@ -459,16 +458,13 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
         try:
             conn_ch = _webapp().db_connect()
             try:
-                from sqlalchemy import text as _t
-                row = conn_ch.connection.execute(_t(
-                    "SELECT channel_id FROM telegram_channels WHERE is_active=1 LIMIT 1"
-                )).fetchone()
-                if row is None:
-                    row = conn_ch.connection.execute(_t(
-                        "SELECT channel_id FROM telegram_channels ORDER BY id LIMIT 1"
-                    )).fetchone()
-                if row is not None:
-                    channel = row[0]
+                # Same resolution order as get_active_channel: the active
+                # channel first, then any channel as a fallback.
+                channels = _accounts.list_channels(conn_ch, active_only=True)
+                if not channels:
+                    channels = _accounts.list_channels(conn_ch)
+                if channels:
+                    channel = channels[0]["channel_id"]
             finally:
                 conn_ch.close()
         except Exception:
@@ -780,9 +776,16 @@ def set_storage_strategy(request: Request, payload: dict = Body(...),
     # demand an existing upload source_dir, which is unrelated to the
     # routing strategy. The value itself is whitelisted above.
     cfg.setdefault("storage", {})["strategy"] = strategy
+    # Persist the SQL document BEFORE the file: read_raw_config treats
+    # the database as authoritative when a master key exists, and every
+    # db_connect() re-materializes the file from that document -- a
+    # file-only write would be silently reverted on the next request.
+    _webapp()._persist_settings_document(cfg, by="webui:storage-strategy")
     tmp = _webapp().CONFIG_PATH.with_suffix(_webapp().CONFIG_PATH.suffix + ".tmp")
     _webapp()._secure_write(tmp, yaml.safe_dump(cfg, sort_keys=False))
     os.replace(tmp, _webapp().CONFIG_PATH)
+    _webapp()._CONFIG_CACHE["config"] = None
+    _webapp()._CONFIG_CACHE["mtime"] = None
     _webapp()._reload_service_settings()
     _webapp()._log(f"storage strategy set: {strategy} (runtime reloaded)", "config")
     _webapp()._schedule_storage_runtime_reload()
@@ -831,9 +834,15 @@ def set_replication_account(request: Request, payload: dict = Body(...),
     # account that is not among the loaded credential sets degrades to
     # disabled at runtime (with a log) rather than failing startup.
     cfg.setdefault("storage", {})["replica_account"] = account
+    # Same ordering constraint as set_storage_strategy: the SQL document
+    # is authoritative, so it must be persisted before the file or the
+    # change is reverted when effective_config() rewrites the file.
+    _webapp()._persist_settings_document(cfg, by="webui:replication-account")
     tmp = _webapp().CONFIG_PATH.with_suffix(_webapp().CONFIG_PATH.suffix + ".tmp")
     _webapp()._secure_write(tmp, yaml.safe_dump(cfg, sort_keys=False))
     os.replace(tmp, _webapp().CONFIG_PATH)
+    _webapp()._CONFIG_CACHE["config"] = None
+    _webapp()._CONFIG_CACHE["mtime"] = None
     _webapp()._reload_service_settings()
     _webapp()._log(f"storage replica account set: {account or '(disabled)'} "
          "(runtime reloaded)", "config")
@@ -907,11 +916,12 @@ def get_active_channel(_: None = Depends(require_auth)):
                (active[0]["id"], active[0]["name"], active[0]["channel_id"],
                 active[0]["strategy"], active[0]["scratch_dir"]))
         if row is None:
-            # Fall back to first channel
-            row = conn.connection.execute(_text(
-                "SELECT id, name, channel_id, strategy, scratch_dir FROM "
-                "telegram_channels ORDER BY id LIMIT 1"
-            )).fetchone()
+            # Fall back to the first channel when none is flagged active.
+            fallback = _accounts.list_channels(conn)
+            row = (None if not fallback else
+                   (fallback[0]["id"], fallback[0]["name"],
+                    fallback[0]["channel_id"], fallback[0]["strategy"],
+                    fallback[0]["scratch_dir"]))
         if row is None:
             return {"active": None}
         return {"active": {"id": row[0], "name": row[1], "channel_id": row[2],

@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 
 from teledrive.stores import sessions as _session_store
 from teledrive.stores import users as _user_store
-from web.deps import _same_origin, require_auth
+from web.deps import _same_origin, client_identity, require_auth
 
 router = APIRouter()
 
@@ -52,8 +52,15 @@ def _verify_password(password: str, stored: str) -> bool:
             return hmac.compare_digest(digest.hex(), hexdigest)
         if ":" in stored:  # legacy format
             salt, digest = stored.split(":", 1)
-            return hmac.compare_digest(
+            valid = hmac.compare_digest(
                 digest, hashlib.sha256((salt + password).encode()).hexdigest())
+            # Run the PBKDF2 work a modern hash would do. Without it, a
+            # legacy row answers measurably faster and the timing reveals
+            # both the hash format and that the username exists.
+            hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), b"teledrive-legacy-timing",
+                _PBKDF2_ITERATIONS)
+            return valid
     except Exception:
         return False
     return False
@@ -152,7 +159,10 @@ def login(payload: dict, request: Request):
     password = str(payload.get("password", ""))
     if not username or not password:
         raise HTTPException(400, "username and password are required")
-    client = request.client.host if request.client else "-"
+    # Throttle key: the real client when a trusted proxy fronts the
+    # deployment (see web.deps.client_identity), never the shared proxy
+    # address -- otherwise one attacker blocks every login behind it.
+    client = client_identity(request)
     throttle_key = f"login:{username}:{client}"
     _auth_throttle_check(throttle_key)
     conn = _webapp().db_connect()

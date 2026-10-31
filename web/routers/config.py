@@ -15,7 +15,9 @@ from fastapi import (
 )
 from pydantic import BaseModel
 
-from web.deps import _require_interactive_session, _same_origin, require_auth
+from web.deps import (
+    _require_interactive_session, _required_roles, _same_origin, require_auth,
+)
 from web.errors import _scrub_text
 
 router = APIRouter()
@@ -103,6 +105,11 @@ async def logs_stream(websocket: WebSocket):
     Authentication mirrors the REST API (session cookie on the
     handshake, Bearer via query is NOT offered — tokens must not live
     in URLs). Unauthenticated sockets close before accepting.
+
+    Authorization mirrors it too: ``_required_roles`` classifies this
+    path admin-only exactly like the REST ``GET /api/v1/logs`` twin, so
+    a viewer cannot stream the credential ids and presigned-URL lines
+    the REST endpoint refuses them.
     """
     token = websocket.cookies.get("teledrive_session") if websocket.cookies else None
     user = None
@@ -113,6 +120,10 @@ async def logs_stream(websocket: WebSocket):
         user = _webapp()._get_current_user(_Shim())  # type: ignore[arg-type]
     if user is None:
         await websocket.close(code=4401)
+        return
+    if user.get("role") not in _required_roles(
+            "WEBSOCKET", websocket.url.path):
+        await websocket.close(code=4403)
         return
     await websocket.accept()
     # Bootstrap the main-loop reference when lifespan did not run (e.g.

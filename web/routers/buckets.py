@@ -23,6 +23,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select as _sa_select
 
 from teledrive.s3.credentials import S3CredentialStore
 from teledrive.s3.website import (
@@ -31,7 +32,7 @@ from teledrive.s3.website import (
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.copy import copy_object, CopyConflict
 from teledrive.storage.engine import TelegramObjectStorage
-from teledrive.storage.manifest import ManifestStore
+from teledrive.storage.manifest import ManifestStore, objects
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 from teledrive.stores import content_index as _content_store
 from teledrive.stores import pins as _pin_store
@@ -186,6 +187,9 @@ def admin_delete_bucket(bucket: str, request: Request,
             raise HTTPException(404, "Bucket not found") from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        # The bucket is gone, so its share links can never resolve again;
+        # leaving the rows behind keeps live-looking tokens in the listing.
+        _share_store.delete_for_bucket(conn, bucket)
         _webapp()._log(f"delete bucket: name={bucket}", "storage")
         return {"ok": True}
     finally:
@@ -220,8 +224,37 @@ def admin_delete_object(bucket: str, request: Request,
     _same_origin(request)
     conn = _webapp().db_connect()
     try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        # Mirror the REST unlink exactly: a legal hold or an open retention
+        # window forbids the delete, and a versioning-Enabled bucket gets a
+        # delete marker instead of losing the only record of its history.
         try:
-            deleted = BucketCatalog(ManifestStore(conn)).remove_current(bucket, key)
+            held_item = catalog.get(bucket, key).item
+        except FileNotFoundError:
+            held_item = None
+        if held_item is not None:
+            lock_row = conn.connection.execute(
+                _sa_select(objects.c.legal_hold,
+                           objects.c.retention_until_ns)
+                .where(objects.c.id == held_item.id)).first()
+            if lock_row is not None:
+                if bool(lock_row[0]):
+                    raise HTTPException(
+                        403, "Object is under legal hold and cannot be "
+                             "deleted")
+                if (lock_row[1] is not None
+                        and int(lock_row[1]) > time.time_ns()):
+                    raise HTTPException(
+                        403, "Object is under retention and cannot be "
+                             "deleted")
+        try:
+            if catalog.versioning_state(bucket) == "Enabled":
+                marker = catalog.delete_marker(bucket, key)
+                _webapp()._log(
+                    f"delete {bucket}/{key}: delete marker {marker}", "storage")
+                return {"ok": True, "unlinked": True,
+                        "delete_marker": marker}
+            deleted = catalog.remove_current(bucket, key)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"ok": True, "unlinked": deleted}

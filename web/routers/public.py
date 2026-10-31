@@ -32,7 +32,7 @@ from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.manifest import ManifestStore
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 from teledrive.stores import shares as _share_store
-from web.deps import require_auth
+from web.deps import client_identity, require_auth
 
 router = APIRouter()
 
@@ -261,6 +261,12 @@ async def _stream_share(row) -> StreamingResponse:
         # for: if the row no longer does, the link is dead, not re-targeted.
         if item.bucket != bucket or item.key != key:
             raise HTTPException(404, "Link not found or expired")
+        # The share link is a read surface too. Without the same gate every
+        # other surface applies, an archived object answered 403 through
+        # REST while this link streamed it anyway, and an SSE-C object sent
+        # a 200 with an empty body. The gate runs BEFORE the download slot
+        # is claimed so a refused read never burns a share's allowance.
+        _webapp()._rest_read_gate(manifests, catalog, item)
         if not _share_store.claim_download(conn, token, int(time.time())):
             raise HTTPException(404, "Link not found or expired")
         transport = _webapp().storage_transport(conn)
@@ -297,7 +303,7 @@ async def _stream_share(row) -> StreamingResponse:
 @router.get("/share/{token}", tags=["Sharing"],
          summary="Public share link: stream the shared object")
 async def public_share_get(token: str, request: Request):
-    client_ip = request.client.host if request.client else "-"
+    client_ip = client_identity(request)
     if _share_rate_limited(client_ip):
         raise HTTPException(429, "Too many requests")
     row = _load_active_share(token)
@@ -319,7 +325,9 @@ async def public_share_get(token: str, request: Request):
 @router.post("/share/{token}", tags=["Sharing"],
           summary="Public share link: unlock a password-protected object")
 async def public_share_post(token: str, request: Request):
-    client_ip = request.client.host if request.client else "-"
+    # Same trusted-proxy identity as the login throttle: keying on the
+    # proxy address would let one client exhaust every share's budget.
+    client_ip = client_identity(request)
     if _share_rate_limited(client_ip):
         raise HTTPException(429, "Too many requests")
     row = _load_active_share(token)
@@ -496,6 +504,11 @@ async def _serve_site(bucket: str, path: str, request: Request) -> Response:
             conn.close()
             return _site_not_found()
 
+        # A served page is an object read like any other: without the access
+        # record, tiering's idle clock demotes an actively-viewed site and
+        # the next request answers 403 InvalidObjectState.
+        catalog.record_object_access(item.id)
+        conn.commit()
         headers, status_code = _site_headers(catalog, item, status_code)
         if request.method == "HEAD":
             conn.close()

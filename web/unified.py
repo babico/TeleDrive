@@ -67,6 +67,15 @@ def main():
     # Two servers: WebUI and S3 get INDEPENDENT TLS settings. The web UI
     # commonly stays plain HTTP behind a reverse proxy (storage.trusted_
     # proxy) while the S3 listener serves direct TLS, or vice versa.
+    #
+    # Proxy headers are honored ONLY when the deployment declares a trusted
+    # proxy: otherwise a direct client could rewrite its own apparent address
+    # (and the scheme) with a header. With the flag set the operator has
+    # declared the fronting hop trusted, so X-Forwarded-* from any address is
+    # accepted; the application's own throttle key still picks the leftmost
+    # public address.
+    proxy_options = ({"proxy_headers": True, "forwarded_allow_ips": "*"}
+                     if webapp.TRUSTED_PROXY else {})
     import asyncio
     web_socket = _bind(host, service.web_port)
     s3_socket = _bind(host, service.s3_port)
@@ -75,12 +84,14 @@ def main():
         workers=1, lifespan="on", server_header=False,
         ssl_certfile=webapp.SSL_CERTFILE or None,
         ssl_keyfile=webapp.SSL_KEYFILE or None,
+        **proxy_options,
     ))
     s3_server = uvicorn.Server(uvicorn.Config(
         service, host=host, port=service.s3_port,
         workers=1, lifespan="off", server_header=False,
         ssl_certfile=webapp.S3_SSL_CERTFILE or None,
         ssl_keyfile=webapp.S3_SSL_KEYFILE or None,
+        **proxy_options,
     ))
     # One server owns the signal handlers; the second must not install
     # its own in the same event loop.

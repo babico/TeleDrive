@@ -152,6 +152,39 @@ def test_login_brute_force_throttling(authenv):
     assert r.status_code == 429
 
 
+def test_forwarded_for_is_ignored_without_trusted_proxy(authenv, monkeypatch):
+    """A direct client must not mint its own throttle bucket with a header."""
+    monkeypatch.setattr(web, "TRUSTED_PROXY", False)
+    client = authenv["client"]
+    for index in range(5):
+        r = client.post("/api/auth/login", headers={
+            **CSRF, "X-Forwarded-For": f"8.8.8.{index + 1}"},
+            json={"username": "admin", "password": "wrong"})
+        assert r.status_code == 401
+    # The header was ignored, so the local client address is still blocked.
+    assert client.post("/api/auth/login", headers={
+        **CSRF, "X-Forwarded-For": "8.8.8.99"},
+        json={"username": "admin", "password": "admin-password-1"}
+    ).status_code == 429
+
+
+def test_trusted_proxy_keys_the_throttle_by_forwarded_client(authenv, monkeypatch):
+    """Behind a trusted proxy, distinct clients get distinct buckets."""
+    monkeypatch.setattr(web, "TRUSTED_PROXY", True)
+    client = authenv["client"]
+
+    def attempt(address: str):
+        return client.post("/api/auth/login", headers={
+            **CSRF, "X-Forwarded-For": address},
+            json={"username": "admin", "password": "wrong"})
+
+    for _ in range(5):
+        assert attempt("8.8.4.4").status_code == 401
+    assert attempt("8.8.4.4").status_code == 429
+    # One attacker behind the proxy does not lock out everyone else.
+    assert attempt("1.1.1.1").status_code == 401
+
+
 def test_disabled_user_cannot_login(authenv):
     r = _login(authenv["client"], "disableduser", "disabled-password-1")
     assert r.status_code == 403
@@ -1282,6 +1315,20 @@ def test_logs_websocket_stream(authenv):
     with pytest.raises(Exception):
         with client.websocket_connect("/api/v1/logs/stream") as ws:
             ws.receive_text()
+
+    # Viewer handshake: the log stream is admin-only exactly like the
+    # REST /api/v1/logs twin, so the socket must close with 4403 (not
+    # 101) before any backlog byte is sent.
+    viewer_login = _login(client, "viewuser", "viewer-password-1")
+    assert viewer_login.status_code == 200
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect(
+                "/api/v1/logs/stream",
+                cookies={"teledrive_session": client.cookies.get(
+                    "teledrive_session", "")}) as ws:
+            ws.receive_text()
+    assert excinfo.value.code == 4403
 
 
 def test_storage_usage_series(authenv):

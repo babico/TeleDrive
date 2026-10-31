@@ -165,6 +165,40 @@ def require_api_scope(required: str):
     return check
 
 
+def client_identity(request: Request) -> str:
+    """The remote identity brute-force and share throttles key on.
+
+    ``request.client.host`` is the proxy's address behind a reverse
+    proxy, so every browser behind it would share one bucket -- one
+    attacker could lock the admin login out for the whole deployment.
+    When the deployment declares ``TRUSTED_PROXY``, the leftmost valid
+    public IP in X-Forwarded-For is used instead. Without the flag the
+    header is ignored entirely: an untrusted client must not be able to
+    mint or dodge throttle buckets by sending a header.
+    """
+    import ipaddress
+
+    from web.app import TRUSTED_PROXY
+    if TRUSTED_PROXY:
+        for entry in request.headers.get("x-forwarded-for", "").split(","):
+            candidate = entry.strip()
+            if candidate.startswith("[") and "]" in candidate:
+                # Bracketed IPv6 with an optional :port suffix.
+                candidate = candidate[1:candidate.index("]")]
+            elif candidate.count(":") == 1:
+                # IPv4 with a :port suffix.
+                candidate = candidate.rsplit(":", 1)[0]
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            # Private/reserved entries are the proxy chain's own hops;
+            # the client address the deployment wants is a public one.
+            if address.is_global:
+                return candidate
+    return request.client.host if request.client else "-"
+
+
 def _same_origin(request: Request) -> None:
     if request.headers.get("x-teledrive-csrf") != "1":
         raise HTTPException(403, "Missing CSRF protection header")

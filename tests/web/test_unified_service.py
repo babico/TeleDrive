@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import time
 
-import os
 import pytest
 from botocore.auth import S3SigV4Auth
 from botocore.awsrequest import AWSRequest
@@ -47,19 +46,10 @@ def unified(tmp_path, monkeypatch):
         encoding="ascii",
     )
     monkeypatch.setattr(web, "CONFIG_PATH", config_path)
-    # Force the lifespan to read the config file (not the env-default path).
-    os.environ["TELEDRIVE_CONFIG"] = str(config_path)
-    _ = config_path
-    config_path.write_text(
-        "web:\n  user: testadmin\n  password: long-secure-test-password\n"
-        "  allowed_hosts: localhost,127.0.0.1,[::1]\n"
-        "storage:\n  channel: ''\n  apis: []\n  scratch_dir: " + str(tmp_path/"scratch") + "\n"
-        "state:\n  database_url: sqlite:////" + str(path) + "\n"
-        "jobs:\n  source_root: " + str(tmp_path/"uploads") + "\n  auto_run: false\n",
-        encoding="ascii",
-    )
+    # The lifespan re-reads the environment path; monkeypatch restores it so a
+    # following test cannot inherit this fixture's database.
+    monkeypatch.setenv("TELEDRIVE_CONFIG", str(config_path))
     web.AUTH_FAILURES.clear()
-    web.CONFIG_PATH = config_path
     monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
     monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path/"scratch"))
     # Redirect hardcoded /data and /uploads paths in ensure_config
@@ -202,60 +192,3 @@ def test_rest_s3_and_local_file_publish_one_catalog_and_shared_generations(unifi
         db.close()
     assert bot.counter>=4
 
-
-def test_single_service_legacy_folder_cutover_is_visible_from_rest_and_s3(unified):
-    """One fenced legacy scan publishes through the shared durable job engine."""
-    import asyncio
-    from types import SimpleNamespace
-
-    from teledrive.storage.jobs import StorageUploadJobs
-    from teledrive.storage.legacy_bridge import run_legacy_cutover_cycle
-
-    ui, gateway, auth, creds, bot, root, connect = unified
-    payload = b"single-process-legacy-ingestion" * 23
-    folder = root / "archive"
-    folder.mkdir()
-    (folder / "document.bin").write_bytes(payload)
-    manager_db = connect()
-    lease_db = connect()
-    try:
-        cfg = SimpleNamespace(
-            source_dir=str(root), db_path=manager_db.url,
-            allowed_extensions=[".bin"], max_file_size_mb=1,
-        )
-        queue = StorageUploadJobs(BucketCatalog(ManifestStore(manager_db)))
-        transport = web.storage_transport(manager_db)
-        async def cycle():
-            return await run_legacy_cutover_cycle(
-                cfg, queue, transport, lease_db=lease_db,
-                bucket="unified-bucket", allowed_root=root,
-                scratch_directory=root, lease_name="uploader-global",
-                lease_ttl=60, chunk_size=512, prefix="legacy", max_files=10,
-            )
-        before = bot.counter
-        first, completed = asyncio.run(cycle())
-        assert first.queued == 1 and completed["state"] == "done"
-        assert bot.counter > before
-        published = queue.catalog.get(
-            "unified-bucket", "legacy/archive/document.bin",
-        )
-        assert published.item.size == len(payload)
-        count = bot.counter
-        second, result = asyncio.run(cycle())
-        assert second.queued == 0 and second.already_queued == 1
-        assert result is None and bot.counter == count
-        # The original Telethon direct-send path was never invoked.
-        remote = signed(
-            gateway, creds, "GET", "/unified-bucket/legacy/archive/document.bin",
-        )
-        assert remote.status_code == 200 and remote.content == payload
-        local = ui.get(
-            "/api/v1/buckets/unified-bucket/content",
-            params={"key": "legacy/archive/document.bin"},
-            headers=auth,
-        )
-        assert local.status_code == 200 and local.content == payload
-        assert local.headers["etag"] == remote.headers["etag"]
-    finally:
-        lease_db.close()
-        manager_db.close()

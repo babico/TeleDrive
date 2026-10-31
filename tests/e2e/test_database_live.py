@@ -1107,7 +1107,7 @@ def test_reindex_candidate_query_returns_the_same_rows_on_live_sql(env_name):
     from teledrive.storage.catalog import BucketCatalog
     from teledrive.storage.catalog_tables import heads
     from teledrive.storage.manifest import ManifestStore, objects
-    from web.routers.buckets import _reindex_candidates
+    from teledrive.storage.content_index import reindex_candidates
 
     url = os.getenv(env_name)
     if not url:
@@ -1132,7 +1132,7 @@ def test_reindex_candidate_query_returns_the_same_rows_on_live_sql(env_name):
             if not key.endswith(".png"):  # not a searchable text extension
                 wanted.append((identifier, key))
         db.commit()
-        rows = _reindex_candidates(db, 50)
+        rows = reindex_candidates(db, 50)
         found = {(row[0], row[2]) for row in rows if row[1] == bucket}
         assert found == set(wanted), (
             "text extensions were not recognised on this backend")

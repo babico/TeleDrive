@@ -19,6 +19,8 @@ import logging
 import time
 from pathlib import Path
 
+from sqlalchemy import text
+
 _logger = logging.getLogger(__name__)
 
 # Extension-gated extraction: the same text family the UI previews.
@@ -31,6 +33,40 @@ TEXT_EXTENSIONS = frozenset({
 
 # Cap extracted text: snippets stay meaningful and rows stay small.
 MAX_INDEX_BYTES = 512 * 1024
+
+# Backfill filter. The candidate list is bounded, so it selects CURRENT heads
+# that are not indexed yet and whose key has an extractable extension.
+#
+# The extension predicate is generated from TEXT_EXTENSIONS -- the SAME set
+# extraction uses -- so the backfill cannot drift from upload-time indexing
+# (it used to hardcode ten extensions while extraction supported every entry
+# below). Placeholders are generated from that module constant; every value
+# is bound. `LIKE '%.' || :ext` is NOT used: `||` is string concatenation on
+# PostgreSQL but logical OR on MySQL, which silently degraded the predicate
+# there to `LIKE '%.'` and made the backfill see almost no candidates.
+_EXTENSION_ORDER = tuple(sorted(TEXT_EXTENSIONS))
+_EXTENSION_PLACEHOLDERS = " OR ".join(
+    f"o.object_key LIKE :ext_{index}"
+    for index in range(len(_EXTENSION_ORDER)))
+_REINDEX_SQL_TEXT = (
+    "SELECT o.id, o.bucket, o.object_key FROM storage_objects o "  # nosec B608
+    "JOIN storage_object_heads h ON h.object_id = o.id "
+    "WHERE o.status = 'ready' AND o.size > 0 "
+    "AND NOT EXISTS (SELECT 1 FROM object_content_index c "
+    "WHERE c.object_id = o.id) "
+    f"AND ({_EXTENSION_PLACEHOLDERS}) "
+    "LIMIT :n"
+)
+_REINDEX_CANDIDATE_SQL = text(_REINDEX_SQL_TEXT)
+
+
+def reindex_candidates(database, limit: int) -> list[tuple]:
+    """Current, unindexed, text-extractable heads, bounded by ``limit``."""
+    params = {f"ext_{index}": f"%.{name}"
+              for index, name in enumerate(_EXTENSION_ORDER)}
+    params["n"] = limit
+    return list(database.connection.execute(
+        _REINDEX_CANDIDATE_SQL, params).fetchall())
 
 
 def extract_text(path: Path, key: str) -> str | None:

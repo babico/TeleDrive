@@ -725,6 +725,16 @@ def test_concurrent_durable_job_claim_single_winner_on_live_sql(env_name, tmp_pa
     connection = connect_database(url)
     now = int(time.time())
     try:
+        # Hermetic: claim_next takes the OLDEST eligible job in the whole
+        # table, so any job left behind by an earlier run -- including one
+        # whose lease has not expired, because claim_next also adopts those
+        # -- would be claimed here and the race would prove nothing. The job
+        # table is the only shared mutable state this test depends on, and
+        # this file runs sequentially, so start from empty.
+        from sqlalchemy import delete
+        from teledrive.storage.jobs import jobs as jobs_table
+        connection.connection.execute(delete(jobs_table))
+        connection.commit()
         bucket = "ci-" + uuid4().hex[:20]
         queue = StorageUploadJobs(BucketCatalog(ManifestStore(connection)))
         queue.catalog.create_bucket(bucket, now)

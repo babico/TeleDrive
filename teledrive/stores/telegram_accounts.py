@@ -21,9 +21,50 @@ from __future__ import annotations
 import time
 
 from sqlalchemy import delete, insert, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from teledrive.db import flood_waits, telegram_channels, telegram_sessions
+
+# ---------------------------------------------------------------------------
+# Deadlock recovery
+#
+# "UPDATE first, INSERT if missing" is the portable upsert shape, but on
+# MySQL/InnoDB an UPDATE that matches no row still takes a gap lock. Two
+# sessions racing the same new account therefore both hold a shared gap lock
+# and then both ask for an insert lock on the same gap: InnoDB picks a victim
+# and raises 1213 rather than letting one wait. InnoDB rolls the victim's
+# whole transaction back, so the correct response is to run the sequence
+# again -- by then the winner has committed and the UPDATE lands on a real
+# row. PostgreSQL reports the same situation as 40P01/40001.
+#
+# Retrying is bounded: a persistent conflict is a real problem, not a coin
+# flip, and silently looping on it would turn a bug into a hang.
+# ---------------------------------------------------------------------------
+_RETRYABLE_DB_CODES = frozenset({1205, 1213})  # MySQL lock-wait / deadlock
+_RETRYABLE_PG_CODES = frozenset({"40P01", "40001"})
+
+
+def _is_retryable_conflict(exc: OperationalError) -> bool:
+    original = getattr(exc, "orig", None)
+    args = getattr(original, "args", ()) or ()
+    if args and isinstance(args[0], int) and args[0] in _RETRYABLE_DB_CODES:
+        return True
+    return getattr(original, "pgcode", None) in _RETRYABLE_PG_CODES
+
+
+def _write_with_deadlock_retry(db, operation, *, attempts: int = 3):
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except OperationalError as exc:
+            if attempt + 1 >= attempts or not _is_retryable_conflict(exc):
+                raise
+            # The backend already discarded the victim transaction; rolling
+            # back here only resets our own wrapper state.
+            db.connection.rollback()
+            time.sleep(0.02 * (attempt + 1))
+    raise AssertionError("unreachable: the loop returns or raises")
+
 
 # api_id is metadata (the numeric app id), not a credential: only api_hash
 # and session_string are secrets, and those are what the listing excludes.
@@ -80,6 +121,11 @@ def upsert_session(db, *, api_id: int, api_hash: str, session_string: str,
     Portable by construction: UPDATE first, INSERT only when the row is
     missing, and let the unique account constraint catch a concurrent
     creator (the caller retries the update).
+
+    Two concurrent creators of the *same new* account deadlock on InnoDB's
+    gap locks rather than converging through the constraint, so the whole
+    sequence is retried when the backend reports a deadlock (see
+    ``_write_with_deadlock_retry``).
     """
     now = int(time.time()) if now is None else now
     values = {
@@ -93,24 +139,28 @@ def upsert_session(db, *, api_id: int, api_hash: str, session_string: str,
         values["channel"] = channel
     if strategy is not None:
         values["strategy"] = strategy
-    changed = db.connection.execute(
-        update(telegram_sessions)
-        .where(telegram_sessions.c.account == account)
-        .values(**values)
-    )
-    if changed.rowcount == 0:
-        try:
-            db.connection.execute(insert(telegram_sessions).values(
-                account=account, created_at=now, **values))
-        except IntegrityError:
-            # Lost a race: the unique account constraint rejected our INSERT,
-            # so the row exists now -- apply the update instead.
-            db.connection.rollback()
-            db.connection.execute(
-                update(telegram_sessions)
-                .where(telegram_sessions.c.account == account)
-                .values(**values))
-    db.commit()
+
+    def attempt() -> None:
+        changed = db.connection.execute(
+            update(telegram_sessions)
+            .where(telegram_sessions.c.account == account)
+            .values(**values)
+        )
+        if changed.rowcount == 0:
+            try:
+                db.connection.execute(insert(telegram_sessions).values(
+                    account=account, created_at=now, **values))
+            except IntegrityError:
+                # Lost a race: the unique account constraint rejected our
+                # INSERT, so the row exists now -- apply the update instead.
+                db.connection.rollback()
+                db.connection.execute(
+                    update(telegram_sessions)
+                    .where(telegram_sessions.c.account == account)
+                    .values(**values))
+        db.commit()
+
+    _write_with_deadlock_retry(db, attempt)
 
 
 def delete_session(db, account: str) -> bool:
@@ -289,9 +339,22 @@ def upsert_channel_by_channel_id(db, *, name: str, channel_id: str,
     """Create the channel, or update the row that already has this channel_id.
 
     Portable: no `RETURNING` (MySQL has none), so the id is read back after
-    the write.
+    the write. Concurrent creators converge through the unique channel_id
+    constraint; InnoDB can report that convergence as a deadlock, so the
+    sequence is retried like upsert_session.
     """
     now = int(time.time()) if now is None else now
+
+    def attempt() -> int:
+        return _upsert_channel_once(
+            db, name=name, channel_id=channel_id, strategy=strategy,
+            scratch_dir=scratch_dir, active=active, now=now)
+
+    return _write_with_deadlock_retry(db, attempt)
+
+
+def _upsert_channel_once(db, *, name: str, channel_id: str, strategy: str,
+                         scratch_dir: str, active: bool, now: int) -> int:
     existing = db.connection.execute(
         select(telegram_channels.c.id)
         .where(telegram_channels.c.channel_id == str(channel_id))

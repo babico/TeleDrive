@@ -210,19 +210,6 @@ def list_channels(db, *, active_only: bool = False) -> list[dict]:
     return [dict(row) for row in db.connection.execute(statement).mappings()]
 
 
-def get_channel(db, channel_id: int) -> dict | None:
-    row = db.connection.execute(
-        select(telegram_channels.c.id, telegram_channels.c.name,
-               telegram_channels.c.channel_id, telegram_channels.c.strategy,
-               telegram_channels.c.scratch_dir,
-               telegram_channels.c.is_active, telegram_channels.c.created_at,
-               telegram_channels.c.updated_at)
-        .where(telegram_channels.c.id == channel_id)
-        .limit(1)
-    ).mappings().first()
-    return dict(row) if row is not None else None
-
-
 def create_channel(db, *, name: str, channel_id: str, strategy: str,
                    scratch_dir: str, now: int | None = None) -> int:
     now = int(time.time()) if now is None else now
@@ -252,13 +239,6 @@ def activate_channel(db, channel_id: int, now: int | None = None) -> None:
         update(telegram_channels)
         .where(telegram_channels.c.id == channel_id)
         .values(is_active=1, updated_at=now))
-    db.commit()
-
-
-def deactivate_all_channels(db, now: int | None = None) -> None:
-    now = int(time.time()) if now is None else now
-    db.connection.execute(update(telegram_channels).values(
-        is_active=0, updated_at=now))
     db.commit()
 
 

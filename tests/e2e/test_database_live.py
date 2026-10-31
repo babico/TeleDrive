@@ -1090,3 +1090,51 @@ def test_live_sql_flood_observed_after_another_process_reserves_slot(env_name):
     finally:
         after.close()
         before.close()
+
+@pytest.mark.parametrize("env_name", ["DB_TEST_POSTGRES_URL", "DB_TEST_MYSQL_URL"])
+def test_reindex_candidate_query_returns_the_same_rows_on_live_sql(env_name):
+    """The reindex filter must not depend on a backend-specific operator.
+
+    It used `o.object_key LIKE '%.' || :ext` per extension. `||` is string
+    concatenation on PostgreSQL but logical OR on MySQL (PIPES_AS_CONCAT is
+    off by default), so MySQL silently returned a wrong, near-empty candidate
+    set -- no error, no log, just a reindex that never saw the files. The
+    query now binds `%.ext` patterns built in Python; this pins that both
+    servers agree.
+    """
+    from uuid import uuid4
+    from sqlalchemy import insert
+    from teledrive.storage.catalog import BucketCatalog
+    from teledrive.storage.catalog_tables import heads
+    from teledrive.storage.manifest import ManifestStore, objects
+    from web.routers.buckets import _reindex_candidates
+
+    url = os.getenv(env_name)
+    if not url:
+        pytest.skip(f"{env_name} not configured")
+    db = connect_database(url)
+    now = int(time.time())
+    bucket = "ci-" + uuid4().hex[:20]
+    try:
+        catalog = BucketCatalog(ManifestStore(db))
+        catalog.create_bucket(bucket, now)
+        wanted = []
+        for key, size in (("notes.txt", 12), ("data.csv", 3),
+                          ("picture.png", 9)):
+            identifier = str(uuid4())
+            db.connection.execute(insert(objects).values(
+                id=identifier, bucket=bucket, object_key=key,
+                status="ready", size=size, sha256="a" * 64,
+                created_at=now, updated_at=now))
+            db.connection.execute(insert(heads).values(
+                bucket=bucket, key_hash=catalog._keyhash(key),
+                object_id=identifier, generation=1, updated_at=now))
+            if not key.endswith(".png"):  # not a searchable text extension
+                wanted.append((identifier, key))
+        db.commit()
+        rows = _reindex_candidates(db, 50)
+        found = {(row[0], row[2]) for row in rows if row[1] == bucket}
+        assert found == set(wanted), (
+            "text extensions were not recognised on this backend")
+    finally:
+        db.close()

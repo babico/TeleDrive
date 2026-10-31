@@ -83,10 +83,9 @@ def test_exactly_one_channel_is_active(db):
     assert [c["id"] for c in active] == [second], (
         "activating one channel must deactivate the other")
 
-    store.deactivate_all_channels(db, now=5)
+    # Deleting the active channel leaves the other row in place (rows are
+    # kept until the operator removes them, never silently cascaded).
+    assert store.delete_channel(db, second) is True
     assert store.list_channels(db, active_only=True) == []
-    assert len(store.list_channels(db)) == 2, "rows are kept, not deleted"
-
-    assert store.get_channel(db, first)["name"] == "one"
+    assert [c["id"] for c in store.list_channels(db)] == [first]
     assert store.delete_channel(db, first) is True
-    assert store.get_channel(db, first) is None

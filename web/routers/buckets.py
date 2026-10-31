@@ -23,7 +23,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select as _sa_select
+from sqlalchemy import select as _sa_select, text
 
 from teledrive.s3.credentials import S3CredentialStore
 from teledrive.s3.website import (
@@ -768,6 +768,41 @@ def admin_search_objects(q: str = Query(..., min_length=1, max_length=256),
         conn.close()
 
 
+# Raw by design: a single read-only candidate query with a LIKE-OR chain and
+# a NOT EXISTS; it mutates nothing and no other caller needs the same shape.
+#
+# The extension pattern is built in PYTHON and bound, not concatenated in SQL.
+# `||` is string concatenation on PostgreSQL but logical OR on MySQL
+# (PIPES_AS_CONCAT is off by default), so `LIKE '%.' || :txt` silently
+# degenerated to `LIKE '%.' OR 'txt'` there -- a wrong, near-empty candidate
+# set with no error. Bound `%.ext` patterns behave identically on PostgreSQL,
+# MySQL and SQLite, and tests/e2e/test_database_live.py exercises this exact
+# function against the real servers.
+_REINDEX_EXTENSIONS = ("txt", "json", "csv", "md", "log", "yaml", "yml",
+                       "xml", "py", "conf")
+_REINDEX_CANDIDATE_SQL = text(
+    "SELECT o.id, o.bucket, o.object_key FROM storage_objects o "
+    "JOIN storage_object_heads h ON h.object_id = o.id "
+    "WHERE o.status = 'ready' AND o.size > 0 "
+    "AND NOT EXISTS (SELECT 1 FROM object_content_index c "
+    "WHERE c.object_id = o.id) "
+    "AND (o.object_key LIKE :ext_txt "
+    "OR o.object_key LIKE :ext_json OR o.object_key LIKE :ext_csv "
+    "OR o.object_key LIKE :ext_md OR o.object_key LIKE :ext_log "
+    "OR o.object_key LIKE :ext_yaml OR o.object_key LIKE :ext_yml "
+    "OR o.object_key LIKE :ext_xml OR o.object_key LIKE :ext_py "
+    "OR o.object_key LIKE :ext_conf) "
+    "LIMIT :n"
+)
+
+
+def _reindex_candidates(conn, limit: int):
+    """Current, unindexed, text-extractable heads, bounded by ``limit``."""
+    params = {f"ext_{name}": f"%.{name}" for name in _REINDEX_EXTENSIONS}
+    params["n"] = limit
+    return conn.connection.execute(_REINDEX_CANDIDATE_SQL, params).fetchall()
+
+
 @router.post("/api/v1/admin/storage/search/reindex", tags=["Object catalog"],
           summary="Index file contents of existing objects (backfill)")
 async def reindex_object_contents(request: Request,
@@ -786,25 +821,7 @@ async def reindex_object_contents(request: Request,
     try:
         from teledrive.storage.content_index import (
             MAX_INDEX_BYTES, extract_text, index_object_content)
-        # Raw by design: a single read-only candidate query with a portable
-        # LIKE-OR chain and a NOT EXISTS; it mutates nothing and no other
-        # caller needs the same shape.
-        from sqlalchemy import text as _text
-        candidates = conn.connection.execute(_text(
-            "SELECT o.id, o.bucket, o.object_key FROM storage_objects o "
-            "JOIN storage_object_heads h ON h.object_id = o.id "
-            "WHERE o.status = 'ready' AND o.size > 0 "
-            "AND NOT EXISTS (SELECT 1 FROM object_content_index c "
-            "WHERE c.object_id = o.id) "
-            "AND (o.object_key LIKE '%.' || :txt OR o.object_key LIKE '%.' || :json "
-            "OR o.object_key LIKE '%.' || :csv OR o.object_key LIKE '%.' || :md "
-            "OR o.object_key LIKE '%.' || :log OR o.object_key LIKE '%.' || :yaml "
-            "OR o.object_key LIKE '%.' || :yml OR o.object_key LIKE '%.' || :xml "
-            "OR o.object_key LIKE '%.' || :py OR o.object_key LIKE '%.' || :conf) "
-            "LIMIT :n"
-        ), {"txt": "txt", "json": "json", "csv": "csv", "md": "md",
-            "log": "log", "yaml": "yaml", "yml": "yml", "xml": "xml",
-            "py": "py", "conf": "conf", "n": limit}).fetchall()
+        candidates = _reindex_candidates(conn, limit)
         if not candidates:
             return {"ok": True, "indexed": 0, "candidates": 0}
         transport = _webapp().storage_transport(conn)

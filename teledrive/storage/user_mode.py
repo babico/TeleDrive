@@ -487,8 +487,13 @@ class UserSessionRuntime:
     def advance(self) -> str:
         """Move to the next credential set and return its account label."""
         if not self._labels:
-            # Legacy single-client wiring without start(): no rotation.
-            return self.account
+            # Every caller advances only after checking that labels exist.
+            # Reaching here means the runtime was never started, and silently
+            # returning an account label (which used to be None) would only
+            # defer the failure to the journal, which then raises a cryptic
+            # "Invalid MTProto upload intent".
+            raise RuntimeError(
+                "MTProto credential sets are not loaded: call start() first")
         self._index = (self._index + 1) % len(self._labels)
         self.account = self._labels[self._index]
         self.client = self._sets[self.account][0]
@@ -729,6 +734,12 @@ class UnifiedUserTransport:
 
         size = path.stat().st_size
         chat_id = self.runtime.chat_id
+        if chat_id is None:
+            # A transport that was never started has no target channel; fail
+            # with the actual cause instead of letting journal.start() raise
+            # "Invalid MTProto upload intent" further down.
+            raise RuntimeError(
+                "MTProto transport is not started: call start() before upload")
         # One or more authorized credential sets share the SAME channel.
         # A definite flood-wait proves the send was REJECTED, so the failed
         # set's intent is cleared and the next set retries with its own

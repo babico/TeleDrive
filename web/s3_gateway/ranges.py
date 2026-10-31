@@ -22,12 +22,18 @@ def _range(value: str | None, size: int) -> tuple[int, int, bool]:
     if value is None:
         return 0, size, False
     import re
-    # Same digit bound as the REST path: an over-long integer raises before
-    # any comparison and would escape as a 500 instead of InvalidRange.
+    # The digit bound keeps int() cheap and cannot overflow; it is not a
+    # validity rule.
     match = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", value.strip())
-    if not match or not (match.group(1) or match.group(2)) or size <= 0:
-        raise SigV4Error("InvalidRange", "Unsupported byte range")
+    if not match or not (match.group(1) or match.group(2)):
+        # AWS IGNORES a Range it cannot parse -- multiple ranges, another
+        # unit, junk, an absurdly long integer -- and serves the whole object
+        # with 200. 416 is for a syntactically valid range that cannot be
+        # satisfied, which is the branch below.
+        return 0, size, False
     first, last = match.groups()
+    if size <= 0:
+        raise SigV4Error("InvalidRange", "Unsatisfiable byte range")
     if first:
         start = int(first)
         end = min(int(last) + 1, size) if last else size

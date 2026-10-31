@@ -110,11 +110,16 @@ def test_public_site_refuses_sse_c_and_archived_objects(service):
     assert b"cold-bytes" not in served.content
 
 
-def test_an_over_long_range_header_is_416_not_500(service):
-    """int() refuses a 5000-digit literal; the ValueError escaped as a 500."""
+def test_an_over_long_range_header_serves_the_whole_object(service):
+    """int() refuses a 5000-digit literal; it must never become a 500.
+
+    AWS ignores a Range it cannot parse and answers 200 with the full body,
+    and 416 is reserved for a valid-but-unsatisfiable range.
+    """
     main = service[1]
     assert signed(service, "PUT", f"/{BUCKET}").status_code == 200
     assert signed(service, "PUT", f"/{BUCKET}/r.bin", b"0123456789").status_code == 200
     response = signed(service, "GET", f"/{BUCKET}/r.bin",
                       extra_headers={"range": "bytes=" + "9" * 5000 + "-"})
-    assert response.status_code == 416, response.text
+    assert response.status_code == 200, response.text
+    assert response.content == b"0123456789"

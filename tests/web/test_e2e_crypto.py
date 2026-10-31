@@ -81,9 +81,12 @@ SCRIPT = textwrap.dedent("""
 
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_teledrive_crypto_round_trip():
+    # Resolve from the repository root: pytest may be invoked from anywhere,
+    # and a relative cwd made this the only test that only worked from ROOT.
+    root = __import__("pathlib").Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        [NODE, "-e", SCRIPT, "web/static/teledrive-crypto.js"],
-        capture_output=True, text=True, timeout=120, cwd=".",
+        [NODE, "-e", SCRIPT, str(root / "web/static/teledrive-crypto.js")],
+        capture_output=True, text=True, timeout=120, cwd=root,
     )
     assert result.returncode == 0, result.stderr
     assert "NODE_CRYPTO_OK" in result.stdout

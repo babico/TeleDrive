@@ -403,4 +403,4 @@ Six automatic GitHub Actions workflows validate each `main` commit; the seventh 
 
 ## Credits and license
 
-Originally created by [Amjad P A](https://github.com/amjadlle/TeleDrive). Maintained here as the [babico/TeleDrive fork](https://github.com/babico/TeleDrive), with Docker, multi-account, REST/S3 and recovery enhancements. Licensed under [MIT](LICENSE).
+Originally created by [Amjad P A](https://github.com/amjadlle/TeleDrive). Maintained here as the [babico/TeleDrive fork](https://github.com/babico/TeleDrive), with Docker, multi-account, REST/S3 and recovery enhancements. Licensed under the [WTFPL](LICENSE) — do what the fuck you want to.

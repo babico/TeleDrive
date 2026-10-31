@@ -10,7 +10,7 @@ from teledrive.db import connect_database
 
 
 @pytest.mark.parametrize("env_name", ["DB_TEST_POSTGRES_URL", "DB_TEST_MYSQL_URL"])
-def test_external_db_schema_queue_lease_and_account_history(env_name):
+def test_external_db_schema_and_distributed_lease(env_name):
     url = os.getenv(env_name)
     if not url:
         pytest.skip(f"{env_name} not configured")
@@ -18,28 +18,7 @@ def test_external_db_schema_queue_lease_and_account_history(env_name):
     second = connect_database(url)
     now = int(time.time())
     token = f"ci-{env_name}-{now}"
-    path = f"/uploads/{token}.bin"
     try:
-        first.insert_pending(path, 123, 1.0, now)
-        first.commit()
-
-        assert first.claim_file(path, token + "-a", now, 3600)
-        assert not second.claim_file(path, token + "-b", now, 3600)
-
-        first.mark_uploaded(path, 99, "primary", now)
-        first.set_account_state(
-            "primary", "ready", last_error=None,
-            cooldown_until=None, last_success_ts=now, now=now,
-        )
-        first.commit()
-
-        history = first.list_files("history", 200)
-        uploaded = next(row for row in history if row["path"] == path)
-        assert uploaded["tg_account"] == "primary"
-        assert uploaded["tg_message_id"] == 99
-        assert first.uploaded_counts_by_account()["primary"] >= 1
-        assert first.all_account_states()["primary"]["state"] == "ready"
-
         assert first.acquire_lease(token, "holder-a", now, 30)
         assert not second.acquire_lease(token, "holder-b", now, 30)
         assert first.renew_lease(token, "holder-a", now, 30)
@@ -49,6 +28,73 @@ def test_external_db_schema_queue_lease_and_account_history(env_name):
     finally:
         first.close()
         second.close()
+
+
+@pytest.mark.parametrize("env_name", ["DB_TEST_POSTGRES_URL", "DB_TEST_MYSQL_URL"])
+def test_external_db_concurrent_telegram_upserts_leave_one_row(env_name):
+    """Real PG/MySQL: the unique constraint makes racing logins converge.
+
+    Two workers race upsert_session / upsert_channel_by_channel_id for the
+    same account and channel_id. Without the unique index both INSERTs
+    succeed and the later listings/scrapes see phantom duplicate rows.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from uuid import uuid4
+    from sqlalchemy import func, select
+    from teledrive.db import telegram_channels, telegram_sessions
+    from teledrive.stores import telegram_accounts
+
+    url = os.getenv(env_name)
+    if not url:
+        pytest.skip(f"{env_name} not configured")
+    suffix = uuid4().hex[:16]
+    account = f"ci-account-{suffix}"
+    channel = f"ci-channel-{suffix}"
+    gate = Barrier(2)
+
+    def worker(index):
+        db = connect_database(url)
+        try:
+            gate.wait(timeout=20)
+            telegram_accounts.upsert_session(
+                db, api_id=1, api_hash="ci-hash",
+                session_string=f"ci-session-{index}", account=account,
+                now=int(time.time()))
+            telegram_accounts.upsert_channel_by_channel_id(
+                db, name=f"ci-channel-{index}", channel_id=channel,
+                strategy="round_robin", scratch_dir="/tmp",
+                now=int(time.time()))
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(worker, range(2)))
+
+    check = connect_database(url)
+    try:
+        assert check.connection.execute(
+            select(func.count()).select_from(telegram_sessions)
+            .where(telegram_sessions.c.account == account)
+        ).scalar_one() == 1
+        assert check.connection.execute(
+            select(func.count()).select_from(telegram_channels)
+            .where(telegram_channels.c.channel_id == channel)
+        ).scalar_one() == 1
+        # End the read snapshot so the cleanup DELETE runs in a fresh one.
+        check.commit()
+    finally:
+        cleanup = connect_database(url)
+        try:
+            telegram_accounts.delete_session(cleanup, account)
+            channel_row = cleanup.connection.execute(
+                select(telegram_channels.c.id)
+                .where(telegram_channels.c.channel_id == channel)).scalar_one_or_none()
+            if channel_row is not None:
+                telegram_accounts.delete_channel(cleanup, int(channel_row))
+        finally:
+            cleanup.close()
+        check.close()
 
 
 @pytest.mark.parametrize("env_name", ["DB_TEST_POSTGRES_URL", "DB_TEST_MYSQL_URL"])

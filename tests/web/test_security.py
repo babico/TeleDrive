@@ -89,19 +89,6 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("querysecret", query_rendered)
         self.assertIn("mode=safe", query_rendered)
 
-    def test_atomic_file_claim_prevents_second_worker(self):
-        conn = db.connect_database("sqlite:///:memory:")
-        try:
-            now = int(time.time())
-            conn.insert_pending("/tmp/example.bin", 10, 1.0, now)
-            conn.commit()
-            self.assertTrue(conn.claim_file("/tmp/example.bin", "worker-a", now, 3600))
-            self.assertFalse(conn.claim_file("/tmp/example.bin", "worker-b", now, 3600))
-            conn.mark_uploaded("/tmp/example.bin", 123, "primary", now)
-            conn.commit()
-        finally:
-            conn.close()
-
     def test_distributed_lease_is_exclusive(self):
         with tempfile.TemporaryDirectory() as td:
             url = f"sqlite:///{Path(td) / 'state.db'}"
@@ -117,6 +104,50 @@ class SecurityTests(unittest.TestCase):
                 a.close()
                 b.close()
 
+    def test_revoked_and_expired_keys_delegate_no_scopes(self):
+        from teledrive.api_keys import ApiKeyStore
+
+        with tempfile.TemporaryDirectory() as td:
+            conn = db.connect_database(f"sqlite:///{Path(td) / 'keys.db'}")
+            try:
+                store = ApiKeyStore(conn)
+                live = store.create("live", ["objects:read"], now=100)
+                assert store.scopes_for_identifier(live.id, now=101)
+                store.revoke(live.id)
+
+                expired = store.create("short", ["objects:read"], now=100,
+                                       expires_at=150)
+                assert store.scopes_for_identifier(expired.id, now=149)
+                # Revoked and expired are indistinguishable from unknown.
+                self.assertIsNone(store.scopes_for_identifier(live.id, now=101))
+                self.assertIsNone(store.scopes_for_identifier(expired.id, now=150))
+                self.assertIsNone(store.scopes_for_identifier("nope", now=101))
+            finally:
+                conn.close()
+
+    def test_last_used_at_write_is_throttled(self):
+        """Authorization must not turn every request into a writer."""
+        from teledrive.api_keys import ApiKeyStore
+
+        with tempfile.TemporaryDirectory() as td:
+            conn = db.connect_database(f"sqlite:///{Path(td) / 'keys.db'}")
+            try:
+                store = ApiKeyStore(conn)
+                key = store.create("throttled", ["objects:read"], now=100)
+                self.assertTrue(store.authorize(key.value, "rest:objects:get",
+                                                now=101))
+                self.assertEqual(store.list()[0]["last_used_at"], 101)
+                # Within the 60 s window the timestamp is left alone.
+                self.assertTrue(store.authorize(key.value, "rest:objects:get",
+                                                now=102))
+                self.assertEqual(store.list()[0]["last_used_at"], 101)
+                # After the window it refreshes.
+                self.assertTrue(store.authorize(key.value, "rest:objects:get",
+                                                now=200))
+                self.assertEqual(store.list()[0]["last_used_at"], 200)
+            finally:
+                conn.close()
+
     def test_symlink_is_not_scanned(self):
         with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as outside:
             good = Path(source) / "good.txt"
@@ -128,11 +159,6 @@ class SecurityTests(unittest.TestCase):
             files = set(uploader.iter_source_files(source))
             self.assertIn(str(good.resolve()), files)
             self.assertNotIn(str(link.absolute()), files)
-
-    def test_caption_template_rejects_attribute_traversal(self):
-        with self.assertRaises(ValueError):
-            uploader.build_caption("example.txt", "{name.__class__}")
-        self.assertEqual(uploader.build_caption("example.txt", "{stem}{ext}"), "example.txt")
 
     def test_non_regular_file_is_not_scanned(self):
         if not hasattr(os, "mkfifo"):

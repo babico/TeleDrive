@@ -157,8 +157,6 @@ def test_session_delete_scopes(db):
     # bob's expired token is purged; his live token survives.
     assert sessions.purge_expired(db, now=100) == 1
     assert [s["token"] for s in sessions.list_for_user(db, other)] == ["tok-4"]
-    assert sessions.delete_all(db) == 1
-    assert sessions.list_for_user(db, other) == []
 
 
 def _new_user(db, username="alice", role="admin", enabled=True):
@@ -279,20 +277,32 @@ def _indexed_object(db, key="notes.txt"):
     return object_id
 
 
-def test_content_index_ensure_get_and_delete(db):
+def _index_row(db, object_id):
+    from sqlalchemy import select
+
+    from teledrive.storage.manifest import content_index
+
+    row = db.connection.execute(
+        select(content_index.c.text, content_index.c.indexed_at)
+        .where(content_index.c.object_id == object_id)
+    ).first()
+    return dict(row._mapping) if row else None
+
+
+def test_content_index_ensure_and_delete(db):
     object_id = _indexed_object(db)
 
-    assert content_store.get(db, object_id) is None
+    assert _index_row(db, object_id) is None
     assert content_store.ensure_row(db, object_id, indexed_at=100) is True
-    row = content_store.get(db, object_id)
+    row = _index_row(db, object_id)
     assert row["text"] == "" and row["indexed_at"] == 100
 
     # Idempotent: an existing row is neither duplicated nor overwritten.
     assert content_store.ensure_row(db, object_id, indexed_at=200) is False
-    assert content_store.get(db, object_id)["indexed_at"] == 100
+    assert _index_row(db, object_id)["indexed_at"] == 100
 
     assert content_store.delete_for_object(db, object_id) == 1
-    assert content_store.get(db, object_id) is None
+    assert _index_row(db, object_id) is None
     assert content_store.delete_for_object(db, object_id) == 0
 
 
@@ -308,5 +318,209 @@ def test_content_index_search_delegates_and_delete_clears_fts(db, tmp_path):
         object_id]
     content_store.delete_for_object(db, object_id)
     assert content_store.search(db, "searchable") == []
+
+
+def test_telegram_account_and_channel_id_are_unique(db):
+    """upsert_session/upsert_channel rely on the database to reject a
+    duplicate INSERT, so the columns must actually be unique."""
+    from sqlalchemy import insert, select
+    from sqlalchemy.exc import IntegrityError
+
+    from teledrive.db import telegram_channels, telegram_sessions
+    from teledrive.stores import telegram_accounts
+
+    telegram_accounts.upsert_session(
+        db, api_id=1, api_hash="h", session_string="s", account="unique-acct",
+        now=10)
+    with pytest.raises(IntegrityError):
+        db.connection.execute(insert(telegram_sessions).values(
+            api_id=1, api_hash="h", session_string="dup", account="unique-acct",
+            created_at=10, updated_at=10))
+    db.connection.rollback()
+
+    telegram_accounts.upsert_channel_by_channel_id(
+        db, name="one", channel_id="unique-chan", strategy="round_robin",
+        scratch_dir="/tmp", now=10)
+    with pytest.raises(IntegrityError):
+        db.connection.execute(insert(telegram_channels).values(
+            name="dup", channel_id="unique-chan", strategy="round_robin",
+            scratch_dir="/tmp", is_active=0, created_at=10, updated_at=10))
+    db.connection.rollback()
+
+    assert db.connection.execute(
+        select(telegram_sessions.c.id)
+        .where(telegram_sessions.c.account == "unique-acct")).all()
+    assert len(db.connection.execute(
+        select(telegram_channels.c.id)
+        .where(telegram_channels.c.channel_id == "unique-chan")).all()) == 1
+
+
+def test_upsert_session_recovers_from_a_lost_insert_race(tmp_path):
+    """Deterministically exercise the IntegrityError recovery branch.
+
+    A concurrent creator commits between our UPDATE (rowcount 0) and our
+    INSERT, so the INSERT hits the unique account constraint. The store must
+    roll back, re-apply the UPDATE, and leave exactly one row -- not raise.
+    """
+    from types import SimpleNamespace
+
+    from sqlalchemy import insert, select
+    from sqlalchemy.sql.dml import Update
+
+    from teledrive.db import telegram_sessions
+    from teledrive.stores import telegram_accounts
+
+    url = str(tmp_path / "lost-race.sqlite")
+    real = connect_database(url)
+    rival = connect_database(url)
+
+    class RacingConnection:
+        def __init__(self):
+            self.raced = False
+
+        def execute(self, statement, *args, **kwargs):
+            if (not self.raced and isinstance(statement, Update)
+                    and statement.table.name == "telegram_sessions"):
+                self.raced = True
+                rival.connection.execute(insert(telegram_sessions).values(
+                    api_id=1, api_hash="h", session_string="rival",
+                    account="lost-race", created_at=1, updated_at=1))
+                rival.connection.commit()
+                return SimpleNamespace(rowcount=0)
+            return real.connection.execute(statement, *args, **kwargs)
+
+        def rollback(self):
+            real.connection.rollback()
+
+        def commit(self):
+            real.connection.commit()
+
+    class RacingDatabase:
+        def __init__(self):
+            self.connection = RacingConnection()
+
+        def commit(self):
+            self.connection.commit()
+
+    racing = RacingDatabase()
+    try:
+        telegram_accounts.upsert_session(
+            racing, api_id=1, api_hash="h", session_string="winner",
+            account="lost-race", now=10)
+        assert racing.connection.raced
+        rows = real.connection.execute(
+            select(telegram_sessions.c.session_string)
+            .where(telegram_sessions.c.account == "lost-race")).scalars().all()
+        assert rows == ["winner"]
+    finally:
+        real.close()
+        rival.close()
+
+
+def test_concurrent_upsert_session_and_channel_leave_one_row(tmp_path):
+    """Two racing creators of one account/channel must converge on one row."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from sqlalchemy import select
+
+    from teledrive.db import telegram_channels, telegram_sessions
+    from teledrive.stores import telegram_accounts
+
+    url = str(tmp_path / "upsert-race.sqlite")
+    observer = connect_database(url)
+    gate = Barrier(2)
+
+    def worker(index):
+        conn = connect_database(url)
+        try:
+            gate.wait(timeout=20)
+            telegram_accounts.upsert_session(
+                conn, api_id=1, api_hash="h",
+                session_string=f"session-{index}", account="race-acct", now=100)
+            telegram_accounts.upsert_channel_by_channel_id(
+                conn, name=f"chan-{index}", channel_id="race-chan",
+                strategy="round_robin", scratch_dir="/tmp", now=100)
+        finally:
+            conn.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(worker, range(2)))
+        assert len(observer.connection.execute(
+            select(telegram_sessions.c.id)
+            .where(telegram_sessions.c.account == "race-acct")).all()) == 1
+        assert len(observer.connection.execute(
+            select(telegram_channels.c.id)
+            .where(telegram_channels.c.channel_id == "race-chan")).all()) == 1
+    finally:
+        observer.close()
+
+
+def test_schema_migration_dedupes_legacy_telegram_rows(tmp_path):
+    """Step 27 keeps the newest row per account/channel before indexing.
+
+    Simulates a pre-27 database: the tables exist without the unique
+    constraint and already contain duplicates, which the old race could
+    create.
+    """
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.exc import IntegrityError
+
+    from teledrive.db import telegram_channels, telegram_sessions
+    from teledrive.storage import schema as schema_module
+
+    path = tmp_path / "legacy-telegram.sqlite"
+    engine = create_engine(f"sqlite:///{path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE telegram_sessions ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " api_id BIGINT NOT NULL, api_hash VARCHAR(128) NOT NULL,"
+            " phone VARCHAR(64), session_string TEXT NOT NULL,"
+            " account VARCHAR(128) NOT NULL DEFAULT 'mtproto-user',"
+            " channel VARCHAR(255), strategy VARCHAR(32),"
+            " created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)")
+        connection.exec_driver_sql(
+            "INSERT INTO telegram_sessions"
+            " (api_id, api_hash, session_string, account, created_at, updated_at)"
+            " VALUES (1, 'h', 'old', 'dup', 1, 10),"
+            "        (1, 'h', 'newest-a', 'dup', 1, 20),"
+            "        (1, 'h', 'newest-b', 'dup', 1, 20)")
+        connection.exec_driver_sql(
+            "CREATE TABLE telegram_channels ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name VARCHAR(128) NOT NULL, channel_id VARCHAR(255) NOT NULL,"
+            " strategy VARCHAR(32) NOT NULL DEFAULT 'round_robin',"
+            " scratch_dir VARCHAR(512), is_active INTEGER NOT NULL DEFAULT 0,"
+            " created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)")
+        connection.exec_driver_sql(
+            "INSERT INTO telegram_channels"
+            " (name, channel_id, strategy, scratch_dir, is_active,"
+            "  created_at, updated_at)"
+            " VALUES ('old', 'chan', 'round_robin', '/tmp', 0, 1, 10),"
+            "        ('newest-a', 'chan', 'round_robin', '/tmp', 0, 1, 20),"
+            "        ('newest-b', 'chan', 'round_robin', '/tmp', 0, 1, 20)")
+    engine.dispose()
+
+    schema_module.reset_process_cache()
+    db = connect_database(str(path))
+    try:
+        sessions = db.connection.execute(
+            select(telegram_sessions.c.session_string)
+            .where(telegram_sessions.c.account == "dup")).scalars().all()
+        channels = db.connection.execute(
+            select(telegram_channels.c.name)
+            .where(telegram_channels.c.channel_id == "chan")).scalars().all()
+        # Latest updated_at wins; the id tie-break keeps the lower id.
+        assert sessions == ["newest-a"]
+        assert channels == ["newest-a"]
+        with pytest.raises(IntegrityError):
+            db.connection.execute(telegram_sessions.insert().values(
+                api_id=1, api_hash="h", session_string="again", account="dup",
+                created_at=1, updated_at=1))
+        db.connection.rollback()
+    finally:
+        db.close()
 
 

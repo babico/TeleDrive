@@ -33,18 +33,6 @@ __all__ = [
 _BUCKET_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?\Z")
 
 
-def ensure_versioning_column(db) -> None:
-    """Ensure the bucket/object versioning, lock and tiering columns exist.
-
-    The defensive ALTERs moved into ``teledrive.storage.schema`` so they run
-    exactly once per schema under the cross-process migration lock instead of
-    racing between worker processes.  This wrapper keeps the old entry point.
-    """
-    from .schema import ensure_schema
-
-    ensure_schema(db.engine)
-
-
 class BucketCatalog(
         BucketAdminMixin, BucketLockMixin, BucketAclMixin, BucketVersionMixin):
     """Manage bucket names and a single current pointer per logical object key.

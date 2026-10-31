@@ -155,24 +155,6 @@ def _decode_encryption(value) -> dict | None:
     return parsed
 
 
-def ensure_encryption_column(db, table: str) -> None:
-    """Ensure the SSE-C ``encryption`` column exists (via the coordinator).
-
-    The actual ALTER lives in ``teledrive.storage.schema`` so it can never
-    run outside the cross-process migration lock.  Kept as a compatibility
-    entry point for callers that still name the column they care about.
-    """
-    from .schema import ensure_schema
-
-    ensure_schema(db.engine)
-
-
-def ensure_encryption_schema(db) -> None:
-    from .schema import ensure_schema
-
-    ensure_schema(db.engine)
-
-
 @dataclass(frozen=True)
 class ChunkReference:
     ordinal: int
@@ -285,14 +267,40 @@ class ManifestStore:
                                info.get("envelope_aad") or identifier)
 
     def raw_encryption_info(self, identifier: str) -> dict | None:
-        """Encryption marker for any object id, including a pending journal."""
-        row = self.db.connection.execute(select(
+        """Encryption marker for any object id, including a pending journal.
+
+        A server-side COPY (and a version restore) creates an alias row with
+        no marker of its own; the source's marker is the only key material.
+        Resolve through the alias chain so the copy reads with the source's
+        data key.  ``envelope_aad`` stays the id the key was wrapped for, so
+        ``envelope_key`` opens it with the source identity rather than the
+        alias identity.  Pending uploads hit their own marker on the first
+        hop, so this also works before the object is published.
+        """
+        columns = (
             object_encryption.c.mode, object_encryption.c.key_md5,
             object_encryption.c.etag, object_encryption.c.digest_kind,
             object_encryption.c.wrapped_key, object_encryption.c.key_wrap,
             object_encryption.c.envelope_aad,
-        ).where(object_encryption.c.object_id == identifier)).mappings().first()
-        return dict(row) if row is not None else None
+        )
+        current = identifier
+        visited: set[str] = set()
+        for _ in range(64):
+            row = self.db.connection.execute(select(*columns).where(
+                object_encryption.c.object_id == current
+            )).mappings().first()
+            if row is not None:
+                return dict(row)
+            if current in visited:
+                raise ManifestError("Cyclic copy alias metadata")
+            visited.add(current)
+            source = self.db.connection.execute(select(
+                object_aliases.c.source_object_id
+            ).where(object_aliases.c.object_id == current)).scalar_one_or_none()
+            if source is None:
+                return None
+            current = source
+        raise ManifestError("Copy alias chain is too deep")
 
     def encryption_info(self, identifier: str) -> dict | None:
         """Encryption marker plus response headers data, or None for plaintext."""

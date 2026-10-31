@@ -469,3 +469,50 @@ def test_collect_deletes_replica_messages_before_dropping_rows(store):
         "SELECT COUNT(*) FROM storage_replica_chunks WHERE object_id = :o"),
         {"o": oid}).scalar_one()
     assert remaining == 0
+
+
+def test_collect_reverifies_a_head_published_after_the_preview(admin):
+    """A writer that publishes over the key after the preview must fence GC.
+
+    This is the snapshot-isolation hazard from the API review: candidates()
+    and collect() share a connection, so on MySQL REPEATABLE READ / SQLite
+    WAL the re-verify could keep reading the preview's snapshot. The second
+    connection is essential here -- it publishes a LIVE head for the same key
+    after the preview and collect() must skip the now-historical version.
+    """
+    client, url, _ = admin
+    db = connect_database(url)
+    other = None
+    try:
+        cat = BucketCatalog(ManifestStore(db))
+        cat.create_bucket("gcx", int(time.time()))
+        old = int(time.time()) - 48 * 3600
+        gone, gone_message = _publish(cat, "gone.txt", size=120, now=old)
+        cat.delete_marker("gcx", "gone.txt")
+        gcx = RetainedMediaGC(db)
+        gcx.set_enabled(True, by="owner-test")
+
+        candidates = gcx.candidates(scope="deleted")
+        assert [c["object_id"] for c in candidates] == [gone]
+
+        # A second writer publishes a new LIVE head for the same key while
+        # the preview's connection is still open.
+        other = connect_database(url)
+        _publish(BucketCatalog(ManifestStore(other)), "gone.txt",
+                 size=99, now=int(time.time()))
+
+        transport = FakeTransport()
+        report = asyncio.run(gcx.collect(
+            transport, scope="deleted", chunk_refs=candidates))
+        assert report["collected"] == []
+        assert [r["object_id"] for r in report["skipped"]] == [gone]
+        assert transport.deleted == []
+        remaining = db.connection.execute(text(
+            "SELECT COUNT(*) FROM storage_chunks WHERE object_id = :oid"),
+            {"oid": gone}).scalar_one()
+        assert remaining == 1
+        assert gone_message not in [row[2] for row in transport.deleted]
+    finally:
+        if other is not None:
+            other.close()
+        db.close()

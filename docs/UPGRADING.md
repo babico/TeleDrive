@@ -446,6 +446,34 @@ attestation must not become an unverified one.
   the WebUI download button, which previously returned `200` with zero bytes.
 - An unlink of an object under legal hold or retention is `403`.
 
+### 7.9 Legacy uploader settings are no longer read
+
+The legacy direct-send scanner is gone; chunk I/O lives in the unified
+storage transport. These `upload:` keys and the legacy `telegram:` account
+keys are ignored and should be deleted from `config.yaml`:
+
+```yaml
+upload:
+  sleep_min_seconds: 60
+  sleep_max_seconds: 90
+  max_files_per_run: 12
+  max_files_per_day: 100
+  retry_attempts: 5
+  backoff_base_seconds: 10
+  floodwait_buffer_seconds: 5
+  caption_template: "{name}"
+  send_mode: "document"
+telegram:
+  api_id: 12345
+  api_hash: "..."
+  target: "me"
+```
+
+`upload.source_dir`, `upload.allowed_extensions` and
+`upload.max_file_size_mb` remain: the legacy import and cutover checks still
+use them as the source-root/allowlist filter. Account credentials come only
+from `storage.apis` (api_id/api_hash/session_file).
+
 ## 8. Post-upgrade checks
 
 1. `docker compose ps` reports the container healthy. The healthcheck uses

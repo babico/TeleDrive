@@ -16,6 +16,12 @@ from sqlalchemy.exc import IntegrityError
 
 from teledrive.db import Database
 
+# last_used_at is bookkeeping, not authorization. Writing it on every
+# request made every read a row-locking commit (an fsync per request on
+# MySQL) and could commit a caller's unrelated pending work. One write per
+# key per minute is enough for the UI's "last used" display.
+_LAST_USED_WRITE_INTERVAL_SECONDS = 60
+
 _metadata = MetaData()
 api_keys = Table(
     "api_credentials", _metadata,
@@ -210,17 +216,26 @@ class ApiKeyStore:
                 or not token.startswith("td_live_")):
             return False
         result = self.db.connection.execute(
-            select(api_keys.c.id, api_keys.c.scopes, api_keys.c.revoked, api_keys.c.expires_at)
+            select(api_keys.c.id, api_keys.c.scopes, api_keys.c.revoked,
+                   api_keys.c.expires_at, api_keys.c.last_used_at)
             .where(api_keys.c.digest == self._digest(token))
         ).first()
         if not result or result[2] or (result[3] is not None and result[3] <= now):
             return False
         if scope not in expand_scopes(json.loads(result[1])):
             return False
-        self.db.connection.execute(
-            update(api_keys).where(api_keys.c.id == result[0]).values(last_used_at=now)
-        )
-        self.db.commit()
+        last_used = result[4]
+        if last_used is None or now - int(last_used) >= _LAST_USED_WRITE_INTERVAL_SECONDS:
+            try:
+                self.db.connection.execute(
+                    update(api_keys).where(api_keys.c.id == result[0])
+                    .values(last_used_at=now)
+                )
+                self.db.commit()
+            except Exception:  # noqa: BLE001 - bookkeeping must never deny a request
+                # Discard only the failed update; authorization already
+                # succeeded, so the request continues.
+                self.db.connection.rollback()
         return True
 
     def name_for_token(self, token: str) -> str | None:
@@ -275,7 +290,8 @@ class ApiKeyStore:
             raise ValueError("Invalid API key")
         return int(row[1]) if row[1] is not None else None
 
-    def scopes_for_identifier(self, identifier: str) -> frozenset[str] | None:
+    def scopes_for_identifier(self, identifier: str, *,
+                              now: int | None = None) -> frozenset[str] | None:
         """Effective permissions of a LIVE key by id/prefix (None otherwise).
 
         Revoked and expired keys return None here, like an unknown one, so a
@@ -284,11 +300,13 @@ class ApiKeyStore:
         also bounded and ordered: a prefix could match several rows, and an
         unordered ``.first()`` made the answer depend on row order.
         """
+        now = int(time.time()) if now is None else now
         if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
             return None
         # Deterministic when a prefix is ambiguous: prefer the exact id.
         statement = (
-            select(api_keys.c.scopes)
+            select(api_keys.c.scopes, api_keys.c.revoked,
+                   api_keys.c.expires_at)
             .where((api_keys.c.id == identifier)
                    | (api_keys.c.prefix == identifier))
             .order_by(
@@ -298,7 +316,7 @@ class ApiKeyStore:
             .limit(1)
         )
         row = self.db.connection.execute(statement).first()
-        if row is None:
+        if row is None or row[1] or (row[2] is not None and row[2] <= now):
             return None
         return expand_scopes(json.loads(row[0]))
 

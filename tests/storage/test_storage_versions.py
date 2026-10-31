@@ -147,3 +147,48 @@ def test_legacy_backfill_only_indexes_live_proven_heads(admin):
         assert cat.list_versions("legacy-vers", "staged") == []
     finally:
         db.close()
+
+
+def test_publish_applies_default_lock_in_the_same_transaction(admin, monkeypatch):
+    """A crash after the head write may not leave an unlocked version.
+
+    publish() used to commit the head and only then call apply_default_lock.
+    Between those statements a COMPLIANCE-retained version had no retention
+    row, so delete_version would happily revoke it. Simulate a process death
+    immediately after the commit returns: the version must either not exist
+    or exist WITH its retention row.
+    """
+    import pytest
+    from sqlalchemy import text
+
+    client, path, _ = admin
+    now = int(time.time())
+    conn = connect_database(path)
+    try:
+        cat = BucketCatalog(ManifestStore(conn))
+        cat.create_bucket("worm-bucket", now)
+        cat.set_object_lock_config("worm-bucket", mode="COMPLIANCE", days=1)
+        ident = cat.manifests.begin("worm-bucket", "locked.bin", 0, now)
+        cat.manifests.finish(ident, hashlib.sha256(b"").hexdigest(), now)
+
+        real_commit = cat.db.commit
+
+        def crash_after_commit():
+            real_commit()
+            raise RuntimeError("simulated death after commit")
+
+        monkeypatch.setattr(cat.db, "commit", crash_after_commit)
+        with pytest.raises(RuntimeError, match="simulated death"):
+            cat.publish(ident, now=now)
+
+        head = cat.db.connection.execute(text(
+            "SELECT object_id FROM storage_object_heads "
+            "WHERE bucket = 'worm-bucket'")).first()
+        retention = cat.db.connection.execute(text(
+            "SELECT retention_mode, retention_until_ns FROM storage_objects "
+            "WHERE id = :o"), {"o": ident}).first()
+        if head is not None:
+            assert retention[0] == "COMPLIANCE"
+            assert retention[1] is not None and int(retention[1]) > time.time_ns()
+    finally:
+        conn.close()

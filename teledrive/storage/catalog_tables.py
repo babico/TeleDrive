@@ -21,8 +21,8 @@ buckets = Table(
     Column("name", String(63), primary_key=True),
     Column("created_at", BigInteger, nullable=False),
     # Phase B of the metadata parity plan: AWS-shaped bucket versioning
-    # states. Pre-existing deployments get the column via a defensive
-    # ALTER (see ensure_versioning_column).
+    # states. Pre-existing deployments get the column via the schema
+    # coordinator's ALTER TABLE.
     Column("versioning_state", String(16), nullable=False,
            server_default="Enabled"),
     # Phase C: object lock. One-way enable (AWS semantics): once a

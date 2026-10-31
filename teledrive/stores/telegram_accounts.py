@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 
 from sqlalchemy import delete, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from teledrive.db import flood_waits, telegram_channels, telegram_sessions
 
@@ -101,8 +102,9 @@ def upsert_session(db, *, api_id: int, api_hash: str, session_string: str,
         try:
             db.connection.execute(insert(telegram_sessions).values(
                 account=account, created_at=now, **values))
-        except Exception:
-            # Lost a race: the row exists now, so apply the update.
+        except IntegrityError:
+            # Lost a race: the unique account constraint rejected our INSERT,
+            # so the row exists now -- apply the update instead.
             db.connection.rollback()
             db.connection.execute(
                 update(telegram_sessions)
@@ -304,9 +306,28 @@ def upsert_channel_by_channel_id(db, *, name: str, channel_id: str,
                     is_active=1 if active else 0, updated_at=now))
         db.commit()
         return int(existing)
-    identifier = create_channel(db, name=name, channel_id=channel_id,
-                                strategy=strategy, scratch_dir=scratch_dir,
-                                now=now)
+    try:
+        identifier = create_channel(db, name=name, channel_id=channel_id,
+                                    strategy=strategy, scratch_dir=scratch_dir,
+                                    now=now)
+    except IntegrityError:
+        # A concurrent creator won the INSERT; the unique channel_id
+        # constraint turned our duplicate into this error. Roll back and
+        # update the row that now exists, mirroring upsert_session.
+        db.connection.rollback()
+        identifier = int(db.connection.execute(
+            select(telegram_channels.c.id)
+            .where(telegram_channels.c.channel_id == str(channel_id))
+            .order_by(telegram_channels.c.id.desc())
+            .limit(1)
+        ).scalar_one())
+        db.connection.execute(
+            update(telegram_channels)
+            .where(telegram_channels.c.id == identifier)
+            .values(name=name, strategy=strategy, scratch_dir=scratch_dir,
+                    is_active=1 if active else 0, updated_at=now))
+        db.commit()
+        return identifier
     if active:
         activate_channel(db, identifier, now=now)
     return identifier

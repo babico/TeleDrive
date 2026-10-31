@@ -631,3 +631,57 @@ def test_replication_best_effort_survives_replica_failures(store, tmp_path):
     output = tmp_path / "out"
     execute(engine.download_to_path(item.id, output))
     assert output.read_bytes() == payload
+
+
+def test_dedup_rechecks_base_status_before_committing_the_alias(
+        store, tmp_path, monkeypatch):
+    """A GC collection between dedup lookup and alias commit must be a miss.
+
+    The lookup SELECT and the alias INSERT are not one fence: the collector
+    could collect the base in between and leave an alias whose GET raises
+    FileNotFoundError forever. The alias insert must re-verify the base in
+    the same transaction, roll back, and let the upload send real bytes.
+    """
+    from sqlalchemy import text
+    from teledrive.storage.manifest import object_aliases
+
+    backend = MemoryTelegram()
+    engine = TelegramObjectStorage(store, backend, chunk_size=4096)
+    payload = os.urandom(20_000)
+    source = tmp_path / "source"
+    source.write_bytes(payload)
+    first = execute(engine.put_file("backup", "a.bin", source))
+    uploads_after_first = backend.uploads
+
+    other = connect_database(store.db.url)
+    real_get = store.get
+    calls = {"n": 0}
+
+    def get_then_collect(identifier):
+        item = real_get(identifier)
+        if identifier == first.id:
+            calls["n"] += 1
+            # The first read is resolve_content_id's readiness hop; collect
+            # the base immediately after the dedup lookup's own get().
+            if calls["n"] == 2:
+                other.connection.execute(text(
+                    "UPDATE storage_objects SET status = 'gc-collected' "
+                    "WHERE id = :id"), {"id": identifier})
+                other.connection.commit()
+        return item
+
+    monkeypatch.setattr(store, "get", get_then_collect)
+    try:
+        second = execute(engine.put_file("other", "b.bin", source))
+    finally:
+        other.close()
+
+    assert second.id != first.id
+    assert backend.uploads > uploads_after_first, "dedup must miss and upload"
+    alias = store.db.connection.execute(select(
+        object_aliases.c.source_object_id).where(
+        object_aliases.c.object_id == second.id)).first()
+    assert alias is None, "the doomed alias must have been rolled back"
+    output = tmp_path / "out"
+    execute(engine.download_to_path(second.id, output))
+    assert output.read_bytes() == payload

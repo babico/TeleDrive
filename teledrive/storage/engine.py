@@ -184,6 +184,17 @@ class TelegramObjectStorage:
             db.connection.execute(insert(object_aliases).values(
                 object_id=identifier, source_object_id=base_id,
             ))
+            # The lookup above and this commit are not one atomic fence: the
+            # GC collector could collect the base in between and leave an
+            # alias whose every GET fails FileNotFoundError. Re-read the
+            # base status in this transaction; a collected/revoked base
+            # rolls the alias back and becomes a dedup miss.
+            status = db.connection.execute(_text(
+                "SELECT status FROM storage_objects WHERE id = :id"
+            ), {"id": base_id}).scalar_one_or_none()
+            if status != "ready":
+                db.connection.rollback()
+                return None
             db.connection.commit()
             return StoredObject(
                 id=identifier, bucket=bucket, key=key,

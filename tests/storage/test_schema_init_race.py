@@ -122,7 +122,6 @@ try:
                 "WHERE table_name = :t AND table_schema = " + schema),
                 {"t": table})}
     expected = {
-        "files": {"claim_token", "tg_account", "claim_ts"},
         "storage_buckets": {"versioning_state", "public_read",
                             "object_lock_enabled"},
         "storage_objects": {"storage_class", "legal_hold", "access_count"},

@@ -80,43 +80,50 @@ class BucketVersionMixin:
             # retires the current version WITHOUT creating a marker
             # (unversioned-style delete). Returns None so callers omit
             # the marker headers.
-            if row is None:
+            try:
+                if row is None:
+                    return None
+                # A legal hold or an open retention window forbids removing the
+                # version. The explicit-version path enforces this; the suspended
+                # branch did not, so on a lock-enabled bucket whose versioning was
+                # set to Suspended, an ordinary DELETE hid a COMPLIANCE-retained
+                # object -- recoverable bytes, but a real immutability breach.
+                lock_row = self.db.connection.execute(select(
+                    objects.c.legal_hold, objects.c.retention_until_ns,
+                ).where(objects.c.id == row[0])).first()
+                if lock_row is not None:
+                    if bool(lock_row[0]):
+                        raise PermissionError(
+                            "Object is under legal hold and cannot be deleted")
+                    if (lock_row[1] is not None
+                            and int(lock_row[1]) > time.time_ns()):
+                        raise PermissionError(
+                            "Object is under retention and cannot be deleted")
+                changed = self.db.connection.execute(delete(heads).where(
+                    heads.c.bucket == bucket, heads.c.key_hash == digest,
+                    heads.c.object_id == row[0],
+                    heads.c.generation == row[1],
+                ))
+                if changed.rowcount != 1:
+                    self.db.connection.rollback()
+                    raise ValueError("Concurrent object deletion/write")
+                self.db.connection.execute(insert(removed_versions).values(
+                    object_id=row[0], removed_ns=time.time_ns(),
+                ))
+                self._enqueue_notification(
+                    "s3:ObjectRemoved:Delete", bucket, key, version_id=row[0])
+                self._journal_metadata(
+                    "deleted", bucket, key, version_id=row[0],
+                    detail={"reason": "suspended_version_removed"})
+                self._delete_pending_tags(row[0])
+                self.db.commit()
                 return None
-            # A legal hold or an open retention window forbids removing the
-            # version. The explicit-version path enforces this; the suspended
-            # branch did not, so on a lock-enabled bucket whose versioning was
-            # set to Suspended, an ordinary DELETE hid a COMPLIANCE-retained
-            # object -- recoverable bytes, but a real immutability breach.
-            lock_row = self.db.connection.execute(select(
-                objects.c.legal_hold, objects.c.retention_until_ns,
-            ).where(objects.c.id == row[0])).first()
-            if lock_row is not None:
-                if bool(lock_row[0]):
-                    raise PermissionError(
-                        "Object is under legal hold and cannot be deleted")
-                if (lock_row[1] is not None
-                        and int(lock_row[1]) > time.time_ns()):
-                    raise PermissionError(
-                        "Object is under retention and cannot be deleted")
-            changed = self.db.connection.execute(delete(heads).where(
-                heads.c.bucket == bucket, heads.c.key_hash == digest,
-                heads.c.object_id == row[0],
-                heads.c.generation == row[1],
-            ))
-            if changed.rowcount != 1:
+            except BaseException:
+                # The suspended branch used to run outside any rollback guard;
+                # an exception left the connection in an open transaction and
+                # the next request inherited it.
                 self.db.connection.rollback()
-                raise ValueError("Concurrent object deletion/write")
-            self.db.connection.execute(insert(removed_versions).values(
-                object_id=row[0], removed_ns=time.time_ns(),
-            ))
-            self._enqueue_notification(
-                "s3:ObjectRemoved:Delete", bucket, key, version_id=row[0])
-            self._journal_metadata(
-                "deleted", bucket, key, version_id=row[0],
-                detail={"reason": "suspended_version_removed"})
-            self._delete_pending_tags(row[0])
-            self.db.commit()
-            return None
+                raise
         marker = str(uuid4())
         now = int(time.time())
         try:
@@ -384,6 +391,10 @@ class BucketVersionMixin:
         exactly the supplied bucket/key; dangling or forged markers fail.
         Delete markers are modeled as SQL-only published tombstones.
         """
+        # S3 accepts max-keys=0 as a valid empty page; the gateway already
+        # translates the wire value, and direct callers get parity here.
+        if limit == 0:
+            return [], False
         if not 1 <= limit <= 1000 or len(prefix.encode("utf-8")) > 1024:
             raise ValueError("Invalid version-list pagination")
         if version_marker and not key_marker:
@@ -525,10 +536,11 @@ class BucketVersionMixin:
             self._journal_metadata(
                 "created", item.bucket, item.key, version_id=item.id,
                 detail={"size": int(item.size)})
+            # Phase C: apply the bucket default in the SAME transaction as
+            # the head insert. A crash between commit and lock previously
+            # left a COMPLIANCE-retained version with no retention row.
+            self._apply_default_lock_uncommitted(item.id)
             self.db.commit()
-            # Phase C: buckets with a default retention lock every new
-            # version at publish time (WORM from the first byte).
-            self.apply_default_lock(item.id)
             return ObjectHead(item, 1)
 
         old = self.db.connection.execute(select(
@@ -573,8 +585,9 @@ class BucketVersionMixin:
         self._journal_metadata(
             "created", item.bucket, item.key, version_id=item.id,
             detail={"size": int(item.size)})
+        # Same transaction as the head CAS (see the create-if-absent path).
+        self._apply_default_lock_uncommitted(item.id)
         self.db.commit()
-        self.apply_default_lock(item.id)
         return ObjectHead(item, generation + 1)
 
     def rename_object(self, bucket: str, source_key: str, destination_key: str,

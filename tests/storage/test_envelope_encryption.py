@@ -243,3 +243,59 @@ def test_aws_kms_is_refused_because_there_is_no_kms(service, monkeypatch):
                      extra_headers={"x-amz-server-side-encryption": "aws:kms"})
     assert refused.status_code == 501, refused.text
     assert "KMS" in refused.text
+
+
+def test_copy_of_envelope_object_stays_readable_and_reports_sse_s3(service, monkeypatch):
+    """CopyObject creates an alias with no marker of its own.
+
+    The read path resolved the copy's content id to the source marker but then
+    asked ``envelope_key`` for the ALIAS id, which had no marker row: COPY
+    returned 200 and every later GET failed 400 forever. The alias chain must
+    be resolved to the marker row, and the wrapped key must be opened with the
+    identity it was wrapped for (the source id).
+    """
+    from tests.s3.test_s3_gateway import signed
+    monkeypatch.setattr(gateway, "ENVELOPE_ENABLED", True)
+    assert signed(service, "PUT", f"/{BUCKET}").status_code == 200
+    payload = b"copy-me-envelope-payload-" * 64
+    put = signed(service, "PUT", f"/{BUCKET}/original.bin", payload,
+                 extra_headers={"x-amz-server-side-encryption": "AES256"})
+    assert put.status_code == 200, put.text
+
+    copied = signed(service, "PUT", f"/{BUCKET}/copy.bin", b"",
+                    extra_headers={"x-amz-copy-source":
+                                   f"/{BUCKET}/original.bin"})
+    assert copied.status_code == 200, copied.text
+
+    head = signed(service, "HEAD", f"/{BUCKET}/copy.bin")
+    assert head.status_code == 200
+    assert head.headers.get("x-amz-server-side-encryption") == "AES256"
+    got = signed(service, "GET", f"/{BUCKET}/copy.bin")
+    assert got.status_code == 200, got.text
+    assert got.content == payload
+
+
+def test_copy_of_envelope_object_fails_closed_on_a_corrupt_marker(service, monkeypatch):
+    """A bad wrapped key is a client-visible 400, never a raw 500."""
+    from tests.s3.test_s3_gateway import signed
+    monkeypatch.setattr(gateway, "ENVELOPE_ENABLED", True)
+    assert signed(service, "PUT", f"/{BUCKET}").status_code == 200
+    assert signed(service, "PUT", f"/{BUCKET}/bad-marker.bin", b"payload",
+                  extra_headers={"x-amz-server-side-encryption": "AES256"}
+                  ).status_code == 200
+    assert signed(service, "PUT", f"/{BUCKET}/bad-copy.bin", b"",
+                  extra_headers={"x-amz-copy-source":
+                                 f"/{BUCKET}/bad-marker.bin"}).status_code == 200
+
+    db = service[3]()
+    try:
+        db.connection.execute(text(
+            "UPDATE storage_object_encryption SET wrapped_key = :key"
+        ), {"key": base64.b64encode(b"not-a-wrapped-key" * 4).decode()})
+        db.connection.commit()
+    finally:
+        db.close()
+
+    got = signed(service, "GET", f"/{BUCKET}/bad-copy.bin")
+    assert got.status_code == 400, got.text
+    assert b"Internal Server Error" not in got.content

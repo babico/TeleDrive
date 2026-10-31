@@ -172,7 +172,49 @@ class StorageUploadJobs:
         return [{key: value for key, value in row.items()
                  if key not in {"lease_token"}} for row in rows]
 
+    def _claim_once(self, timestamp: int, ttl: int) -> dict | None:
+        """One claim attempt; OperationalError propagates to the retry loop."""
+        eligible = or_(
+            jobs.c.state == "queued",
+            and_(jobs.c.state.in_(("running", "staged", "publishing")),
+                 jobs.c.lease_until < timestamp),
+        )
+        candidates = self.db.connection.execute(
+            select(jobs.c.id)
+            .where(eligible).order_by(jobs.c.created_at, jobs.c.id).limit(10)
+        ).scalars().all()
+        for ident in candidates:
+            token = uuid4().hex
+            result = self.db.connection.execute(
+                update(jobs).where(jobs.c.id == ident, eligible)
+                .values(state="running", lease_token=token,
+                        lease_until=timestamp + ttl, updated_at=timestamp,
+                        attempts=jobs.c.attempts + 1)
+            )
+            self.db.commit()
+            if result.rowcount == 1:
+                row = self.db.connection.execute(
+                    select(jobs).where(jobs.c.id == ident)
+                ).mappings().one()
+                snapshot = dict(row)
+                # A leftover read transaction after a successful
+                # claim can become SQLITE_BUSY_SNAPSHOT when a second
+                # worker commits before this worker begins uploading.
+                self.db.connection.commit()
+                return snapshot
+        self.db.connection.rollback()
+        return None
+
+    def _claim_retry_allowed(self, exc: OperationalError, attempt: int) -> bool:
+        # Retry only SQLite write-contention errors; broken database
+        # connections and other dialect errors are not transient
+        # claim races and must remain visible.
+        return (self.db.engine.dialect.name == "sqlite"
+                and "locked" in str(exc).lower()
+                and attempt != 11)
+
     def claim_next(self, *, now: int | None = None, ttl: int = 120) -> dict | None:
+        """Synchronous claim for sync callers (scripts and tests)."""
         if ttl < 5:
             raise ValueError("Job lease TTL must be >= 5")
         # Independent SQLite workers can both read the same queued row
@@ -182,47 +224,29 @@ class StorageUploadJobs:
         # the operator; PostgreSQL/MySQL CAS still choose a single owner.
         for attempt in range(12):
             timestamp = int(time.time()) if now is None else now
-            eligible = or_(
-                jobs.c.state == "queued",
-                and_(jobs.c.state.in_(("running", "staged", "publishing")),
-                     jobs.c.lease_until < timestamp),
-            )
             try:
-                candidates = self.db.connection.execute(
-                    select(jobs.c.id)
-                    .where(eligible).order_by(jobs.c.created_at, jobs.c.id).limit(10)
-                ).scalars().all()
-                for ident in candidates:
-                    token = uuid4().hex
-                    result = self.db.connection.execute(
-                        update(jobs).where(jobs.c.id == ident, eligible)
-                        .values(state="running", lease_token=token,
-                                lease_until=timestamp + ttl, updated_at=timestamp,
-                                attempts=jobs.c.attempts + 1)
-                    )
-                    self.db.commit()
-                    if result.rowcount == 1:
-                        row = self.db.connection.execute(
-                            select(jobs).where(jobs.c.id == ident)
-                        ).mappings().one()
-                        snapshot = dict(row)
-                        # A leftover read transaction after a successful
-                        # claim can become SQLITE_BUSY_SNAPSHOT when a second
-                        # worker commits before this worker begins uploading.
-                        self.db.connection.commit()
-                        return snapshot
-                self.db.connection.rollback()
-                return None
+                return self._claim_once(timestamp, ttl)
             except OperationalError as exc:
                 self.db.connection.rollback()
-                # Retry only SQLite write-contention errors; broken database
-                # connections and other dialect errors are not transient
-                # claim races and must remain visible.
-                if (self.db.engine.dialect.name != "sqlite"
-                        or "locked" not in str(exc).lower()
-                        or attempt == 11):
+                if not self._claim_retry_allowed(exc, attempt):
                     raise
                 time.sleep(min(0.025 * (attempt + 1), 0.2))
+        return None
+
+    async def claim_next_async(self, *, now: int | None = None,
+                               ttl: int = 120) -> dict | None:
+        """Claim from an async worker without blocking the event loop."""
+        if ttl < 5:
+            raise ValueError("Job lease TTL must be >= 5")
+        for attempt in range(12):
+            timestamp = int(time.time()) if now is None else now
+            try:
+                return self._claim_once(timestamp, ttl)
+            except OperationalError as exc:
+                self.db.connection.rollback()
+                if not self._claim_retry_allowed(exc, attempt):
+                    raise
+                await asyncio.sleep(min(0.025 * (attempt + 1), 0.2))
         return None
 
     def _owned(self, ident: str, token: str, now: int):
@@ -412,7 +436,7 @@ class StorageUploadJobs:
                        chunk_size: int = 16 * 1024 * 1024,
                        lease_seconds: int = 120) -> dict | None:
         """Process one queued or abandoned job; never physically delete media."""
-        claim = self.claim_next(ttl=lease_seconds)
+        claim = await self.claim_next_async(ttl=lease_seconds)
         if claim is None:
             return None
         ident, token = claim["id"], claim["lease_token"]

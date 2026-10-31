@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 
 class QuotaExceeded(ValueError):
@@ -50,13 +51,18 @@ def set_bucket_quota(conn, bucket: str, max_size_bytes: int | None,
                 "max_objects, created_at, updated_at) "
                 "VALUES (:b, :ms, :mo, :now, :now)"
             ), values)
-        except Exception:
-            # Lost the race: the row now exists, so apply the update.
+        except IntegrityError:
+            # Lost the PK race: the row now exists, so apply the update.
+            # Any other failure (permission, transient outage, constraint)
+            # must propagate instead of returning as a silent 200 no-op.
             conn.connection.rollback()
-            conn.connection.execute(text(
+            applied = conn.connection.execute(text(
                 "UPDATE bucket_quotas SET max_size_bytes = :ms, "
                 "max_objects = :mo, updated_at = :now WHERE bucket = :b"
             ), values)
+            if applied.rowcount != 1:
+                conn.connection.rollback()
+                raise RuntimeError("Bucket quota row disappeared during update")
     conn.commit()
 
 

@@ -114,30 +114,6 @@ class BucketLockMixin:
                 last_accessed_ns=now_ns))
         self.db.commit()
 
-    def object_access_stats(self, bucket: str, *, limit: int = 100,
-                            offset: int = 0) -> list[dict]:
-        """Small operator accessor for the Phase N5 counters."""
-        if type(limit) is not int or not 1 <= limit <= 1000:
-            raise ValueError("Invalid access statistics limit")
-        if type(offset) is not int or offset < 0:
-            raise ValueError("Invalid access statistics offset")
-        rows = self.db.connection.execute(
-            select(objects.c.id, objects.c.object_key, objects.c.storage_class,
-                   objects.c.access_count, objects.c.last_accessed_ns,
-                   objects.c.restore_until_ns)
-            .where(objects.c.bucket == bucket, objects.c.status == "ready")
-            .order_by(objects.c.object_key, objects.c.id)
-            .limit(limit).offset(offset)).mappings().all()
-        return [{
-            "object_id": row["id"], "key": row["object_key"],
-            "storage_class": row["storage_class"] or "STANDARD",
-            "access_count": int(row["access_count"] or 0),
-            "last_accessed_ns": (None if row["last_accessed_ns"] is None
-                                 else int(row["last_accessed_ns"])),
-            "restore_until_ns": (None if row["restore_until_ns"] is None
-                                 else int(row["restore_until_ns"])),
-        } for row in rows]
-
     def set_retention(self, object_id: str, *, mode: str,
                       until_ns: int) -> None:
         """COMPLIANCE retention is extend-only (AWS immutability)."""
@@ -173,12 +149,26 @@ class BucketLockMixin:
 
     def apply_default_lock(self, object_id: str) -> None:
         """At publish time: apply the bucket's default retention."""
-        item = self.manifests.get(object_id)
-        config = self.object_lock_config(item.bucket)
+        self._apply_default_lock_uncommitted(object_id)
+        self.db.commit()
+
+    def _apply_default_lock_uncommitted(self, object_id: str) -> None:
+        """Apply the bucket default inside the caller's publish transaction.
+
+        Written before the head commit, exactly like CopyObject: a crash
+        between publishing a COMPLIANCE version and writing its retention
+        row would leave a version that ``delete_version`` may revoke,
+        silently breaking WORM.  A bucket deleted concurrently is ignored so
+        the already-decided publication still completes.
+        """
+        try:
+            item = self.manifests.get(object_id)
+            config = self.object_lock_config(item.bucket)
+        except FileNotFoundError:
+            return
         if config and config.get("default_days"):
             self.db.connection.execute(
                 update(objects).where(objects.c.id == object_id).values(
                     retention_mode=config["default_mode"],
                     retention_until_ns=time.time_ns()
                     + int(config["default_days"]) * 86400 * 1_000_000_000))
-            self.db.commit()

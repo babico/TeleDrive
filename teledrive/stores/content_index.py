@@ -12,24 +12,12 @@ wanted anyway.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import insert, select
 
 from teledrive.db import Database
 from teledrive.storage.content_index import search_content
 from teledrive.storage.manifest import content_index
-
-
-def get(db: Database, object_id: str) -> dict[str, Any] | None:
-    """The index row for one object, or None. ``object_id`` is the PK."""
-    row = db.connection.execute(
-        select(content_index.c.object_id, content_index.c.text,
-               content_index.c.indexed_at)
-        .where(content_index.c.object_id == object_id)
-    ).first()
-    return dict(row._mapping) if row else None
 
 
 def ensure_row(db: Database, object_id: str, indexed_at: int, *,
@@ -72,7 +60,14 @@ def search(db: Database, q: str, limit: int = 100) -> list[tuple[str, str]]:
 
 def delete_for_object(db: Database, object_id: str, *,
                       commit: bool = True) -> int:
-    """Delete one object's index row and (on SQLite) its FTS mirror row."""
+    """Delete one object's index row and (on SQLite) its FTS mirror row.
+
+    Deliberately unwired: no deletion path calls this yet, because the
+    content index is retained as metadata after an object unlink/GC. It
+    exists so a future retention job can drop both the row and its FTS
+    mirror atomically; wiring it into object deletion without that policy
+    would silently lose search history.
+    """
     result = db.connection.execute(
         sa_delete(content_index)
         .where(content_index.c.object_id == object_id)

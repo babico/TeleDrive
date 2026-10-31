@@ -5,7 +5,7 @@ from pathlib import Path
 
 from teledrive.db import connect_database
 from teledrive.storage.content_index import (
-    ensure_content_search, extract_text, index_object_content, search_content)
+    extract_text, index_object_content, search_content)
 from teledrive.storage.manifest import ManifestStore
 
 

@@ -109,13 +109,6 @@ def delete_for_user(db: Database, user_id: int, *, commit: bool = True) -> int:
     return int(result.rowcount or 0)
 
 
-def delete_all(db: Database) -> int:
-    """Revoke every session (logout-all/emergency); returns rows removed."""
-    result = db.connection.execute(sa_delete(user_sessions))
-    db.commit()
-    return int(result.rowcount or 0)
-
-
 def purge_expired(db: Database, now: int) -> int:
     """Delete sessions whose expiry is strictly in the past."""
     result = db.connection.execute(

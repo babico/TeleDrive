@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -430,6 +430,80 @@ def _step_content_search(ctx: SchemaContext) -> None:
     _create_content_search_structures(ctx.engine)
 
 
+def _dedupe_for_unique(engine: Engine, table: str, key_column: str) -> None:
+    """Keep one row per ``key_column`` so a unique index can be created.
+
+    Deterministic winner: the row with the latest ``updated_at``, ties broken
+    by the lowest ``id``. The keep-set is materialised in a TEMPORARY table
+    first: a correlated ``DELETE`` that reads its own table is rejected by
+    MySQL (error 1093), and a plain NOT IN list would exceed the parameter
+    limits of SQLite/PostgreSQL on a prod-sized table. Temporary tables are
+    session-scoped on all three supported dialects and are dropped again at
+    the end, so the statements remain idempotent if the step is re-run.
+    """
+    preparer = engine.dialect.identifier_preparer
+    quoted_table = preparer.quote(table)
+    quoted_key = preparer.quote(key_column)
+    quoted_id = preparer.quote("id")
+    keep_table = preparer.quote(f"_teledrive_keep_{table}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"DROP TABLE IF EXISTS {keep_table}")
+        connection.exec_driver_sql(
+            f"CREATE TEMPORARY TABLE {keep_table} AS "  # nosec B608 - internal, quoted
+            f"SELECT s.{quoted_id} AS {quoted_id} FROM {quoted_table} AS s "
+            f"WHERE NOT EXISTS ("
+            f"SELECT 1 FROM {quoted_table} AS n "
+            f"WHERE n.{quoted_key} = s.{quoted_key} AND ("
+            f"n.updated_at > s.updated_at OR "
+            f"(n.updated_at = s.updated_at AND n.{quoted_id} < s.{quoted_id})"
+            f"))"
+        )
+        connection.exec_driver_sql(
+            f"DELETE FROM {quoted_table} "  # nosec B608 - internal, quoted
+            f"WHERE {quoted_id} NOT IN (SELECT {quoted_id} FROM {keep_table})"
+        )
+        connection.exec_driver_sql(f"DROP TABLE {keep_table}")
+
+
+def _ensure_unique_index(engine: Engine, table: str, column: str,
+                         name: str) -> None:
+    """Create the named unique index unless an equivalent one already exists.
+
+    A brand-new database already gets the constraint from ``create_all``
+    (the column is ``unique=True`` in the table definition), so the probe
+    avoids a duplicate index there; an older database gets the index here.
+    """
+    inspector = inspect(engine)
+    for constraint in inspector.get_unique_constraints(table):
+        if constraint.get("column_names") == [column]:
+            return
+    for index in inspector.get_indexes(table):
+        if index.get("unique") and index.get("column_names") == [column]:
+            return
+    preparer = engine.dialect.identifier_preparer
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"CREATE UNIQUE INDEX {preparer.quote(name)} ON "
+            f"{preparer.quote(table)} ({preparer.quote(column)})")
+
+
+def _step_unique_telegram_identities(ctx: SchemaContext) -> None:
+    """One row per Telegram account and per channel_id (schema step 27).
+
+    Both upserts are UPDATE-then-INSERT and their race recovery assumes the
+    database rejects a duplicate INSERT. Without the constraint two
+    concurrent logins created duplicate rows: phantom sessions in listings,
+    duplicate account labels in Prometheus scrapes, and a credential probed
+    twice. Existing duplicates are resolved first, then the index is added.
+    """
+    _dedupe_for_unique(ctx.engine, "telegram_sessions", "account")
+    _ensure_unique_index(ctx.engine, "telegram_sessions", "account",
+                         "uq_telegram_sessions_account")
+    _dedupe_for_unique(ctx.engine, "telegram_channels", "channel_id")
+    _ensure_unique_index(ctx.engine, "telegram_channels", "channel_id",
+                         "uq_telegram_channels_channel_id")
+
+
 _STEPS: list[tuple[str, Step]] = [
     ("core", _step_core),
     ("verification_attempts", _step_verification_attempts),
@@ -457,6 +531,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("share_object_id", _step_share_object_id),
     ("security_audit", _step_security_audit),
     ("envelope_encryption", _step_envelope_encryption),
+    ("unique_telegram_identities", _step_unique_telegram_identities),
 ]
 
 # Bump by appending a step; never reorder or remove one.

@@ -3,47 +3,19 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import (
-    BigInteger, Column, Float, Index, Integer, MetaData, String, Table, Text,
-    and_, create_engine, delete, func, insert, or_, select, update,
+    BigInteger, Column, Integer, MetaData, String, Table, Text,
+    create_engine, delete, insert, select, update,
 )
-from sqlalchemy.engine import Connection, Engine, Row
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 
 metadata = MetaData()
-
-files = Table(
-    "files", metadata,
-    Column("path", String(700), primary_key=True),
-    Column("size", BigInteger, nullable=False),
-    Column("mtime", Float, nullable=False),
-    Column("status", String(32), nullable=False, server_default="pending"),
-    Column("tg_message_id", BigInteger),
-    Column("tg_account", String(255)),
-    Column("attempts", Integer, nullable=False, server_default="0"),
-    Column("last_error", Text),
-    Column("first_seen_ts", BigInteger, nullable=False),
-    Column("last_update_ts", BigInteger, nullable=False),
-    Column("uploaded_ts", BigInteger),
-    Column("claim_token", String(255)),
-    Column("claim_ts", BigInteger),
-)
-Index("idx_files_status", files.c.status)
-Index("idx_files_tg_account", files.c.tg_account)
-
-account_status = Table(
-    "account_status", metadata,
-    Column("name", String(255), primary_key=True),
-    Column("state", String(32), nullable=False, server_default="unknown"),
-    Column("last_error", Text),
-    Column("cooldown_until", BigInteger),
-    Column("last_success_ts", BigInteger),
-    Column("last_update_ts", BigInteger, nullable=False),
-)
 
 leases = Table(
     "leases", metadata,
@@ -60,7 +32,10 @@ telegram_sessions = Table(
     Column("api_hash", String(128), nullable=False),
     Column("phone", String(64)),
     Column("session_string", Text, nullable=False),
-    Column("account", String(128), nullable=False, server_default="mtproto-user"),
+    # One row per account: upsert_session's UPDATE-then-INSERT recovery
+    # relies on this constraint to reject a concurrent creator.
+    Column("account", String(128), nullable=False, unique=True,
+           server_default="mtproto-user"),
     Column("channel", String(255)),
     Column("strategy", String(32), server_default="round_robin"),
     Column("created_at", BigInteger, nullable=False),
@@ -79,7 +54,9 @@ telegram_channels = Table(
     "telegram_channels", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("name", String(128), nullable=False),
-    Column("channel_id", String(255), nullable=False),
+    # Unique so a concurrent verify/login cannot create phantom channels;
+    # upsert_channel_by_channel_id recovers from the losing INSERT.
+    Column("channel_id", String(255), nullable=False, unique=True),
     Column("strategy", String(32), nullable=False, server_default="round_robin"),
     Column("scratch_dir", String(512), server_default="/data/tmp"),
     Column("is_active", Integer, nullable=False, server_default="0"),
@@ -180,18 +157,6 @@ user_sessions = Table(
     Column("created_at", BigInteger, nullable=False),
     Column("expires_at", BigInteger, nullable=False),
 )
-
-
-class DBRow:
-    def __init__(self, row: Row[Any]):
-        self._mapping = dict(row._mapping)
-        self._values = tuple(self._mapping.values())
-
-    def __getitem__(self, key):
-        return self._values[key] if isinstance(key, int) else self._mapping[key]
-
-    def as_dict(self) -> dict[str, Any]:
-        return dict(self._mapping)
 
 
 def normalize_database_url(value: str, *, config_dir: Path | None = None) -> str:
@@ -331,116 +296,6 @@ class Database:
     def commit(self) -> None:
         self.connection.commit()
 
-    def file_signature(self, path: str) -> DBRow | None:
-        row = self.connection.execute(
-            select(files.c.size, files.c.mtime, files.c.status).where(files.c.path == path)
-        ).first()
-        return DBRow(row) if row else None
-
-    def insert_pending(self, path: str, size: int, mtime: float, now: int) -> None:
-        self.connection.execute(insert(files).values(
-            path=path, size=size, mtime=mtime, status="pending",
-            first_seen_ts=now, last_update_ts=now,
-        ))
-
-    def requeue_changed(self, path: str, size: int, mtime: float, now: int) -> None:
-        self.connection.execute(update(files).where(files.c.path == path).values(
-            size=size, mtime=mtime, status="pending", tg_message_id=None,
-            tg_account=None, uploaded_ts=None, last_error=None,
-            claim_token=None, claim_ts=None, last_update_ts=now,
-        ))
-
-    def uploaded_between(self, start_ts: int, end_ts: int) -> int:
-        return int(self.connection.execute(
-            select(func.count()).select_from(files).where(
-                files.c.status == "uploaded",
-                files.c.uploaded_ts >= start_ts,
-                files.c.uploaded_ts < end_ts,
-            )
-        ).scalar_one() or 0)
-
-    def pending(self, limit: int, now: int, stale_after_seconds: int) -> list[DBRow]:
-        stale_before = now - stale_after_seconds
-        rows = self.connection.execute(
-            select(files.c.path, files.c.size, files.c.mtime, files.c.attempts)
-            .where(
-                or_(
-                    files.c.status.in_(["pending", "failed"]),
-                    and_(
-                        files.c.status == "uploading",
-                        or_(files.c.claim_ts.is_(None), files.c.claim_ts < stale_before),
-                    ),
-                )
-            )
-            .order_by(files.c.first_seen_ts.asc()).limit(limit)
-        ).all()
-        return [DBRow(row) for row in rows]
-
-    def claim_file(self, path: str, claim_token: str, now: int, stale_after_seconds: int) -> bool:
-        stale_before = now - stale_after_seconds
-        self.connection.execute(
-            update(files)
-            .where(
-                files.c.path == path,
-                or_(
-                    files.c.status.in_(["pending", "failed"]),
-                    and_(
-                        files.c.status == "uploading",
-                        or_(files.c.claim_ts.is_(None), files.c.claim_ts < stale_before),
-                    ),
-                ),
-            )
-            .values(
-                status="uploading",
-                claim_token=claim_token,
-                claim_ts=now,
-                last_update_ts=now,
-            )
-        )
-        self.connection.commit()
-        row = self.connection.execute(
-            select(files.c.status, files.c.claim_token).where(files.c.path == path)
-        ).first()
-        return bool(row and row[0] == "uploading" and row[1] == claim_token)
-
-    def mark_failed(self, path: str, error: str, attempts_inc: int, now: int) -> None:
-        self.connection.execute(update(files).where(files.c.path == path).values(
-            status="failed", attempts=files.c.attempts + attempts_inc,
-            last_error=error[:1000], claim_token=None, claim_ts=None, last_update_ts=now,
-        ))
-
-    def mark_uploaded(self, path: str, message_id: int | None, account_name: str, now: int) -> None:
-        self.connection.execute(update(files).where(files.c.path == path).values(
-            status="uploaded", tg_message_id=message_id, tg_account=account_name,
-            attempts=files.c.attempts + 1, last_error=None,
-            claim_token=None, claim_ts=None, uploaded_ts=now, last_update_ts=now,
-        ))
-
-    def account_state(self, name: str) -> DBRow | None:
-        row = self.connection.execute(
-            select(account_status).where(account_status.c.name == name)
-        ).first()
-        return DBRow(row) if row else None
-
-    def set_account_state(self, name: str, state: str, *, last_error: str | None,
-                          cooldown_until: int | None, last_success_ts: int | None, now: int) -> None:
-        values = dict(
-            state=state, last_error=last_error, cooldown_until=cooldown_until,
-            last_success_ts=last_success_ts, last_update_ts=now,
-        )
-        result = self.connection.execute(
-            update(account_status).where(account_status.c.name == name).values(**values)
-        )
-        if result.rowcount:
-            return
-        try:
-            self.connection.execute(insert(account_status).values(name=name, **values))
-        except IntegrityError:
-            self.connection.rollback()
-            self.connection.execute(
-                update(account_status).where(account_status.c.name == name).values(**values)
-            )
-
     def acquire_lease(self, name: str, holder: str, now: int, ttl_seconds: int) -> bool:
         lease_until = now + ttl_seconds
         result = self.connection.execute(
@@ -493,38 +348,6 @@ class Database:
         )
         self.connection.commit()
 
-    def dashboard_counts(self) -> dict[str, int]:
-        rows = self.connection.execute(
-            select(files.c.status, func.count()).group_by(files.c.status)
-        ).all()
-        return {str(row[0]): int(row[1]) for row in rows}
-
-    def all_account_states(self) -> dict[str, dict[str, Any]]:
-        rows = self.connection.execute(select(account_status).order_by(account_status.c.name)).all()
-        return {str(row._mapping["name"]): dict(row._mapping) for row in rows}
-
-    def uploaded_counts_by_account(self) -> dict[str, int]:
-        label = func.coalesce(files.c.tg_account, "unknown").label("account")
-        rows = self.connection.execute(
-            select(label, func.count()).where(files.c.status == "uploaded").group_by(label)
-        ).all()
-        return {str(row[0]): int(row[1]) for row in rows}
-
-    def list_files(self, kind: str, limit: int) -> list[dict[str, Any]]:
-        condition = files.c.status.in_(["pending", "failed", "uploading"]) if kind == "queue" else files.c.status == "uploaded"
-        rows = self.connection.execute(
-            select(
-                files.c.path, files.c.size, files.c.status, files.c.attempts,
-                files.c.last_error, files.c.tg_account, files.c.tg_message_id,
-                files.c.first_seen_ts, files.c.last_update_ts, files.c.uploaded_ts,
-            ).where(condition).order_by(files.c.last_update_ts.desc()).limit(limit)
-        ).all()
-        return [dict(row._mapping) for row in rows]
-
-    def clear_files(self) -> None:
-        self.connection.execute(delete(files))
-
-
 # Arbitrary stable key for the PostgreSQL schema-setup advisory lock.
 # (Kept here for backwards compatibility; the migration coordinator in
 # teledrive.storage.schema owns cross-process locking now.)
@@ -575,6 +398,11 @@ def _build_engine(url: str) -> Engine:
 # throwaway database by design.
 _ENGINE_CACHE_MAX = 8
 _engine_cache: "OrderedDict[str, Engine]" = OrderedDict()
+# Threadpool requests share this cache, and every read/write below is a
+# multi-step OrderedDict operation (lookup + move_to_end, insert + evict).
+# Without the lock two threads can build the same engine twice or corrupt
+# the LRU ordering.
+_engine_cache_lock = threading.Lock()
 
 
 def _shared_engine(url: str) -> Engine:
@@ -584,15 +412,16 @@ def _shared_engine(url: str) -> Engine:
     per-request YAML config parse, `create_all` and dialect migrations.
     Connections are still per-call; `pool_pre_ping` recovers stale ones.
     """
-    engine = _engine_cache.get(url)
-    if engine is not None:
-        _engine_cache.move_to_end(url)
+    with _engine_cache_lock:
+        engine = _engine_cache.get(url)
+        if engine is not None:
+            _engine_cache.move_to_end(url)
+            return engine
+        engine = _build_engine(url)
+        _engine_cache[url] = engine
+        while len(_engine_cache) > _ENGINE_CACHE_MAX:
+            _engine_cache.popitem(last=False)
         return engine
-    engine = _build_engine(url)
-    _engine_cache[url] = engine
-    while len(_engine_cache) > _ENGINE_CACHE_MAX:
-        _engine_cache.popitem(last=False)
-    return engine
 
 
 def connect_database(url_or_path: str, *, config_dir: Path | None = None) -> Database:

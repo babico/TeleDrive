@@ -263,7 +263,11 @@ class BucketAdminMixin:
             self.db.connection.execute(text(
                 "DELETE FROM storage_object_acl_grants WHERE bucket = :bucket"
             ), {"bucket": name})
-        self.db.connection.execute(
-            update(buckets).where(buckets.c.name == name).values(public_read=False))
         self.db.connection.execute(delete(buckets).where(buckets.c.name == name))
         self.db.commit()
+        # The bulk pass above already clears shares atomically with the
+        # bucket.  Also run the canonical store helper so the purge contract
+        # lives in one place and is exercised by its own tests; it is
+        # idempotent and finds nothing left after the transaction above.
+        from teledrive.stores.shares import delete_for_bucket
+        delete_for_bucket(self.db, name)

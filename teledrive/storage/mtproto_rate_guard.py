@@ -8,6 +8,7 @@ Telegram media; the guard is pure durable SQL fencing.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -66,6 +67,34 @@ class MtprotoRateGuard:
         ensure_schema(database.engine)
         database.release_setup_snapshot()
 
+    def _reserve_once(self, account: str, chat_id: int, gap: int,
+                      timestamp: int) -> float:
+        predicate = (
+            _mtproto_chat_slots.c.account == account,
+            _mtproto_chat_slots.c.chat_id == chat_id,
+        )
+        row = self.db.connection.execute(update(_mtproto_chat_slots).where(
+            *predicate
+        ).values(next_allowed_ms=case(
+            (_mtproto_chat_slots.c.next_allowed_ms > timestamp,
+             _mtproto_chat_slots.c.next_allowed_ms + gap),
+            else_=timestamp + gap,
+        )))
+        if row.rowcount == 1:
+            next_ms = self.db.connection.execute(select(
+                _mtproto_chat_slots.c.next_allowed_ms
+            ).where(*predicate)).scalar_one()
+            self.db.commit()
+            return max(0.0, (int(next_ms) - gap - timestamp) / 1000)
+        # First reservation for this pair. If another worker won
+        # the unique insert, rollback and retry the UPDATE.
+        self.db.connection.execute(insert(_mtproto_chat_slots).values(
+            account=account, chat_id=chat_id,
+            next_allowed_ms=timestamp + gap,
+        ))
+        self.db.commit()
+        return 0.0
+
     def reserve_send_slot(self, account: str, chat_id: int,
                           interval_seconds: float, *,
                           now_ms: int | None = None) -> float:
@@ -86,36 +115,12 @@ class MtprotoRateGuard:
         timestamp = int(time.time() * 1000) if now_ms is None else now_ms
         if type(timestamp) is not int or timestamp < 0:
             raise ValueError("Invalid shared MTProto time")
-        predicate = (
-            _mtproto_chat_slots.c.account == account,
-            _mtproto_chat_slots.c.chat_id == chat_id,
-        )
         # Begin with a WRITE, not a read: concurrent SQLite workers must
         # not upgrade a stale WAL snapshot to a writer. On PostgreSQL and
         # MySQL the UPDATE takes the row lock for the entire reservation.
         for attempt in range(12):
             try:
-                row = self.db.connection.execute(update(_mtproto_chat_slots).where(
-                    *predicate
-                ).values(next_allowed_ms=case(
-                    (_mtproto_chat_slots.c.next_allowed_ms > timestamp,
-                     _mtproto_chat_slots.c.next_allowed_ms + gap),
-                    else_=timestamp + gap,
-                )))
-                if row.rowcount == 1:
-                    next_ms = self.db.connection.execute(select(
-                        _mtproto_chat_slots.c.next_allowed_ms
-                    ).where(*predicate)).scalar_one()
-                    self.db.commit()
-                    return max(0.0, (int(next_ms) - gap - timestamp) / 1000)
-                # First reservation for this pair. If another worker won
-                # the unique insert, rollback and retry the UPDATE.
-                self.db.connection.execute(insert(_mtproto_chat_slots).values(
-                    account=account, chat_id=chat_id,
-                    next_allowed_ms=timestamp + gap,
-                ))
-                self.db.commit()
-                return 0.0
+                return self._reserve_once(account, chat_id, gap, timestamp)
             except (SQLIntegrityError, SQLOperationalError):
                 self.db.connection.rollback()
                 if attempt == 11:
@@ -124,6 +129,85 @@ class MtprotoRateGuard:
                     ) from None
                 time.sleep(0.015 * (attempt + 1))
         raise RuntimeError("Shared MTProto rate reservation could not finish")
+
+    async def reserve_send_slot_async(self, account: str, chat_id: int,
+                                      interval_seconds: float, *,
+                                      now_ms: int | None = None) -> float:
+        """Async variant: retry backoff must not block the transport loop."""
+        if (not account or type(chat_id) is not int or not chat_id
+                or not 0 <= interval_seconds <= 60):
+            raise ValueError("Invalid MTProto channel rate interval")
+        gap = int(interval_seconds * 1000 + 0.5)
+        timestamp = int(time.time() * 1000) if now_ms is None else now_ms
+        if type(timestamp) is not int or timestamp < 0:
+            raise ValueError("Invalid shared MTProto time")
+        for attempt in range(12):
+            try:
+                return self._reserve_once(account, chat_id, gap, timestamp)
+            except (SQLIntegrityError, SQLOperationalError):
+                self.db.connection.rollback()
+                if attempt == 11:
+                    raise RuntimeError(
+                        "Shared MTProto rate reservation failed after bounded retries"
+                    ) from None
+                await asyncio.sleep(0.015 * (attempt + 1))
+        raise RuntimeError("Shared MTProto rate reservation could not finish")
+
+    def _impose_once(self, account: str, chat_id: int, retry_after: int,
+                     timestamp: int) -> None:
+        until = timestamp + retry_after * 1000
+        predicate = (
+            _mtproto_chat_cooldowns.c.account == account,
+            _mtproto_chat_cooldowns.c.chat_id == chat_id,
+        )
+        row = self.db.connection.execute(update(_mtproto_chat_slots).where(
+            _mtproto_chat_slots.c.account == account,
+            _mtproto_chat_slots.c.chat_id == chat_id,
+        ).values(next_allowed_ms=case(
+            (_mtproto_chat_slots.c.next_allowed_ms < until, until),
+            else_=_mtproto_chat_slots.c.next_allowed_ms,
+        )))
+        if row.rowcount != 1:
+            raise RuntimeError("MTProto shared cooldown row missing")
+        changed = self.db.connection.execute(update(
+            _mtproto_chat_cooldowns
+        ).where(*predicate).values(cooldown_until_ms=case(
+            (_mtproto_chat_cooldowns.c.cooldown_until_ms < until, until),
+            else_=_mtproto_chat_cooldowns.c.cooldown_until_ms,
+        )))
+        if changed.rowcount != 1:
+            self.db.connection.execute(insert(_mtproto_chat_cooldowns).values(
+                account=account, chat_id=chat_id,
+                cooldown_until_ms=until,
+            ))
+        # The counter is an observation of a verified flood-wait,
+        # not proof that an upload was accepted. Serialize it with
+        # the same SQL writer transaction as the rate-limit fence.
+        observed = self.db.connection.execute(
+            update(_mtproto_flood_observations).where(
+                _mtproto_flood_observations.c.account == account,
+                _mtproto_flood_observations.c.chat_id == chat_id,
+            ).values(
+                observations=_mtproto_flood_observations.c.observations + 1,
+                last_observed_ms=case(
+                    (_mtproto_flood_observations.c.last_observed_ms < timestamp,
+                     timestamp),
+                    else_=_mtproto_flood_observations.c.last_observed_ms,
+                ),
+                last_retry_after_seconds=case(
+                    (_mtproto_flood_observations.c.last_observed_ms <= timestamp,
+                     retry_after),
+                    else_=_mtproto_flood_observations.c.last_retry_after_seconds,
+                ),
+            )
+        )
+        if observed.rowcount != 1:
+            self.db.connection.execute(insert(_mtproto_flood_observations).values(
+                account=account, chat_id=chat_id,
+                observations=1, last_observed_ms=timestamp,
+                last_retry_after_seconds=retry_after,
+            ))
+        self.db.commit()
 
     def impose_shared_cooldown(self, account: str, chat_id: int,
                                retry_after: int, *,
@@ -141,61 +225,9 @@ class MtprotoRateGuard:
         timestamp = int(time.time() * 1000) if now_ms is None else now_ms
         if type(timestamp) is not int or timestamp < 0:
             raise ValueError("Invalid MTProto flood-wait timestamp")
-        until = timestamp + retry_after * 1000
-        predicate = (
-            _mtproto_chat_cooldowns.c.account == account,
-            _mtproto_chat_cooldowns.c.chat_id == chat_id,
-        )
         for attempt in range(12):
             try:
-                row = self.db.connection.execute(update(_mtproto_chat_slots).where(
-                    _mtproto_chat_slots.c.account == account,
-                    _mtproto_chat_slots.c.chat_id == chat_id,
-                ).values(next_allowed_ms=case(
-                    (_mtproto_chat_slots.c.next_allowed_ms < until, until),
-                    else_=_mtproto_chat_slots.c.next_allowed_ms,
-                )))
-                if row.rowcount != 1:
-                    raise RuntimeError("MTProto shared cooldown row missing")
-                changed = self.db.connection.execute(update(
-                    _mtproto_chat_cooldowns
-                ).where(*predicate).values(cooldown_until_ms=case(
-                    (_mtproto_chat_cooldowns.c.cooldown_until_ms < until, until),
-                    else_=_mtproto_chat_cooldowns.c.cooldown_until_ms,
-                )))
-                if changed.rowcount != 1:
-                    self.db.connection.execute(insert(_mtproto_chat_cooldowns).values(
-                        account=account, chat_id=chat_id,
-                        cooldown_until_ms=until,
-                    ))
-                # The counter is an observation of a verified flood-wait,
-                # not proof that an upload was accepted. Serialize it with
-                # the same SQL writer transaction as the rate-limit fence.
-                observed = self.db.connection.execute(
-                    update(_mtproto_flood_observations).where(
-                        _mtproto_flood_observations.c.account == account,
-                        _mtproto_flood_observations.c.chat_id == chat_id,
-                    ).values(
-                        observations=_mtproto_flood_observations.c.observations + 1,
-                        last_observed_ms=case(
-                            (_mtproto_flood_observations.c.last_observed_ms < timestamp,
-                             timestamp),
-                            else_=_mtproto_flood_observations.c.last_observed_ms,
-                        ),
-                        last_retry_after_seconds=case(
-                            (_mtproto_flood_observations.c.last_observed_ms <= timestamp,
-                             retry_after),
-                            else_=_mtproto_flood_observations.c.last_retry_after_seconds,
-                        ),
-                    )
-                )
-                if observed.rowcount != 1:
-                    self.db.connection.execute(insert(_mtproto_flood_observations).values(
-                        account=account, chat_id=chat_id,
-                        observations=1, last_observed_ms=timestamp,
-                        last_retry_after_seconds=retry_after,
-                    ))
-                self.db.commit()
+                self._impose_once(account, chat_id, retry_after, timestamp)
                 return
             except (SQLIntegrityError, SQLOperationalError):
                 self.db.connection.rollback()
@@ -204,6 +236,31 @@ class MtprotoRateGuard:
                         "Shared MTProto cooldown failed after bounded retries"
                     ) from None
                 time.sleep(0.015 * (attempt + 1))
+            except BaseException:
+                self.db.connection.rollback()
+                raise
+
+    async def impose_shared_cooldown_async(self, account: str, chat_id: int,
+                                           retry_after: int, *,
+                                           now_ms: int | None = None) -> None:
+        """Async variant: the flood-wait retry must not stall the event loop."""
+        if (type(retry_after) is not int or not 1 <= retry_after <= 3600
+                or not account or type(chat_id) is not int or not chat_id):
+            raise ValueError("Invalid MTProto flood-wait cooldown")
+        timestamp = int(time.time() * 1000) if now_ms is None else now_ms
+        if type(timestamp) is not int or timestamp < 0:
+            raise ValueError("Invalid MTProto flood-wait timestamp")
+        for attempt in range(12):
+            try:
+                self._impose_once(account, chat_id, retry_after, timestamp)
+                return
+            except (SQLIntegrityError, SQLOperationalError):
+                self.db.connection.rollback()
+                if attempt == 11:
+                    raise RuntimeError(
+                        "Shared MTProto cooldown failed after bounded retries"
+                    ) from None
+                await asyncio.sleep(0.015 * (attempt + 1))
             except BaseException:
                 self.db.connection.rollback()
                 raise

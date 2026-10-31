@@ -22,6 +22,7 @@ decision; nothing here ever runs automatically.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from sqlalchemy import (BigInteger, Boolean, Column, Index, Integer, String,
@@ -38,8 +39,8 @@ gc_state = Table(
     Column("enabled", Boolean, nullable=False),
     Column("updated_ns", BigInteger, nullable=False),
     Column("updated_by", String(255), nullable=False),
-    # Added in Phase A; pre-existing deployments get it via
-    # _ensure_grace_column's ALTER TABLE.
+    # Added in Phase A; pre-existing deployments get it via the schema
+    # coordinator's ALTER TABLE.
     Column("grace_seconds", Integer),
 )
 # Explicit physical-collection requests: version deletes, multipart
@@ -82,12 +83,7 @@ DEFAULT_MIN_AGE_SECONDS = 24 * 3600
 MIN_AGE_FLOOR_SECONDS = 3600
 DEFAULT_GRACE_SECONDS = 24 * 3600
 
-
-def _ensure_grace_column(db):
-    """storage_gc_state.grace_seconds may be missing in deployments created
-    before Phase A; the ALTER now runs in the schema coordinator."""
-    from .schema import ensure_schema
-    ensure_schema(db.engine)
+_logger = logging.getLogger(__name__)
 
 
 def _send_intents_table():
@@ -427,6 +423,13 @@ class RetainedMediaGC:
     async def _collect_object(self, transport, object_id: str,
                               scope: str) -> str:
         db = self.db.connection
+        # Force a fresh snapshot before the destructive re-verification.
+        # The candidate preview runs on this same connection, and on MySQL
+        # REPEATABLE READ / SQLite WAL a plain SELECT would keep seeing the
+        # preview's snapshot: a head or alias published after the preview
+        # was invisible and the media was deleted from under it. The claim
+        # above already committed, so there is no work to lose here.
+        db.rollback()
         # Fail-closed re-verification immediately before any deletion.
         row = db.execute(
             select(objects.c.status, objects.c.bucket, objects.c.object_key)
@@ -440,6 +443,20 @@ class RetainedMediaGC:
                 object_aliases.c.source_object_id == object_id)
                 ).first() is not None:
             return "skipped"
+        if scope == "deleted":
+            # The preview may have decided this key's head was gone; a writer
+            # can publish a NEW live head for the same key afterwards. The
+            # old version is then history of a LIVE key, not garbage. Re-run
+            # that exact qualification on the fresh snapshot.
+            live = db.execute(text(
+                "SELECT 1 FROM storage_published_versions p "
+                "JOIN storage_object_heads h "
+                "ON h.bucket = p.bucket AND h.key_hash = p.key_hash "
+                "JOIN storage_objects oh ON oh.id = h.object_id "
+                "WHERE p.object_id = :oid AND oh.status <> 'delete-marker' "
+                "LIMIT 1"), {"oid": object_id}).first()
+            if live is not None:
+                return "skipped"
         # Object lock (Phase C): retained or legal-held media is never
         # physically collected, even when queued.
         lock_state = db.execute(
@@ -452,12 +469,19 @@ class RetainedMediaGC:
             return "skipped"
         try:
             intents = _send_intents_table()
-            if db.execute(select(intents.c.object_id).where(
-                    intents.c.object_id == object_id,
-                    intents.c.message_id.is_(None))).first() is not None:
-                return "skipped"
+            if inspect(db.engine).has_table("storage_mtproto_send_intents"):
+                if db.execute(select(intents.c.object_id).where(
+                        intents.c.object_id == object_id,
+                        intents.c.message_id.is_(None))).first() is not None:
+                    return "skipped"
         except Exception:
-            pass  # journal table absent in this deployment
+            # Any error here means the send-intent fence cannot be proven.
+            # Silently proceeding would delete media whose send outcome is
+            # still unknown; skip the candidate and keep it retryable.
+            _logger.exception(
+                "GC send-intent fence failed for object %s; skipping",
+                object_id)
+            return "skipped"
         chunk_rows = db.execute(
             select(chunks.c.ordinal, chunks.c.offset, chunks.c.size,
                    chunks.c.sha256, chunks.c.account, chunks.c.chat_id,

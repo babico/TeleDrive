@@ -63,18 +63,33 @@ class GCReferenceGuard:
             raise RuntimeError("Incomplete GC reference graph schema")
         return names
 
-    def evidence(self, identifier):
-        from teledrive.s3.multipart import parts
-        from teledrive.storage.user_mode import mtproto_send_intents
+    def load_context(self):
+        """Load the two whole-table sets once for a preview/plan run.
 
+        ``evidence()`` used to reload every object id and every alias edge per
+        candidate, which is O(candidates x full table).  The snapshot is only
+        valid for one read-only run: writers that change the graph during the
+        run still invalidate the per-plan fingerprint check.
+        """
         names = self.validate_schema()
         db = self.db.connection
         known_ids = set(db.execute(select(objects.c.id)).scalars())
-        if identifier not in known_ids:
-            raise RuntimeError("GC candidate missing")
         edges = dict(db.execute(select(
             object_aliases.c.object_id, object_aliases.c.source_object_id
         )).all())
+        return names, known_ids, edges
+
+    def evidence(self, identifier, *, context=None):
+        from teledrive.s3.multipart import parts
+        from teledrive.storage.user_mode import mtproto_send_intents
+
+        if context is None:
+            names, known_ids, edges = self.load_context()
+        else:
+            names, known_ids, edges = context
+        db = self.db.connection
+        if identifier not in known_ids:
+            raise RuntimeError("GC candidate missing")
         for alias in edges:
             visited = set()
             current = alias

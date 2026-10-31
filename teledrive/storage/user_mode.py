@@ -43,6 +43,22 @@ def transport_mode() -> str:
     return "telethon"
 
 
+def _is_missing_table_error(exc: BaseException) -> bool:
+    """True for the documented 'DB table not provisioned yet' fallback case."""
+    message = str(exc).lower()
+    return ("no such table" in message or "doesn't exist" in message
+            or "unknown table" in message)
+
+
+def _warn_unexpected_db_fallback(what: str, exc: BaseException) -> None:
+    """A missing table falls back to config silently by design; anything else
+    (outage, permission, corruption) must be visible -- booting with stale
+    config.yaml sessions sends uploads to the wrong Telegram account."""
+    if not _is_missing_table_error(exc):
+        _module_logger.warning(
+            "%s DB read failed; falling back to config.yaml: %s", what, exc)
+
+
 def _split_list(value: str, name: str) -> list[str]:
     items = [part.strip() for part in value.split(",")]
     if not items or any(not part for part in items):
@@ -131,8 +147,8 @@ def _config_storage_section() -> dict | None:
                         }
             finally:
                 conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        _warn_unexpected_db_fallback("storage runtime config", exc)
 
     # Fall back to config.yaml.
     config_path = os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml").strip()
@@ -222,7 +238,8 @@ def _db_credential_sets() -> list[tuple[str, int, str, str]] | None:
             )).fetchall()
         finally:
             conn.close()
-    except Exception:
+    except Exception as exc:
+        _warn_unexpected_db_fallback("MTProto credential sets", exc)
         return None
     if not rows:
         return None
@@ -755,7 +772,7 @@ class UnifiedUserTransport:
                     delegate = self.runtime.require()
                 # The SQL slot is shared by every worker using this
                 # account/channel, not just this transport instance.
-                shared_wait = self.rate.reserve_send_slot(
+                shared_wait = await self.rate.reserve_send_slot_async(
                     account, chat_id, self.min_upload_interval,
                 )
                 pause = max(shared_wait, self._next_upload - time.monotonic(), 0.0)
@@ -780,7 +797,8 @@ class UnifiedUserTransport:
             except FloodWaitError as exc:
                 # Publish the cooldown for every worker before sleeping.
                 wait = int(getattr(exc, "seconds", 1) or 1)
-                self.rate.impose_shared_cooldown(account, chat_id, min(wait, 3600))
+                await self.rate.impose_shared_cooldown_async(
+                    account, chat_id, min(wait, 3600))
                 if attempt + 1 < total_attempts:
                     continue
                 raise RuntimeError(

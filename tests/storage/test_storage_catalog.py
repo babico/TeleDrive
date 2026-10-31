@@ -270,3 +270,33 @@ def test_conditional_unlink_cannot_delete_a_reuploaded_key(catalog):
         cat.remove_current("race-bucket", "race.bin",
                            expected_object_id=second)
     assert cat.get("race-bucket", "race.bin").item.id == third
+
+
+def test_set_bucket_quota_is_really_applied(catalog):
+    """Non-race DB errors used to be swallowed as a successful no-op."""
+    from teledrive.storage.quota import bucket_quota, set_bucket_quota
+
+    cat, _ = catalog
+    set_bucket_quota(cat.db, "quota-bucket", 100, 2, now=10)
+    assert bucket_quota(cat.db, "quota-bucket") == (100, 2)
+    # The update path (row already exists) must persist too.
+    set_bucket_quota(cat.db, "quota-bucket", 200, 3, now=11)
+    assert bucket_quota(cat.db, "quota-bucket") == (200, 3)
+    set_bucket_quota(cat.db, "quota-bucket", None, 1, now=12)
+    assert bucket_quota(cat.db, "quota-bucket") == (None, 1)
+
+
+def test_deleting_a_bucket_purges_its_share_rows(catalog):
+    from teledrive.stores import shares
+
+    cat, _ = catalog
+    cat.create_bucket("shared-bucket", 1)
+    shares.create(
+        cat.db, token="share-token-1", bucket="shared-bucket",
+        object_key="doc.txt", object_id=None, created_by="owner",
+        created_at=2, expires_at=None, max_downloads=None,
+        password_salt=None, password_hash=None,
+    )
+    assert shares.list(cat.db)
+    cat.delete_bucket("shared-bucket")
+    assert shares.list(cat.db) == []

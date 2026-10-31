@@ -59,7 +59,7 @@ class StorageGCInventory:
             raise ValueError("Unsafe GC retention parameters")
         from .gc_safety import GCReferenceGuard
         guard = GCReferenceGuard(self.manifests)
-        guard.validate_schema()
+        context = guard.load_context()
         db = self.db.connection
         found = db.execute(
             select(objects.c.id, objects.c.bucket, objects.c.object_key,
@@ -76,7 +76,7 @@ class StorageGCInventory:
             result.append({
                 "object_id": ident, "bucket": bucket, "key": key,
                 "updated_at": int(updated_at), "journaled_chunks": int(count),
-                **guard.evidence(ident),
+                **guard.evidence(ident, context=context),
                 "remote_history_scan_required": True,
                 "approved_for_deletion": False, "dry_run": True,
             })

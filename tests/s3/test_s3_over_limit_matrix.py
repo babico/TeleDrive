@@ -1,6 +1,6 @@
 """Every bounded S3 document refuses an over-limit body.
 
-The "over-limit" column of the per-operation matrix in `docs/S3_SPECS.md`.
+The "over-limit" column of the per-operation matrix in `docs/reference/s3-specs.md`.
 Each operation that accepts a request body declares a limit; this sweep sends
 just past it, with a VALID signature and a full permission set, and asserts:
 

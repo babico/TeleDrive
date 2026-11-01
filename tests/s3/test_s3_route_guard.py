@@ -224,7 +224,7 @@ def test_existing_sdk_query_and_paginated_listings_still_work(service):
 
 
 def test_116_operation_manifest_exactly_matches_reviewed_spec():
-    doc = (ROOT / "docs/S3_SPECS.md").read_text()
+    doc = (ROOT / "docs/reference/s3-specs.md").read_text()
     data = json.loads((ROOT / "teledrive/s3/operation_manifest.json").read_text())
     pattern = (
         r"^\| \[([A-Za-z0-9]+)\]\("

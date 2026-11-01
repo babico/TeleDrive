@@ -26,3 +26,6 @@ uploads/
 .docker-fault-evidence/
 scripts/.docker-fault-evidence/
 docker-compose.override.yml
+
+# MkDocs build output (published by the Docs workflow, not committed)
+site/

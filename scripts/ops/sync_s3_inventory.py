@@ -5,7 +5,7 @@ The manifest (teledrive/s3/operation_manifest.json) is the single source of
 truth for operation status. Four other places encode its totals and drift
 silently when a phase promotes operations:
 
-* docs/S3_SPECS.md                     — the human-readable inventory totals
+* docs/reference/s3-specs.md           — the human-readable inventory totals
 * tests/s3/test_s3_route_guard.py      — the Counter assertion
 * tests/meta/test_docs.py              — the docs total assertion string
 
@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "teledrive/s3/operation_manifest.json"
-SPECS = ROOT / "docs/S3_SPECS.md"
+SPECS = ROOT / "docs/reference/s3-specs.md"
 ROUTE_GUARD = ROOT / "tests/s3/test_s3_route_guard.py"
 META = ROOT / "tests/meta/test_docs.py"
 

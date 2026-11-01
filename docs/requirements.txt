@@ -1,0 +1,6 @@
+# Documentation build dependencies.
+#
+# Deliberately separate from requirements.txt: the service must not carry a
+# static-site generator, and the docs job must not install the service stack.
+mkdocs==1.6.1
+mkdocs-material==9.7.1

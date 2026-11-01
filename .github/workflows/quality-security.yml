@@ -46,7 +46,7 @@ jobs:
         run: |
           python -m pytest -q --durations=25 \
             tests/meta/test_ci_workflows.py \
-            tests/meta/test_docs.py \
+            tests/meta/test_docs.py tests/meta/test_docs_nav.py \
             tests/web/test_api_keys.py \
             tests/web/test_rest_api.py \
             tests/web/test_lifespan.py \

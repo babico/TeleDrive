@@ -280,7 +280,7 @@ operator-visible consequences and the migration for each.
 ## [1.0.8] - 2026-10-28
 
 Release candidate. The S3 coverage counts below and in
-[docs/S3_SPECS.md](docs/S3_SPECS.md) describe this tree, not the published
+[docs/S3_SPECS.md](docs/reference/s3-specs.md) describe this tree, not the published
 v1.0.7 binaries.
 
 ### Added
@@ -466,7 +466,7 @@ v1.0.7 binaries.
   grants are ignored in that mode; bucket ACLs still constrain bucket-level
   access. Deployments that relied on object ACLs must switch the bucket to
   `ObjectWriter` (or `BucketOwnerPreferred`). This is a deliberate
-  behaviour change, documented in [docs/UPGRADING.md](docs/UPGRADING.md).
+  behaviour change, documented in [docs/UPGRADING.md](docs/operate/upgrade.md).
 - **The S3 credential permission catalog grew from 18 to 88 scopes.** New
   credentials receive the full default set, but existing credentials keep
   their stored list. An existing credential that must call the new policy,
@@ -486,7 +486,7 @@ v1.0.7 binaries.
   configuration, replication, website configuration, lifecycle expiration,
   analytics/inventory/metrics configuration, rename, select, restore,
   annotations and intelligent-tiering. The authoritative per-operation
-  inventory is [docs/S3_SPECS.md](docs/S3_SPECS.md).
+  inventory is [docs/S3_SPECS.md](docs/reference/s3-specs.md).
 
 ### Fixed
 

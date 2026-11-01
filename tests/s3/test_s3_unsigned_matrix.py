@@ -1,7 +1,7 @@
 """Every supported S3 operation refuses an UNSIGNED request.
 
 This is the "missing / auth-failed" column of the per-operation matrix in
-`docs/S3_SPECS.md`, applied generically instead of per-operation: one table
+`docs/reference/s3-specs.md`, applied generically instead of per-operation: one table
 maps each supported manifest operation to the AWS-shaped request that names
 it, and the sweep sends that request with **no** Authorization header.
 

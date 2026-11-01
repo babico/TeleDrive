@@ -1,0 +1,134 @@
+site_name: TeleDrive
+site_description: Telegram-backed object storage with a REST API and an S3-compatible gateway.
+site_url: https://babico.github.io/TeleDrive/
+repo_url: https://github.com/babico/TeleDrive
+repo_name: babico/TeleDrive
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+exclude_docs: |
+  project/handoffs/**
+
+theme:
+  name: material
+  language: en
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search:
+      lang: en
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/babico/TeleDrive
+      name: TeleDrive on GitHub
+    - icon: fontawesome/solid/box
+      link: https://github.com/babico/TeleDrive/releases
+      name: Releases
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install: start/install.md
+      - Configure: start/configure.md
+      - First upload: start/first-upload.md
+  - Guide:
+      - Web UI: guide/web-ui.md
+      - REST API: guide/rest-api.md
+      - S3 API: guide/s3-api.md
+      - Telegram accounts: guide/telegram-accounts.md
+      - Local file jobs: guide/local-jobs.md
+      - Command line: guide/cli.md
+      - Databases: guide/databases.md
+      - Encryption: guide/encryption.md
+  - Operating:
+      - Backup and restore: operate/backup-restore.md
+      - Garbage collection: operate/garbage-collection.md
+      - Monitoring: operate/monitoring.md
+      - Reverse proxy: operate/reverse-proxy.md
+      - Website hosting: operate/website-hosting.md
+      - Upgrade: operate/upgrade.md
+      - Troubleshooting: operate/troubleshooting.md
+  - Security:
+      - Policy: security/policy.md
+      - Access model: security/model.md
+  - Reference:
+      - S3 compatibility: reference/s3-specs.md
+      - Configuration: reference/configuration.md
+      - Module map: reference/module-map.md
+      - CI and tests: reference/ci.md
+  - Project:
+      - Status: project/status.md
+      - Roadmap: project/roadmap.md
+      - Changelog: project/changelog.md
+      - Contributing: project/contributing.md
+      - License: project/license.md
+      - Reviews:
+          - Overview: project/reviews/index.md
+          - Full review 2026-10-31: project/reviews/review-2026-10-31.md
+          - API review: project/reviews/api-review.md
+          - Codebase review: project/reviews/codebase-review.md
+          - Audit 2026-10-29: project/reviews/audit-2026-10-29.md
+      - Plans:
+          - Overview: project/plans/index.md
+          - Post-1.0.8 plan: project/plans/post-108.md
+          - S3 full coverage: project/plans/s3-full-coverage.md
+          - Metadata parity: project/plans/metadata-parity.md
+          - Local acceptance: project/plans/local-acceptance.md
+      - Releases:
+          - Overview: project/releases/index.md
+          - v1.0.8: project/releases/v1.0.8.md

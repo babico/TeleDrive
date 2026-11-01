@@ -1,4 +1,4 @@
-"""Crash/restart column of the per-operation matrix in `docs/S3_SPECS.md`.
+"""Crash/restart column of the per-operation matrix in `docs/reference/s3-specs.md`.
 
 "Crash/restart" means: the process dies between two observable steps, a NEW
 connection and a new store/catalog are opened against the SAME database, and

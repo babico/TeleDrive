@@ -71,7 +71,7 @@ def test_workflow_parses_and_has_jobs_with_no_continue_on_error(name):
     assert not re.search(r"(?m)^\s*continue-on-error:\s*true", path.read_text())
 
 
-@pytest.mark.parametrize("name", EXPECTED)
+@pytest.mark.parametrize("name", (*EXPECTED, "docs-pages.yml"))
 def test_all_external_actions_are_pinned_to_full_commit_sha(name):
     path = WORKFLOWS / name
     for action in re.findall(r"(?m)^\s*uses:\s*(\S+)", path.read_text()):
@@ -763,7 +763,8 @@ def test_live_multiworker_runs_on_main_every_push():
 
 def test_reusable_docker_fault_injection_workflow_contract():
     """Independent Docker fault injection persists across roadmap phases."""
-    assert sorted(p.name for p in WORKFLOWS.glob("*.yml")) == sorted([*EXPECTED, "endurance-capacity.yml"])
+    assert sorted(p.name for p in WORKFLOWS.glob("*.yml")) == sorted(
+        [*EXPECTED, "endurance-capacity.yml", "docs-pages.yml"])
     doc = workflow("resilience-docker.yml")
     assert doc["name"] == "CI 3 · Image & Resilience — build, scan, smoke, fault injection"
     assert "workflow_dispatch" in doc["on"]
@@ -777,8 +778,8 @@ def test_reusable_docker_fault_injection_workflow_contract():
     assert (ROOT / ".github/ci/fault-injection/Dockerfile").is_file()
     assert (ROOT / ".github/ci/fault-injection/Dockerfile.dockerignore").is_file()
     assert (ROOT / "scripts/dev/docker_fault_scenarios.py").is_file()
-    assert (ROOT / "docs/CI_WORKFLOWS.md").is_file()
-    assert "DEV-13" in (ROOT / "docs/CI_WORKFLOWS.md").read_text(encoding="utf-8")
+    assert (ROOT / "docs/reference/ci.md").is_file()
+    assert "DEV-13" in (ROOT / "docs/reference/ci.md").read_text(encoding="utf-8")
 
 
 def test_docker_fault_config_has_every_required_runtime_upload_field():
@@ -870,8 +871,9 @@ def test_canonical_docs_and_generated_release_notes():
     ):
         assert not (ROOT / "docs" / name).exists(), name
     for name, required_sections in (
-        ("CI_WORKFLOWS.md", ("DEV-01", "DEV-13", "resilience-docker.yml")),
-        ("IMPLEMENTATION_STATUS.md", ("P0", "P1", "P2", "verify_production_bundle.py")),
+        ("reference/ci.md", ("DEV-01", "DEV-13", "resilience-docker.yml")),
+        ("project/status.md", ("P0", "P1", "P2",
+                               "verify_production_bundle.py")),
     ):
         content = (ROOT / "docs" / name).read_text(encoding="utf-8")
         assert all(section in content for section in required_sections), name
@@ -923,7 +925,7 @@ def test_explicit_dependencies_and_isolated_docker_build_contexts():
     assert service.get("healthcheck", {}).get("test")
     assert service.get("logging", {}).get("driver") == "json-file"
     assert "web.unified" in (ROOT / "Dockerfile").read_text("utf-8")
-    assert (ROOT / "docs/SECURITY.md").is_file()
+    assert (ROOT / "docs/security/policy.md").is_file()
     assert not (ROOT / "SECURITY.md").exists()
 
 
@@ -1031,7 +1033,7 @@ def test_paginated_bucket_listing_contract_is_required_in_both_ci_suites():
         commands = "\n".join(s.get("run", "")
             for job in workflow(name)["jobs"].values() for s in job["steps"])
         assert "tests/s3/test_s3_bucket_listing.py" in commands
-    specs = (ROOT / "docs/S3_SPECS.md").read_text()
+    specs = (ROOT / "docs/reference/s3-specs.md").read_text()
     action = "| [ListBuckets](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html)"
     assert len([line for line in specs.splitlines() if line.startswith(action)]) == 1
     assert any(line.startswith(action) and "✅ Supported" in line

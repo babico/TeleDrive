@@ -1,6 +1,6 @@
 """Every XML-bodied S3 operation refuses malformed input without mutating.
 
-The "malformed" column of the per-operation matrix in `docs/S3_SPECS.md`.
+The "malformed" column of the per-operation matrix in `docs/reference/s3-specs.md`.
 Each case sends a body that is:
 
 * syntactically broken XML, or

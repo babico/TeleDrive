@@ -1,5 +1,10 @@
 # TeleDrive
 
+[![Docs](https://img.shields.io/badge/docs-babico.github.io%2FTeleDrive-009688)](https://babico.github.io/TeleDrive/)
+[![CI](https://github.com/babico/TeleDrive/actions/workflows/quality-security.yml/badge.svg)](https://github.com/babico/TeleDrive/actions/workflows/quality-security.yml)
+[![License: WTFPL](https://img.shields.io/badge/license-WTFPL-blue)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB)](https://www.python.org/)
+
 **Telegram-backed object storage with a web UI, a REST API and a real
 S3-compatible gateway.**
 

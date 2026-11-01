@@ -16,7 +16,7 @@ stays bounded and index-friendly):
   inline SQL text here; 1 KiB keeps a full object's annotations inside one
   row-page and makes the 50-annotation cap genuinely small.
 * at most 50 annotations per object. AWS permits 1,000; 50 is the chosen
-  bound (documented in docs/S3_FULL_COVERAGE_PLAN.md O2) and is enforced
+  bound (documented in docs/project/plans/s3-full-coverage.md O2) and is enforced
   inside the write transaction with ``AnnotationLimitExceeded``.
 
 The AWS wire shape is authoritative:

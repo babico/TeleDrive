@@ -10,7 +10,7 @@ The first boot creates a hardcoded ``admin``/``admin`` account if (and
 only if) no user named ``admin`` exists. It is never configurable and an
 existing admin row is never overwritten, so changing that password
 survives restarts. Programmatic clients use API keys, which keep their
-existing per-route scope semantics unchanged. See ``docs/UPGRADING.md``.
+existing per-route scope semantics unchanged. See ``docs/operate/upgrade.md``.
 """
 from __future__ import annotations
 

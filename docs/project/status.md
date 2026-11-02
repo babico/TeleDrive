@@ -105,26 +105,13 @@ authorization to delete Telegram media. See
 [Local acceptance](plans/local-acceptance.md) for the executable mission and
 [Backup and restore](../operate/backup-restore.md) for the procedures.
 
-## 5. Physical garbage collection: disabled
+## 5. Physical garbage collection: owner-operated, currently disabled
 
-`deletion_permitted` is `False`. The collector, reference graph, leases and
-dry-run planner are implemented and race-tested, but no Telegram media has
-been deleted by TeleDrive.
+The GC plan/evidence artifact reports `deletion_permitted: false`; this is **not** a hard authorization switch for the admin API. The real collector is controlled by the admin `enabled` setting and the explicit `PHYSICAL-GC` / `DELETE-RETAINED` confirmations. With GC disabled, no physical delete runs. A user who deliberately enables it can perform eligible physical deletion without a mandatory signed production-acceptance bundle, second-party approval or proof of independent backup. This is the owner's decision.
 
-Two-person approval is **not** required — an owner decision. What is still
-required:
+The collector still enforces the actual reference graph, retention/legal holds, send-intent and lease/race fences; enabling GC must never make live or otherwise protected chunks eligible. Before enabling, an independent payload backup, isolated restore and complete dry-run inventory are **strong recommendations**, not API-enforced prerequisites. The separate production-acceptance gates in section 4 are certification evidence and remain unsigned; they must not be confused with the owner's GC toggle.
 
-1. an independent backup host or verified payload export;
-2. a successful isolated restore drill of original media;
-3. owner-authorized rate-limit and recovery evidence;
-4. a signed dry-run plan with complete remote inventory and resolved
-   references;
-5. explicit owner authorization for physical deletion.
-
-Deleted Telegram message IDs cannot be restored from SQL. A SQL backup alone
-restores metadata, not payloads. The WebUI toggle and `POST
-/api/v1/admin/storage/gc/collect` remain admin-only and refuse execution while
-the gate is off.
+**Data-loss warning:** a deleted Telegram message cannot be restored by importing a SQL dump, and an in-progress collection is not instantly cancelled by disabling GC. The service does not promise recoverability without independent payload backups. See [Garbage collection](../operate/garbage-collection.md).
 
 ## 6. Recovery limits
 

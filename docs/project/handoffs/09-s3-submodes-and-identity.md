@@ -15,15 +15,15 @@
 ## Identity vocabulary (explain before building)
 
 - **AWS IAM** = Identity and Access Management: users/roles and policies specifying who may call actions on resources. TeleDrive already has local roles, API-key scopes and bucket policy but **not** an AWS IAM control plane.
-- **AWS STS** = Security Token Service: short-lived access key + secret + security token (e.g. AssumeRole). To emulate, implement a real issuing, expiry, revocation, role-scoped authorization and SigV4 session-token verifier; never accept token headers then ignore them. S3 Express \`CreateSession\` is a distinct bucket-scoped session flow, not a general STS replacement.
+- **AWS STS** = Security Token Service: short-lived access key + secret + security token (e.g. AssumeRole). To emulate, implement a real issuing, expiry, revocation, role-scoped authorization and SigV4 session-token verifier; never accept token headers then ignore them. S3 Express `CreateSession` is a distinct bucket-scoped session flow, not a general STS replacement.
 - **AWS KMS / S3 SSE-KMS** = provider-managed cryptographic key service and S3-managed data encryption by a KMS key. TeleDrive currently has **SSE-C** (client provides encryption key) and opt-in **SSE-S3-like envelope** (deployment keeps the KEK). This is **not** SSE-KMS.
 
 ## Decision path
 
 1. Keep current scoped S3 credentials + SSE-C + envelope as default.
-2. If external key custody matters, define a \`KeyProvider\` interface (local KEK / AWS KMS / Vault-compatible provider) with per-object envelope key wrap/unwrap, IAM-equivalent access policy, rotation, failure/revocation and audit. Only advertise \`aws:kms\` when a genuine external KMS backend and authorization paths are proven.
-3. If clients require STS, create a separate temporary credentials issuer bound to local roles/policies and signed \`x-amz-security-token\`, with cross-process SQL revocation. Don't return real AWS ARN or account IDs for nonexistent AWS accounts.
-4. Add a machine-tested parameter-level compatibility ledger with \`SUPPORTED\`, \`REJECTED\`, \`UNVERIFIED\` per option, not just each API operation; link each entry to tests/CI.
+2. If external key custody matters, define a `KeyProvider` interface (local KEK / AWS KMS / Vault-compatible provider) with per-object envelope key wrap/unwrap, IAM-equivalent access policy, rotation, failure/revocation and audit. Only advertise `aws:kms` when a genuine external KMS backend and authorization paths are proven.
+3. If clients require STS, create a separate temporary credentials issuer bound to local roles/policies and signed `x-amz-security-token`, with cross-process SQL revocation. Don't return real AWS ARN or account IDs for nonexistent AWS accounts.
+4. Add a machine-tested parameter-level compatibility ledger with `SUPPORTED`, `REJECTED`, `UNVERIFIED` per option, not just each API operation; link each entry to tests/CI.
 5. Prioritize broad-catch audit, router split, shared JS helpers, configurable /data and /uploads, shared fixtures, migration/rollback notes and documentation consistency checks after correctness work.
 
 ## Acceptance

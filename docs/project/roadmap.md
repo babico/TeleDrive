@@ -6,6 +6,10 @@ Evidence boundaries are in [Project status](status.md), CI mechanics in
 [CI and tests](../reference/ci.md), and the S3 operation matrix in
 [S3 compatibility](../reference/s3-specs.md).
 
+## New queued implementation track (2026-11-02)
+
+The [S3 fidelity and recovery execution plan](plans/2026-11-02-s3-fidelity.md) and [handoffs 06–10](handoffs/README.md) describe the next implementation queue. These are **planned, not delivered**: GetObject partNumber, true directory bucket sessions, cold payload archival/restore, versioning/Object Lock/lifecycle/ACL/policy submode parity, server-enforced first-boot admin password rotation, and expanded P1/P2/P3 tests, refactor and documentation checks. Original-media DR and independent-host payload backup are owner-run procedures. Physical GC remains an owner-operated toggle without a mandatory signed acceptance bundle.
+
 ## 1. Completed milestones (summary)
 
 - [x] One Telethon USER MTProto transport; the Bot API, desktop app and

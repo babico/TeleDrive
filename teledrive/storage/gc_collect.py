@@ -28,6 +28,7 @@ import time
 from sqlalchemy import (BigInteger, Boolean, Column, Index, Integer, String,
                         Table, Text, and_, delete, func, insert, inspect, not_,
                         or_, select, text, update)
+from sqlalchemy.exc import IntegrityError
 
 from .catalog import heads, published_versions, removed_versions
 from .manifest import (ChunkReference, chunks, metadata,
@@ -351,7 +352,11 @@ class RetainedMediaGC:
         try:
             self.db.connection.execute(insert(gc_leases).values(
                 object_id=object_id, claimed_ns=now, owner=self._owner))
-        except Exception:
+        except IntegrityError:
+            # Only the documented race ("someone else owns it") lands
+            # here. Any other INSERT failure must propagate: swallowing
+            # it would report a healthy claim skip for what is really a
+            # DB outage, hiding the failure from the report.
             self.db.connection.rollback()
             return False
         self.db.commit()
@@ -363,6 +368,11 @@ class RetainedMediaGC:
                 gc_leases.c.object_id == object_id))
             self.db.commit()
         except Exception:
+            # Best effort: an unreleased lease self-expires after its
+            # TTL, only delaying the next collect attempt. The failed
+            # delete still needs a trace or a stuck lease is invisible.
+            _logger.warning("GC lease release failed for %s", object_id,
+                            exc_info=True)
             self.db.connection.rollback()
 
     # -- execution -------------------------------------------------------
@@ -397,6 +407,10 @@ class RetainedMediaGC:
                 outcome = await self._collect_object(transport, object_id,
                                                      scope)
             except Exception as exc:  # per-object isolation
+                # The report row carries the reason back to the caller;
+                # this log keeps the full traceback for the operator.
+                _logger.warning("GC collection failed for object %s",
+                                object_id, exc_info=True)
                 report["failed"].append({
                     "object_id": object_id, "reason": str(exc)[:200]})
                 continue

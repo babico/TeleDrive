@@ -24,6 +24,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 
@@ -31,6 +32,8 @@ from sqlalchemy import (BigInteger, Column, Index, Integer, String, Table,
                         Text, delete, insert, select)
 
 from teledrive.db import metadata
+
+_logger = logging.getLogger(__name__)
 
 audit_events = Table(
     "security_audit_events",
@@ -83,6 +86,10 @@ def record(db, *, action: str, actor: str, outcome: str = "ok",
             payload = _scrub(json.dumps(detail, sort_keys=True,
                                         default=str))[:4000]
         except Exception:
+            # The event is still recorded without its detail blob; only
+            # the detail is lost, never the event itself.
+            _logger.debug("audit detail serialization failed for %s",
+                          action, exc_info=True)
             payload = None
     try:
         db.connection.execute(insert(audit_events).values(
@@ -96,10 +103,22 @@ def record(db, *, action: str, actor: str, outcome: str = "ok",
         ))
         db.commit()
     except Exception:
+        # Contract above: never raise. But a security event that failed to
+        # reach the durable table is itself security-relevant (only the
+        # in-memory buffer keeps it, and that is lost on restart), so the
+        # operator must at least see it in the log. No detail is logged:
+        # only the scrubbed action/actor/outcome columns.
+        _logger.warning(
+            "security audit event could not be recorded "
+            "(action=%s actor=%s outcome=%s)", action, actor, outcome,
+            exc_info=True)
         try:
             db.connection.rollback()
         except Exception:
-            pass
+            # Nested cleanup; the connection resurfaces the real problem
+            # on the next statement.
+            _logger.debug("audit rollback after failed record also failed",
+                          exc_info=True)
 
 
 def recent(db, *, limit: int = 100, action: str | None = None,

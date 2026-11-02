@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from teledrive.storage.catalog import BucketCatalog, buckets, heads
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.s3.object_metadata import ObjectMetadataStore
 from teledrive.storage.manifest import chunks, object_encryption, objects
+
+_logger = logging.getLogger(__name__)
 
 MIN_PART_SIZE = 5 * 1024 * 1024
 MAX_PARTS = 10000
@@ -363,7 +366,11 @@ class MultipartStore:
                     bucket=bucket, object_key=key,
                 )
             except Exception:
-                pass
+                # Notification enqueue is best effort by contract: it must
+                # never fail the abort. enqueue_event_safely isolates its
+                # own failures; this boundary only fires on import errors.
+                _logger.debug("abort notification enqueue boundary failed "
+                              "for %s/%s", bucket, key, exc_info=True)
             try:
                 from teledrive.s3.metadata_journal import journal_event_safely
                 journal_event_safely(
@@ -371,7 +378,10 @@ class MultipartStore:
                     object_key=key, detail={"reason": "multipart_aborted"},
                 )
             except Exception:
-                pass
+                # Metadata journaling is best effort by contract; import
+                # failure is the only case that reaches here.
+                _logger.debug("abort metadata journal boundary failed for "
+                              "%s/%s", bucket, key, exc_info=True)
         self.db.commit()
         if changed.rowcount != 1:
             raise MultipartError("OperationAborted", "Concurrent multipart mutation", 409)
@@ -420,6 +430,12 @@ class MultipartStore:
                     lost.set()
                     return
             except Exception:
+                # The lost flag fails the completion loudly ("lost
+                # ownership"), but the underlying cause (DB outage)
+                # would otherwise be invisible in the log.
+                _logger.warning(
+                    "completion lease heartbeat failed for %s; fencing "
+                    "completion", identifier, exc_info=True)
                 self.db.connection.rollback()
                 lost.set()
                 return
@@ -828,7 +844,13 @@ class MultipartStore:
                         bucket=bucket, object_key=key, version_id=object_id,
                     )
                 except Exception:
-                    pass
+                    # Notification enqueue is best effort by contract: it
+                    # must never fail the completed publication.
+                    # enqueue_event_safely isolates its own failures; this
+                    # boundary only fires on import errors.
+                    _logger.debug(
+                        "completion notification enqueue boundary failed "
+                        "for %s/%s", bucket, key, exc_info=True)
                 try:
                     from teledrive.s3.metadata_journal import journal_event_safely
                     journal_event_safely(
@@ -837,7 +859,11 @@ class MultipartStore:
                         detail={"multipart": True},
                     )
                 except Exception:
-                    pass
+                    # Metadata journaling is best effort by contract;
+                    # import failure is the only case that reaches here.
+                    _logger.debug(
+                        "completion metadata journal boundary failed for "
+                        "%s/%s", bucket, key, exc_info=True)
                 self.db.commit()
             except BaseException:
                 self.db.connection.rollback()

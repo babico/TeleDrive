@@ -7,6 +7,7 @@ remain available after replacement/removal until explicit safe GC.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 
 from sqlalchemy import inspect, text
@@ -20,6 +21,8 @@ from .catalog_tables import (
 )
 from .catalog_versions import BucketVersionMixin
 from .manifest import ManifestStore, StoredObject, objects
+
+_logger = logging.getLogger(__name__)
 
 # Re-exported for the existing import sites (``web/s3_gateway/*``, copy.py,
 # gc_collect.py, multipart.py and the tests all import these names from
@@ -76,8 +79,10 @@ class BucketCatalog(
                 object_key=key, version_id=version_id,
             )
         except Exception:
-            # The notification module already isolates its own failures.
-            pass
+            # The notification module already isolates its own failures;
+            # this boundary only fires on the import itself failing.
+            _logger.debug("notification enqueue boundary failed for %s/%s",
+                          bucket, key, exc_info=True)
 
     def _journal_metadata(self, event: str, bucket: str, key: str, *,
                           version_id: str | None = None,
@@ -95,8 +100,10 @@ class BucketCatalog(
                 object_key=key, version_id=version_id, detail=detail,
             )
         except Exception:
-            # journal_event_safely already isolates its own failures.
-            pass
+            # journal_event_safely already isolates its own failures; this
+            # boundary only fires on the import itself failing.
+            _logger.debug("metadata journal boundary failed for %s/%s",
+                          bucket, key, exc_info=True)
 
     def _apply_pending_tags(self, identifier: str) -> None:
         """Apply a Phase J tag journal in the current publish transaction."""

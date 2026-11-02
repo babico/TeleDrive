@@ -320,7 +320,11 @@ def _active_channel_from_db() -> str | None:
             conn.close()
         if row and row[0]:
             return str(row[0]).strip()
-    except Exception:
+    except Exception as exc:
+        # Same contract as the other startup config reads: a missing table
+        # (fresh install) falls back silently, anything else must be visible
+        # or the runtime boots with the placeholder channel.
+        _warn_unexpected_db_fallback("active channel", exc)
         return None
     return None
 
@@ -417,6 +421,12 @@ class UserSessionRuntime:
                     try:
                         channel = await client.get_entity(target_id)
                     except Exception:
+                        # Expected for human channel titles (get_entity
+                        # only resolves usernames/URLs); the dialog-title
+                        # match below is the documented fallback.
+                        _module_logger.debug(
+                            "get_entity(%r) failed; falling back to dialog "
+                            "title match", target_id)
                         channel = None
                     if channel is None:
                         # The UI accepts human channel names; get_entity
@@ -653,7 +663,14 @@ class UnifiedUserTransport:
                     "WHERE account = :account"
                 ), {"account": account}).scalar() or 0
                 over = int(used) >= int(quota)
-        except Exception:
+        except Exception as exc:
+            # Table absence on a legacy database is the documented degrade;
+            # any other DB failure silently disables quota-aware routing
+            # and must be visible (bounded by the 60s cache).
+            if not _is_missing_table_error(exc):
+                _module_logger.warning(
+                    "soft-quota check failed for account %s; assuming "
+                    "not over quota: %s", account, exc)
             over = False
         self._quota_cache[account] = (now, over)
         return over
@@ -675,7 +692,14 @@ class UnifiedUserTransport:
                 "WHERE bucket = :bucket"
             ), {"bucket": bucket}).scalar_one_or_none()
             return str(row) if row else None
-        except Exception:
+        except Exception as exc:
+            # A pin is explicit operator intent: dropping it silently (DB
+            # outage) re-routes uploads against that intent. Missing table
+            # on a legacy database stays quiet, matching the quota check.
+            if not _is_missing_table_error(exc):
+                _module_logger.warning(
+                    "bucket→account pin lookup failed; routing without "
+                    "pin: %s", exc)
             return None
 
     async def verify_target(self):
@@ -721,7 +745,11 @@ class UnifiedUserTransport:
                         if label != account and not self._account_over_quota(label):
                             return label
             except Exception:
-                pass
+                # _account_over_quota swallows its own errors, so this is
+                # pure defense; the strategy's original choice stands.
+                _module_logger.debug(
+                    "soft-quota preference skipped during account "
+                    "selection", exc_info=True)
         return account
 
     def replica_account(self) -> str | None:
@@ -815,7 +843,14 @@ class UnifiedUserTransport:
                 raise RuntimeError(
                     "MTProto flood-wait persists; reconcile protected intent before retry"
                 ) from None
-            except Exception:
+            except Exception as exc:
+                # The raise below deliberately reports an UNCERTAIN outcome
+                # (the intent stays protected), but the actual cause must
+                # not vanish: `from None` hides it from the traceback.
+                _module_logger.warning(
+                    "MTProto send failed for object %s chunk %d "
+                    "(intent protected): %s: %s",
+                    object_id, ordinal, type(exc).__name__, exc)
                 raise RuntimeError(
                     "MTProto send outcome uncertain; reconcile protected intent before retry"
                 ) from None

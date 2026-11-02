@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from teledrive.db import Database, bucket_account_pins
 
@@ -25,8 +26,12 @@ def set(db: Database, bucket: str, account: str, now: int) -> None:
             db.connection.execute(insert(bucket_account_pins).values(
                 bucket=bucket, **values,
             ))
-        except Exception:
+        except IntegrityError:
             # Lost the race: the row now exists, so apply the update.
+            # Only the unique-constraint race may take this path: any
+            # other INSERT failure must propagate, because the fallback
+            # UPDATE would silently affect 0 rows and the caller would
+            # believe a pin was set that never was.
             db.connection.rollback()
             db.connection.execute(
                 update(bucket_account_pins)

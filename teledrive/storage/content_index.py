@@ -87,6 +87,10 @@ def extract_text(path: Path, key: str) -> str | None:
         text = data[:MAX_INDEX_BYTES].decode("utf-8", "replace")
         return text
     except Exception:
+        # Documented contract: None means 'not indexable'. An IO error on
+        # the staged source leaves the object unindexed (search misses it)
+        # without failing the upload; keep a trace for diagnosis.
+        _logger.debug("text extraction failed for %s", path, exc_info=True)
         return None
 
 
@@ -150,7 +154,10 @@ def index_object_content(database, object_id: str, path: Path,
         try:
             database.connection.rollback()
         except Exception:
-            pass
+            # Nested cleanup: the indexing failure itself is already
+            # logged below; a failed rollback resurfaces on the next
+            # statement on this connection.
+            _logger.debug("indexing rollback also failed", exc_info=True)
         _logger.warning("content indexing failed for %s", object_id,
                         exc_info=True)
         return False

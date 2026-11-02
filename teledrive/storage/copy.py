@@ -6,6 +6,7 @@ Telegram messages: future GC must preserve media while aliases reference it.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from uuid import uuid4
@@ -18,6 +19,8 @@ from teledrive.storage.manifest import object_aliases, objects
 from teledrive.s3.multipart import MultipartStore, multipart_etags
 from teledrive.s3.tagging import ObjectTagStore
 from teledrive.s3.object_metadata import ObjectMetadataStore
+
+_logger = logging.getLogger(__name__)
 
 
 class CopyConflict(ValueError):
@@ -164,7 +167,12 @@ def copy_object(
                 version_id=identifier,
             )
         except Exception:
-            pass
+            # Notification enqueue is best effort by contract: it must
+            # never fail the copy. enqueue_event_safely isolates its own
+            # failures; this boundary only fires on the import failing.
+            _logger.debug("copy notification enqueue boundary failed for "
+                          "%s/%s", destination_bucket, destination_key,
+                          exc_info=True)
         try:
             from teledrive.s3.metadata_journal import journal_event_safely
             journal_event_safely(
@@ -174,7 +182,11 @@ def copy_object(
                 detail={"source_key": source_key, "copy": True},
             )
         except Exception:
-            pass
+            # Metadata journaling is best effort by contract (see
+            # journal_event_safely); import failure is the only case here.
+            _logger.debug("copy metadata journal boundary failed for "
+                          "%s/%s", destination_bucket, destination_key,
+                          exc_info=True)
         db.commit()
         return CopiedObject(identifier, original_tag, source.size, source.id)
     except IntegrityError as exc:

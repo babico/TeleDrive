@@ -37,6 +37,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import logging
 import re
 import threading
 import weakref
@@ -49,6 +50,8 @@ from sqlalchemy import (BigInteger, Column, ForeignKey, String, Table, Text,
 
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.manifest import metadata as annotation_metadata
+
+_logger = logging.getLogger(__name__)
 
 NS = "http://s3.amazonaws.com/doc/2006-03-01/"
 MAX_ANNOTATION_NAME_BYTES = 128
@@ -324,7 +327,11 @@ class AnnotationStore:
                 detail={"annotation": name},
             )
         except Exception:
-            pass
+            # Metadata journaling is best effort by contract (see
+            # journal_event_safely); this boundary only fires on the
+            # import itself failing.
+            _logger.debug("annotation journal boundary failed for %s",
+                          object_id, exc_info=True)
 
     def list(self, object_id: str, *, prefix: str = "",
              after: str | None = None, limit: int = MAX_ANNOTATION_RESULTS

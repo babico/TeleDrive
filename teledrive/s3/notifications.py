@@ -772,8 +772,17 @@ class NotificationDelivery:
                 try:
                     self.sender.send(config[0], body, headers)
                 except Exception as exc:
+                    # The outbox row durably records attempts and the
+                    # error class; this log keeps the server-side trace
+                    # for the operator. Log-and-continue by contract.
+                    _LOGGER.debug("webhook delivery failed for event %s "
+                                  "(attempt %d): %s", row_id, attempts + 1,
+                                  type(exc).__name__)
                     attempts += 1
                     if attempts >= MAX_ATTEMPTS:
+                        _LOGGER.warning(
+                            "webhook delivery abandoned for event %s after "
+                            "%d attempts", row_id, MAX_ATTEMPTS)
                         self._mark(row_id, attempts=attempts,
                                    next_retry_ns=now_ns,
                                    delivered_ns=now_ns,

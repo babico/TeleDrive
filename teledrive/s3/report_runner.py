@@ -51,6 +51,7 @@ import csv
 import gzip
 import io
 import json
+import logging
 import os
 import tempfile
 import time
@@ -64,6 +65,8 @@ from teledrive.s3.report_configs import report_configs
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
+
+_logger = logging.getLogger(__name__)
 
 DAY_NS = 86400 * 1_000_000_000
 WEEK_NS = 7 * DAY_NS
@@ -401,10 +404,18 @@ async def run_due_reports(catalog: BucketCatalog, now, *, transport,
                      last_error=None))
             catalog.db.commit()
         except Exception as exc:
+            # Per-config isolation (docstring: the failure is recorded in
+            # last_error and the summary). The log keeps the traceback.
+            _logger.warning(
+                "report generation failed for %s/%s/%s",
+                row["bucket"], row["kind"], row["config_id"], exc_info=True)
             try:
                 connection.rollback()
             except Exception:
-                pass
+                # Nested cleanup on an already-failing connection; the
+                # last_error write below resurfaces any real problem.
+                _logger.debug("report runner rollback also failed",
+                              exc_info=True)
             message = f"{type(exc).__name__}: {exc}"[:1024]
             connection.execute(update(report_configs).where(
                 report_configs.c.bucket == row["bucket"],

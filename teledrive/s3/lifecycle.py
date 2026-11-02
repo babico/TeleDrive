@@ -4,6 +4,7 @@ Never deletes Telegram messages, object manifests, or any completed version.
 """
 from __future__ import annotations
 import json
+import logging
 import time
 from xml.etree import ElementTree as ET
 from defusedxml import ElementTree as SafeET
@@ -11,6 +12,8 @@ from defusedxml.common import DefusedXmlException
 from sqlalchemy import Column, ForeignKey, String, Table, Text, or_, select, insert, update, delete
 from sqlalchemy.exc import IntegrityError
 from teledrive.storage.catalog import BucketCatalog, catalog_metadata, heads as heads_table
+
+_logger = logging.getLogger(__name__)
 
 NS = "http://s3.amazonaws.com/doc/2006-03-01/"
 MAX_XML = 32768
@@ -195,6 +198,12 @@ class BucketLifecycleStore:
             from teledrive.storage.gc_collect import RetainedMediaGC
             gcx = RetainedMediaGC(self.db)
         except Exception:
+            # Optional subsystem: physical GC enqueue must never prevent
+            # the logical lifecycle expiry itself. Degrade to logical-only
+            # and leave a trace (the media stays until GC is available).
+            _logger.warning(
+                "physical GC unavailable; lifecycle applies logical "
+                "expiry only", exc_info=True)
             gcx = None
         gc_enabled = bool(gcx and gcx.state()["enabled"])
         count = 0

@@ -7,6 +7,7 @@ source. An object head is locked before current-version tag mutation.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from sqlalchemy import (
@@ -19,6 +20,9 @@ from teledrive.storage.catalog import (
     catalog_metadata,
 )
 from teledrive.storage.manifest import metadata as _meta, objects
+
+_logger = logging.getLogger(__name__)
+
 object_tags = Table(
     "storage_object_tags", _meta,
     Column("object_id", String(36), ForeignKey("storage_objects.id"), primary_key=True),
@@ -205,7 +209,11 @@ class ObjectTagStore:
                 detail={"tag_count": len(tags)},
             )
         except Exception:
-            pass
+            # Metadata journaling is best effort by contract (see
+            # journal_event_safely); this boundary only fires on the
+            # import itself failing.
+            _logger.debug("tag journal boundary failed for %s/%s",
+                          bucket, key, exc_info=True)
 
     def replace_published(self, bucket: str, key: str, identifier: str,
                           tags: list[tuple[str, str]]) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import time
@@ -24,6 +25,8 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from .catalog import BucketCatalog
 from .engine import TelegramObjectStorage
 from .manifest import objects
+
+_logger = logging.getLogger(__name__)
 
 _meta = MetaData()
 jobs = Table(
@@ -427,6 +430,12 @@ class StorageUploadJobs:
                     lost.set()
                     return
             except Exception:
+                # The lost flag fails the job loudly ("lease lost"), but
+                # the underlying cause (DB outage) would otherwise be
+                # invisible in the log.
+                _logger.warning(
+                    "job lease heartbeat failed for %s; fencing job",
+                    ident, exc_info=True)
                 self.db.connection.rollback()
                 lost.set()
                 return

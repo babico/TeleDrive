@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import insert, select
+from sqlalchemy.exc import IntegrityError
 
 from teledrive.db import Database
 from teledrive.storage.content_index import search_content
@@ -40,9 +41,11 @@ def ensure_row(db: Database, object_id: str, indexed_at: int, *,
         db.connection.execute(insert(content_index).values(
             object_id=object_id, text="", indexed_at=indexed_at,
         ))
-    except Exception:
+    except IntegrityError:
         # Lost the insert race: the row exists, which is all the caller
-        # needs. The rollback discards the failed statement.
+        # needs. The rollback discards the failed statement. Only the
+        # unique-constraint race may take this path -- any other failure
+        # must propagate instead of quietly marking the object examined.
         db.connection.rollback()
         return False
     if commit:

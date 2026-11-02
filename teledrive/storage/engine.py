@@ -99,6 +99,11 @@ class TelegramObjectStorage:
                     lost.set()
                     return
             except Exception:
+                # The lost flag fails the upload with ManifestError, but the
+                # underlying cause (DB outage) would otherwise be invisible.
+                _engine_logger.warning(
+                    "writer lease heartbeat failed for %s; fencing writer",
+                    identifier, exc_info=True)
                 lost.set()
                 return
 
@@ -203,11 +208,18 @@ class TelegramObjectStorage:
             )
         except Exception:
             # Dedup is an optimization: any failure falls back to a
-            # normal upload.
+            # normal upload. A serious failure (bad source, DB outage)
+            # re-raises on the normal path, so debug is enough here.
+            _engine_logger.debug("dedup lookup missed; uploading normally",
+                                 exc_info=True)
             try:
                 self.manifests.db.connection.rollback()
             except Exception:
-                pass
+                # The transaction is already doomed; the normal upload
+                # path re-raises any real connection problem.
+                _engine_logger.debug(
+                    "dedup rollback after failed lookup also failed",
+                    exc_info=True)
             return None
 
     def _replica_target(self) -> str | None:
@@ -216,6 +228,10 @@ class TelegramObjectStorage:
         try:
             return resolver() if callable(resolver) else None
         except Exception:
+            # Replication is silently disabled when the transport cannot
+            # answer; that must at least leave a trace.
+            _engine_logger.debug("replica target resolution failed",
+                                 exc_info=True)
             return None
 
     def replication_destination(self, bucket: str, key: str) -> str | None:
@@ -278,6 +294,11 @@ class TelegramObjectStorage:
             return replace(part, account=coords[0], chat_id=coords[1],
                            message_id=coords[2])
         except Exception:
+            # The caller re-raises the primary fetch failure when no
+            # replica reference can be produced; keep the lookup's own
+            # reason visible for diagnosis.
+            _engine_logger.debug("replica reference lookup failed for %s",
+                                 identifier, exc_info=True)
             return None
 
     async def repair_replicas(self, identifier: str) -> int:
@@ -450,7 +471,13 @@ class TelegramObjectStorage:
                         index_object_content(
                             self.manifests.db, result.id, source, key)
                     except Exception:
-                        pass
+                        # Content-index mirroring is best effort by design
+                        # (search is an accelerator); index_object_content
+                        # logs its own failures. This boundary only fires
+                        # on the import itself failing.
+                        _engine_logger.debug(
+                            "content indexing boundary failed for %s",
+                            result.id, exc_info=True)
                 return result
             except BaseException as exc:
                 # Do not delete recorded Telegram chunks here. They form a
@@ -459,7 +486,12 @@ class TelegramObjectStorage:
                     self.manifests.fail(identifier, type(exc).__name__, int(time.time()),
                                         writer_token=token)
                 except Exception:
-                    pass
+                    # The original failure re-raises below; a failed
+                    # fail() only leaves the object pending until the
+                    # writer TTL expires, which the reclaim path handles.
+                    _engine_logger.debug(
+                        "could not mark object %s failed after upload error",
+                        identifier, exc_info=True)
                 raise
             finally:
                 stop.set()
@@ -602,7 +634,12 @@ class TelegramObjectStorage:
                     self.manifests.fail(identifier, type(exc).__name__,
                                         int(time.time()), writer_token=token)
                 except Exception:
-                    pass
+                    # The original failure re-raises below; a failed
+                    # fail() only leaves the object pending until the
+                    # writer TTL expires, which the reclaim path handles.
+                    _engine_logger.debug(
+                        "could not mark object %s failed after resume error",
+                        identifier, exc_info=True)
                 raise
             finally:
                 stop.set()
@@ -697,6 +734,12 @@ class TelegramObjectStorage:
                 try:
                     await self._verified_fetch(part, target)
                 except Exception:
+                    # Served from the replica when possible; the primary's
+                    # failure reason stays visible for repair diagnosis.
+                    _engine_logger.debug(
+                        "primary chunk fetch failed for %s ordinal %d; "
+                        "trying replica", identifier, part.ordinal,
+                        exc_info=True)
                     replica_ref = self._replica_ref(identifier, part)
                     if replica_ref is None:
                         raise
@@ -755,6 +798,10 @@ class TelegramObjectStorage:
                 try:
                     await self._verified_fetch(part, target)
                 except Exception:
+                    _engine_logger.debug(
+                        "primary chunk fetch failed for %s ordinal %d; "
+                        "trying replica", identifier, part.ordinal,
+                        exc_info=True)
                     replica_ref = self._replica_ref(identifier, part)
                     if replica_ref is None:
                         raise
@@ -808,6 +855,10 @@ class TelegramObjectStorage:
                 try:
                     await self._verified_fetch(part, current)
                 except Exception:
+                    _engine_logger.debug(
+                        "primary chunk fetch failed for %s ordinal %d; "
+                        "trying replica", identifier, part.ordinal,
+                        exc_info=True)
                     replica_ref = self._replica_ref(identifier, part)
                     if replica_ref is None:
                         raise

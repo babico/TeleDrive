@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +14,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import IntegrityError, NoSuchModuleError
+from sqlalchemy.exc import ArgumentError, IntegrityError, NoSuchModuleError
 
 metadata = MetaData()
+
+_logger = logging.getLogger(__name__)
 
 leases = Table(
     "leases", metadata,
@@ -189,7 +192,10 @@ def sqlite_database_path(url: str) -> str | None:
     """Return the filesystem path for a SQLite URL, otherwise None."""
     try:
         parsed = make_url(normalize_database_url(url))
-    except Exception:
+    except (ValueError, ArgumentError):
+        # A URL that cannot be parsed is simply "not a SQLite URL" for
+        # this probe. Nothing is logged on purpose: the exception text
+        # can embed the raw URL, which may carry credentials.
         return None
     if parsed.get_backend_name() != "sqlite":
         return None
@@ -211,6 +217,9 @@ def redact_database_url(url: str) -> str:
         ]
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
     except Exception:
+        # Fail closed: any rendering error returns a constant instead of
+        # a partially redacted URL. Nothing is logged on purpose -- the
+        # exception text can embed the raw URL with its credentials.
         return "<invalid database URL>"
 
 
@@ -225,6 +234,10 @@ def _checkpoint_wal_best_effort(engine: "Engine") -> None:
     try:
         raw = engine.raw_connection()
     except Exception:
+        # Best effort by contract (see docstring); a failed checkpoint
+        # only leaves the WAL file for the next close to flush.
+        _logger.debug("WAL checkpoint: could not take a raw connection",
+                      exc_info=True)
         return
     try:
         cursor = raw.cursor()
@@ -234,12 +247,17 @@ def _checkpoint_wal_best_effort(engine: "Engine") -> None:
         finally:
             cursor.close()
     except Exception:
-        pass
+        # Same contract: a busy concurrent reader simply costs this
+        # checkpoint, never the close.
+        _logger.debug("WAL checkpoint skipped", exc_info=True)
     finally:
         try:
             raw.close()
         except Exception:
-            pass
+            # Nested cleanup; the pooled connection is discarded whole on
+            # engine disposal, so a failed close leaks nothing durable.
+            _logger.debug("WAL checkpoint connection close failed",
+                          exc_info=True)
 
 
 @dataclass
@@ -288,10 +306,18 @@ class Database:
         try:
             self.connection.commit()
         except Exception:  # noqa: BLE001 - best effort, never blocks setup
+            # The exact staleness this method exists to prevent returns
+            # silently if the commit fails, so the operator must see it.
+            _logger.warning(
+                "setup snapshot release failed; this connection may keep "
+                "a stale REPEATABLE READ snapshot", exc_info=True)
             try:
                 self.connection.rollback()
             except Exception:
-                pass
+                # Nested cleanup on an already-failing connection; the
+                # next statement on it resurfaces the real problem.
+                _logger.debug("setup snapshot rollback also failed",
+                              exc_info=True)
 
     def commit(self) -> None:
         self.connection.commit()

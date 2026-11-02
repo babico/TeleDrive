@@ -6,7 +6,6 @@ transport. Socket-port dispatch preserves unmodified S3 signed paths.
 from __future__ import annotations
 
 import hashlib
-import time
 
 import pytest
 from botocore.auth import S3SigV4Auth
@@ -18,63 +17,32 @@ from fastapi.testclient import TestClient
 import web.app as web
 import web.s3 as s3
 from web.unified import UnifiedApplication, app
-from tests.web.test_rest_transfer import FakeUserTransport
-from teledrive.db import connect_database
 from teledrive.s3.credentials import S3CredentialStore, DEFAULT_PERMISSIONS
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.manifest import ManifestStore
 
 
 @pytest.fixture
-def unified(tmp_path, monkeypatch):
-    path=tmp_path/"unified.sqlite"
-    telegram=FakeUserTransport()
+def unified(make_app_env, monkeypatch):
     secret=Fernet.generate_key()
-    connect=lambda: connect_database(str(path))
-    transport=lambda db: telegram
-    for module in (web,s3):
-        monkeypatch.setattr(module,"db_connect",connect)
-        monkeypatch.setattr(module,"storage_transport",transport)
+    # make_app_env builds the shared environment: one tmp SQLite catalog,
+    # one FakeUserTransport wired into web.app, a config file that points
+    # every root (auth dir, scratch, uploads, log) at tmp_path, and the
+    # TELEDRIVE_CONFIG/CONFIG_PATH redirects. No global Path.mkdir or
+    # _secure_mkdir patch is needed: the config, not hardcoded /data and
+    # /uploads, names every directory the app creates.
+    env=make_app_env(db_name="unified.sqlite",
+                     rest_max_upload_bytes=4*1024*1024,
+                     set_env_config=True)
+    telegram=env.transport
+    connect=env.connect
+    root=env.uploads
+    # The S3 gateway module resolves the database, transport and master
+    # key through its own names; the factory only rebinds web.app.
+    monkeypatch.setattr(s3,"db_connect",connect)
+    monkeypatch.setattr(s3,"storage_transport",lambda db: telegram)
     monkeypatch.setattr(s3,"load_master_key",lambda: secret)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "web:\n  user: testadmin\n  password: long-secure-test-password\n"
-        "  allowed_hosts: localhost,127.0.0.1,[::1]\n"
-        "storage:\n  channel: ''\n  apis: []\n  scratch_dir: " + str(tmp_path/"scratch") + "\n"
-        "state:\n  database_url: sqlite:////" + str(path) + "\n"
-        "jobs:\n  source_root: " + str(tmp_path/"uploads") + "\n  auto_run: false\n",
-        encoding="ascii",
-    )
-    monkeypatch.setattr(web, "CONFIG_PATH", config_path)
-    # The lifespan re-reads the environment path; monkeypatch restores it so a
-    # following test cannot inherit this fixture's database.
-    monkeypatch.setenv("TELEDRIVE_CONFIG", str(config_path))
-    web.AUTH_FAILURES.clear()
-    monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
-    monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path/"scratch"))
-    # Redirect hardcoded /data and /uploads paths in ensure_config
-    import pathlib as _pl
-    orig_secure_mkdir = web._secure_mkdir
-    def patched_secure_mkdir(path):
-        ps = str(path)
-        if ps.startswith("/data") or ps.startswith("/uploads"):
-            ps = str(tmp_path / ps.lstrip("/"))
-            path = _pl.Path(ps)
-        return orig_secure_mkdir(path)
-    monkeypatch.setattr(web, "_secure_mkdir", patched_secure_mkdir)
-    orig_path_mkdir = _pl.Path.mkdir
-    def patched_path_mkdir(self, *a, **k):
-        s = str(self)
-        if s.startswith("/data") or s.startswith("/uploads"):
-            target = tmp_path / s.lstrip("/")
-            target.mkdir(*a, **k)
-            return
-        return orig_path_mkdir(self, *a, **k)
-    monkeypatch.setattr(_pl.Path, "mkdir", patched_path_mkdir)
-    monkeypatch.setattr(web, "REST_MAX_UPLOAD_BYTES", 4*1024*1024)
-    root=tmp_path/"uploads"
-    root.mkdir()
-    monkeypatch.setattr(web, "JOB_SOURCE_ROOT", str(root))
+    monkeypatch.setattr(web,"JOB_SOURCE_ROOT",str(root))
     db=connect()
     try:
         creds=S3CredentialStore(db,secret).create("unified",list(DEFAULT_PERMISSIONS))

@@ -35,19 +35,13 @@ class FakeUserTransport:
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
-    path = tmp_path / "state.db"
-    bot = FakeUserTransport()
-    monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
-    monkeypatch.setattr(
-        webapp, "storage_transport", lambda db: bot,
-    )
-    monkeypatch.setattr(webapp, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
-    monkeypatch.setattr(webapp, "REST_MAX_UPLOAD_BYTES", 4 * 1024**2)
+def service(make_app_env):
+    env = make_app_env(rest_max_upload_bytes=4 * 1024**2,
+                       include_auth_keys=False)
+    bot = env.transport
     from tests import seed_local_user
-    seed_local_user(lambda: connect_database(str(path)),
+    seed_local_user(env.connect,
                     "admin-test", "some-long-password", "admin")
-    webapp.AUTH_FAILURES.clear()
     client = TestClient(webapp.app, headers={"host": "localhost"})
     try:
         from tests import login_headers
@@ -64,7 +58,7 @@ def service(tmp_path, monkeypatch):
         headers = {"Authorization": f"Bearer {token}"}
         res = client.post("/api/v1/buckets", headers=headers, json={"name": "backup-bucket"})
         assert res.status_code == 201, res.text
-        yield client, headers, bot, tmp_path
+        yield client, headers, bot, env.tmp
     finally:
         client.close()
 

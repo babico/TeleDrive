@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +35,9 @@ class AppConfig:
     db_path: str
     log_path: str
     log_level: str
+    # Path allowlists and the data root (teledrive.settings reads these);
+    # defaulted so hand-built AppConfig instances keep working.
+    paths: dict = field(default_factory=dict)
 
 
 
@@ -61,6 +64,7 @@ def load_config(path: str) -> AppConfig:
     web_section = raw.get("web") or {}
     jobs_section = raw.get("jobs") or {}
     storage_section = raw.get("storage") or {}
+    paths_section = raw.get("paths") or {}
 
     strategy = str(tg.get("strategy", "single")).strip().lower()
 
@@ -83,6 +87,7 @@ def load_config(path: str) -> AppConfig:
         jobs=jobs_section,
         storage=storage_section,
         state=st,
+        paths=paths_section,
     )
 
 

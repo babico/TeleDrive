@@ -13,14 +13,11 @@ serves traffic afterwards, and the documented admin account exists.
 """
 from __future__ import annotations
 
-import time
-
 import pytest
 from sqlalchemy import text
 from starlette.testclient import TestClient
 
 import web.app as web
-from teledrive.db import connect_database
 
 
 LOOPS = (
@@ -35,41 +32,14 @@ LOOPS = (
 
 
 @pytest.fixture
-def lifespan_app(tmp_path, monkeypatch):
-    database = tmp_path / "lifespan.sqlite"
-    connect = lambda: connect_database(str(database))
-    monkeypatch.setattr(web, "db_connect", connect)
-    monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
-    monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
-    (tmp_path / "scratch").mkdir()
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "web:\n  allowed_hosts: localhost,127.0.0.1,[::1]\n"
-        "storage:\n  channel: ''\n  apis: []\n"
-        f"  scratch_dir: {tmp_path / 'scratch'}\n"
-        "state:\n"
-        f"  database_url: sqlite:///{database}\n"
-        f"jobs:\n  source_root: {tmp_path / 'uploads'}\n  auto_run: false\n"
-        f"logging:\n  log_path: {tmp_path / 'teledrive.log'}\n  level: INFO\n",
-        encoding="ascii",
-    )
-    monkeypatch.setenv("TELEDRIVE_CONFIG", str(config_path))
-    monkeypatch.setattr(web, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(web, "DB_EXTRA_PACKAGES", [])
+def lifespan_app(make_app_env, monkeypatch):
+    # Same MonkeyPatch instance pytest hands to make_app_env, so the
+    # loop/runtime stubs below sit next to the factory's patches.
+    env = make_app_env(db_name="lifespan.sqlite", set_env_config=True,
+                       db_extra_packages=[])
 
-    # Startup calls these with the real /data and /uploads roots, which do not
-    # exist for an unprivileged test user; redirect rather than skip startup.
-    import pathlib as _pl
-    orig_path_mkdir = _pl.Path.mkdir
-
-    def patched_path_mkdir(self, *args, **kwargs):
-        raw = str(self)
-        if raw.startswith("/data") or raw.startswith("/uploads"):
-            return orig_path_mkdir(tmp_path / raw.lstrip("/"), *args, **kwargs)
-        return orig_path_mkdir(self, *args, **kwargs)
-
-    monkeypatch.setattr(_pl.Path, "mkdir", patched_path_mkdir)
-
+    # The background loops and the MTProto runtime are not what this
+    # test verifies; make_app_env deliberately leaves them alone.
     async def no_loop():
         return None
 
@@ -84,7 +54,7 @@ def lifespan_app(tmp_path, monkeypatch):
 
     monkeypatch.setattr(web.mtproto_storage_runtime, "start", no_start)
     monkeypatch.setattr(web.mtproto_storage_runtime, "stop", no_stop)
-    return {"config": config_path, "connect": connect}
+    return {"config": env.config_path, "connect": env.connect}
 
 
 def test_lifespan_bootstraps_the_admin_account_and_serves_health(lifespan_app):

@@ -17,6 +17,11 @@ from typing import Any
 # the host-side port mapping stays loopback.  # nosec B104
 DEFAULT_BIND_ADDRESS = "0.0.0.0"  # nosec B104
 
+# The container data volume. Every stateful default (scratch, auth,
+# sessions, logs, SQLite roots) hangs off this root so a non-Docker
+# deployment can relocate the whole tree with one setting.
+DEFAULT_DATA_DIR = "/data"
+
 
 @dataclass
 class ServiceSettings:
@@ -26,13 +31,14 @@ class ServiceSettings:
     bind_address: str = DEFAULT_BIND_ADDRESS
     rest_max_upload_bytes: int = 2 * 1024**3
     max_request_bytes: int = 32 * 1024**2
-    storage_scratch_dir: str = "/data/tmp"
+    data_dir: str = DEFAULT_DATA_DIR
+    storage_scratch_dir: str = os.path.join(DEFAULT_DATA_DIR, "tmp")
     job_source_root: str = "/uploads"
     job_auto_run: bool = True
     job_watch: bool = False
     job_watch_interval_seconds: int = 30
     job_watch_bucket: str = ""
-    allowed_sqlite_roots: tuple[str, ...] = ("/data",)
+    allowed_sqlite_roots: tuple[str, ...] = (DEFAULT_DATA_DIR,)
     auth_failure_limit: int = 5
     auth_failure_window_seconds: int = 300
     ssl_certfile: str = ""
@@ -41,15 +47,15 @@ class ServiceSettings:
     s3_ssl_keyfile: str = ""
     trusted_proxy: bool = False
     db_extra_packages: tuple[str, ...] = ()
-    auth_dir: str = "/data/auth"
+    auth_dir: str = os.path.join(DEFAULT_DATA_DIR, "auth")
     config_path: str = "config/config.yaml"
     s3_master_key_file: str = "/config/s3-master.key"
     allowed_source_roots: str = "/uploads"
-    allowed_session_roots: str = "/data/sessions"
-    allowed_log_roots: str = "/data"
-    split_dir: str = "/data/tmp"
+    allowed_session_roots: str = os.path.join(DEFAULT_DATA_DIR, "sessions")
+    allowed_log_roots: str = DEFAULT_DATA_DIR
+    split_dir: str = os.path.join(DEFAULT_DATA_DIR, "tmp")
     split_min_free_bytes: int = 512 * 1024 * 1024
-    lock_dir: str = "/data/tmp"
+    lock_dir: str = os.path.join(DEFAULT_DATA_DIR, "tmp")
     # "none" (default) or "envelope". Envelope makes encrypted-at-rest a
     # server property: one data key per object, wrapped by a KEK derived from
     # the S3 master key. It is opt-in because it disables deduplication,
@@ -118,6 +124,14 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
 
     paths = _section(cfg, "paths")
 
+    # The data root is one setting (paths.data_dir / TELEDRIVE_DATA_DIR);
+    # every stateful default below derives from it so a non-Docker
+    # deployment relocates the whole tree at once. Docker keeps the
+    # default /data, which the compose file mounts.
+    data_dir = str(paths.get("data_dir")
+                   or os.environ.get("TELEDRIVE_DATA_DIR", "")
+                   or DEFAULT_DATA_DIR)
+
     def _cfg_or_env(key, env_name, default=None):
         value = web.get(key)
         if value is None or value == "":
@@ -159,9 +173,11 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
         max_request_bytes=_int(
             _cfg_or_env("max_request_bytes", "TELEDRIVE_MAX_REQUEST_BYTES", 32 * 1024**2),
             32 * 1024**2, "max_request_bytes", minimum=1),
+        data_dir=data_dir,
         storage_scratch_dir=str(
             storage.get("scratch_dir")
-            or os.environ.get("TELEDRIVE_STORAGE_SCRATCH_DIR", "/data/tmp")),
+            or os.environ.get("TELEDRIVE_STORAGE_SCRATCH_DIR")
+            or os.path.join(data_dir, "tmp")),
         job_source_root=str(
             jobs.get("source_root")
             or os.environ.get("TELEDRIVE_JOB_SOURCE_ROOT", "/uploads")),
@@ -174,8 +190,9 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
         job_watch_bucket=str(jobs.get("watch_bucket", "")),
         allowed_sqlite_roots=_hosts(
             state.get("allowed_sqlite_roots")
-            or os.environ.get("TELEDRIVE_ALLOWED_SQLITE_ROOTS", "/data"),
-            ("/data",)),
+            or os.environ.get("TELEDRIVE_ALLOWED_SQLITE_ROOTS")
+            or data_dir,
+            (data_dir,)),
         auth_failure_limit=_int(
             _cfg_or_env("auth_failure_limit", "TELEDRIVE_AUTH_FAILURE_LIMIT", 5),
             5, "auth_failure_limit", minimum=1),
@@ -200,7 +217,8 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
             os.environ.get("TELEDRIVE_TRUSTED_PROXY", "")).lower()
             in ("1", "true", "yes", "on")),
         db_extra_packages=packages,
-        auth_dir=str(_cfg_or_env("auth_dir", "TELEDRIVE_AUTH_DIR", "/data/auth")),
+        auth_dir=str(_cfg_or_env("auth_dir", "TELEDRIVE_AUTH_DIR",
+                                 os.path.join(data_dir, "auth"))),
         config_path=config_path,
         s3_master_key_file=str(
             storage.get("s3_master_key_file")
@@ -210,20 +228,24 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
             or os.environ.get("TELEDRIVE_ALLOWED_SOURCE_ROOTS", "/uploads")),
         allowed_session_roots=str(
             paths.get("session_roots")
-            or os.environ.get("TELEDRIVE_ALLOWED_SESSION_ROOTS", "/data/sessions")),
+            or os.environ.get("TELEDRIVE_ALLOWED_SESSION_ROOTS")
+            or os.path.join(data_dir, "sessions")),
         allowed_log_roots=str(
             paths.get("log_roots")
-            or os.environ.get("TELEDRIVE_ALLOWED_LOG_ROOTS", "/data")),
+            or os.environ.get("TELEDRIVE_ALLOWED_LOG_ROOTS")
+            or data_dir),
         split_dir=str(
             paths.get("split_dir")
-            or os.environ.get("TELEDRIVE_SPLIT_DIR", "/data/tmp")),
+            or os.environ.get("TELEDRIVE_SPLIT_DIR")
+            or os.path.join(data_dir, "tmp")),
         split_min_free_bytes=_int(
             paths.get("split_min_free_bytes")
             or os.environ.get("TELEDRIVE_SPLIT_MIN_FREE_BYTES", 512 * 1024 * 1024),
             512 * 1024 * 1024, "split_min_free_bytes", minimum=1),
         lock_dir=str(
             paths.get("lock_dir")
-            or os.environ.get("TELEDRIVE_LOCK_DIR", "/data/tmp")),
+            or os.environ.get("TELEDRIVE_LOCK_DIR")
+            or os.path.join(data_dir, "tmp")),
         encryption_mode=_encryption_mode(storage),
     )
 

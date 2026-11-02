@@ -15,7 +15,6 @@ existing per-route scope semantics unchanged. See ``docs/operate/upgrade.md``.
 from __future__ import annotations
 
 import asyncio
-import copy
 import os
 import gzip
 import shutil
@@ -28,7 +27,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
@@ -37,15 +35,13 @@ from typing import Literal
 from fastapi.staticfiles import StaticFiles
 
 from teledrive import uploader
-from teledrive.db import redact_database_url
 from teledrive.api_keys import ApiKeyStore
 from teledrive.s3.credentials import load_master_key
 from teledrive.storage.manifest import ManifestStore
-from teledrive.storage.jobs import StorageUploadJobs, jobs as storage_job_rows
+from teledrive.storage.jobs import jobs as storage_job_rows
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.stores import sessions as _session_store
 from teledrive.stores import telegram_accounts as _accounts
-from teledrive.stores import users as _user_store
 from teledrive.storage.engine import TelegramObjectStorage
 from teledrive.storage.telethon_adapter import RECOMMENDED_CHUNK_SIZE
 from teledrive.storage.user_mode import (
@@ -59,6 +55,26 @@ from web.routers.public import (
     _hash_share_password, _serve_static_page, _share_rate, _site_path, index,
 )
 from web.routers.config import health
+# Settings machinery and scheduler loops live in their own modules; every
+# name below is re-exported because the routers resolve app-owned state
+# through their late-bound ``_webapp()`` lookups and the tests through
+# ``monkeypatch.setattr(web.app, ...)``. The moved code reaches this
+# module's attributes the same way (see ``_app()`` in each module), so
+# the split changes where the functions are defined, not how state is
+# read or patched.
+from web.settings_runtime import (  # noqa: F401 (re-exports)
+    _create_default_admin, _drop_retired_auth_settings, _persist_settings_document,
+    _read_config_file, _redact_tree, _redacted_config, _reload_service_settings,
+    _restore_secrets, _restore_tree, _secure_mkdir, _secure_write,
+    _seed_settings_document, _settings_store, default_config,
+    effective_config, ensure_config, read_raw_config, settings_bind_address,
+    settings_s3_port, settings_web_port, validate_and_write_config,
+)
+from web.schedulers import (  # noqa: F401 (re-exports)
+    _SCHEDULER_IDLE_NOTICE, _storage_job_root, folder_watch_loop,
+    folder_watch_scan, lifecycle_scheduler_loop, notification_scheduler_loop,
+    report_scheduler_loop, tiering_scheduler_loop, upload_job_scheduler_loop,
+)
 mtproto_storage_runtime = UserSessionRuntime()
 
 CONFIG_PATH = Path(os.environ.get("TELEDRIVE_CONFIG", "config/config.yaml"))
@@ -67,15 +83,19 @@ REDACTED = "__REDACTED__"
 
 # Service settings come ONLY from config/config.yaml (owner policy); the
 # TELEDRIVE_CONFIG env var just points at the file. Tests override the
-# module attributes below directly.
+# module attributes below directly. The /data roots derive from the data
+# dir (paths.data_dir / TELEDRIVE_DATA_DIR, default /data) so non-Docker
+# deployments can point the app at a writable tree; with the default the
+# values are byte-identical to the previous literals.
+DATA_DIR = os.environ.get("TELEDRIVE_DATA_DIR", "/data")
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
-AUTH_DIR = Path("/data/auth")
-STORAGE_SCRATCH_DIR = "/data/tmp"
+AUTH_DIR = Path(os.path.join(DATA_DIR, "auth"))
+STORAGE_SCRATCH_DIR = os.path.join(DATA_DIR, "tmp")
 REST_MAX_UPLOAD_BYTES = 2 * 1024**3
 JOB_SOURCE_ROOT = "/uploads"
 JOB_AUTO_RUN = True
-ALLOWED_SQLITE_ROOTS = ("/data",)
+ALLOWED_SQLITE_ROOTS = (DATA_DIR,)
 AUTH_FAILURE_WINDOW_SECONDS = 300
 AUTH_FAILURE_LIMIT = 5
 WATCH_ENABLED = False
@@ -89,80 +109,6 @@ TRUSTED_PROXY = False
 DB_EXTRA_PACKAGES: tuple[str, ...] = ()
 
 
-def settings_bind_address() -> str:
-    from teledrive.settings import load_settings
-    try:
-        return load_settings(uploader.load_config(str(CONFIG_PATH)),
-                             str(CONFIG_PATH)).bind_address
-    except Exception:
-        return "0.0.0.0"  # nosec B104 — in-container bind, host mapping loopback
-
-
-def settings_web_port() -> int:
-    from teledrive.settings import load_settings
-    try:
-        return load_settings(uploader.load_config(str(CONFIG_PATH)),
-                             str(CONFIG_PATH)).web_port
-    except Exception:
-        return 8080
-
-
-def settings_s3_port() -> int:
-    from teledrive.settings import load_settings
-    try:
-        return load_settings(uploader.load_config(str(CONFIG_PATH)),
-                             str(CONFIG_PATH)).s3_port
-    except Exception:
-        return 9000
-
-
-def _reload_service_settings() -> None:
-    """Read service settings from the deployment config into module attrs."""
-    global MAX_REQUEST_BYTES, ALLOWED_HOSTS, AUTH_DIR, STORAGE_SCRATCH_DIR
-    global REST_MAX_UPLOAD_BYTES, JOB_SOURCE_ROOT, JOB_AUTO_RUN
-    global ALLOWED_SQLITE_ROOTS, AUTH_FAILURE_WINDOW_SECONDS, AUTH_FAILURE_LIMIT
-    global WATCH_ENABLED, WATCH_INTERVAL, WATCH_BUCKET
-    global SSL_CERTFILE, SSL_KEYFILE, DB_EXTRA_PACKAGES
-    global S3_SSL_CERTFILE, S3_SSL_KEYFILE, TRUSTED_PROXY
-
-    from teledrive.settings import load_settings
-    cfg = uploader.load_config(str(CONFIG_PATH))
-    settings = load_settings(cfg, str(CONFIG_PATH))
-    MAX_REQUEST_BYTES = settings.max_request_bytes
-    ALLOWED_HOSTS = list(settings.allowed_hosts)
-    AUTH_DIR = Path(settings.auth_dir)
-    STORAGE_SCRATCH_DIR = settings.storage_scratch_dir
-    REST_MAX_UPLOAD_BYTES = settings.rest_max_upload_bytes
-    JOB_SOURCE_ROOT = settings.job_source_root
-    JOB_AUTO_RUN = settings.job_auto_run
-    ALLOWED_SQLITE_ROOTS = settings.allowed_sqlite_roots
-    AUTH_FAILURE_WINDOW_SECONDS = settings.auth_failure_window_seconds
-    AUTH_FAILURE_LIMIT = settings.auth_failure_limit
-    WATCH_ENABLED = settings.job_watch
-    WATCH_INTERVAL = settings.job_watch_interval_seconds
-    WATCH_BUCKET = settings.job_watch_bucket
-    SSL_CERTFILE = settings.ssl_certfile
-    SSL_KEYFILE = settings.ssl_keyfile
-    S3_SSL_CERTFILE = settings.s3_ssl_certfile
-    S3_SSL_KEYFILE = settings.s3_ssl_keyfile
-    TRUSTED_PROXY = settings.trusted_proxy
-    DB_EXTRA_PACKAGES = settings.db_extra_packages
-    # Envelope encryption is a gateway property, so the flag lives on the
-    # gateway module and is read at request time.
-    import web.s3 as _s3_gateway
-    _s3_gateway.ENVELOPE_ENABLED = (settings.encryption_mode == "envelope")
-    # Legacy uploader path allowlists read os.environ internally; seed them
-    # from the config so the operator never configures them via env.
-    os.environ["TELEDRIVE_ALLOWED_SOURCE_ROOTS"] = settings.allowed_source_roots
-    os.environ["TELEDRIVE_ALLOWED_SESSION_ROOTS"] = settings.allowed_session_roots
-    os.environ["TELEDRIVE_ALLOWED_LOG_ROOTS"] = settings.allowed_log_roots
-    os.environ["TELEDRIVE_ALLOWED_SQLITE_ROOTS"] = ",".join(
-        settings.allowed_sqlite_roots)
-    os.environ["TELEDRIVE_SPLIT_DIR"] = settings.split_dir
-    os.environ["TELEDRIVE_SPLIT_MIN_FREE_BYTES"] = str(
-        settings.split_min_free_bytes)
-    os.environ["TELEDRIVE_LOCK_DIR"] = settings.lock_dir
-    os.environ["TELEDRIVE_S3_MASTER_KEY_FILE"] = settings.s3_master_key_file
 LOG_BUFFER: deque[str] = deque(maxlen=1500)
 # Live log subscribers: asyncio queues fed by _log (thread-safe handoff).
 _LOG_WAITERS: set = set()
@@ -200,8 +146,11 @@ def _extract_user(request: Request) -> str:
                     return username
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Best-effort enrichment only: the audit record still lands
+            # with a generic actor when this fails.
+            _module_logger.debug(
+                "session token actor lookup failed: %s", exc)
     # Bearer token (API key) — resolve to the key name if possible.
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
@@ -215,8 +164,10 @@ def _extract_user(request: Request) -> str:
                     return name
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Same contract as the session-token lookup above: the audit
+            # record degrades to the generic "api-key" actor.
+            _module_logger.debug("api key actor lookup failed: %s", exc)
         return "api-key"
     return "anonymous"
 
@@ -254,8 +205,13 @@ def _audit(request: Request | None, action: str, *, target: str | None = None,
                                 detail=detail, client_ip=client_ip)
         finally:
             conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        # The request itself must survive an audit failure, but a lost
+        # audit record is a governance event: without this line the loss
+        # is invisible and the trail silently has holes.
+        _module_logger.warning(
+            "audit record for action %r could not be persisted: %s",
+            action, exc)
 
 
 def _log(msg: str, source: str = "web", user: str = "system") -> None:
@@ -288,62 +244,13 @@ def _log(msg: str, source: str = "web", user: str = "system") -> None:
         if _FILE_LOG_HANDLER is not None:
             _FILE_LOG_HANDLER.emit(record)
     except Exception:
+        # Deliberately the one silent site left in this module: the file
+        # handler itself is broken here, so routing the complaint through
+        # logging would recurse into the same failure. Nothing else in the
+        # app swallows an exception without a trace.
         pass
 
 _FILE_LOG_HANDLER = None
-
-
-def _secure_mkdir(path: Path) -> None:
-    if path.is_symlink():
-        raise RuntimeError(f"Refusing to use symlinked security-sensitive directory: {path}")
-    path.mkdir(parents=True, exist_ok=True)
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(str(path), flags)
-        try:
-            os.fchmod(fd, 0o700)
-        finally:
-            os.close(fd)
-    except OSError:
-        # Permission hardening may be unavailable on some non-POSIX hosts.
-        pass
-
-
-def _secure_write(path: Path, content: str) -> None:
-    _secure_mkdir(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(path), flags, 0o600)
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _create_default_admin() -> None:
-    """Create the hardcoded first-boot admin if no ``admin`` row exists.
-
-    The account is always ``admin``/``admin`` (role ``admin``, enabled).
-    It is deliberately NOT configurable: no config key and no environment
-    variable can change the username or password. If a row named ``admin``
-    already exists it is left completely untouched — password hash, role
-    and enabled flag included — so an operator who changes the password
-    does not get it reset on the next start. Deleting the row re-creates
-    the bootstrap account, which is the documented lockout recovery.
-    """
-    conn = db_connect()
-    try:
-        if _user_store.get_by_username(conn, "admin") is None:
-            now = int(time.time())
-            _user_store.create(
-                conn, username="admin", password_hash=_hash_password("admin"),
-                role="admin", now=now)
-            _log("bootstrap admin account 'admin' created with the default "
-                 "password — change it immediately", "startup")
-    except Exception as exc:
-        _log(f"default admin creation failed: {type(exc).__name__}", "startup")
-    finally:
-        conn.close()
 
 
 def _enforce_user_permission(request: Request, user: dict) -> None:
@@ -364,554 +271,17 @@ def _enforce_user_permission(request: Request, user: dict) -> None:
         raise HTTPException(403, "Insufficient permissions for this action")
 
 
-def default_config() -> dict[str, Any]:
-    return {
-        "web": {
-            "allowed_hosts": "localhost,127.0.0.1,[::1]",
-            "bind_address": "0.0.0.0",  # nosec B104
-            "port": 8080,
-            "s3_port": 9000,
-            "rest_max_upload_bytes": 2147483648,
-            "auth_failure_limit": 5,
-            "auth_failure_window_seconds": 300,
-            "ssl_certfile": "",
-            "ssl_keyfile": "",
-        },
-        "storage": {
-            "channel": "",
-            "strategy": "round_robin",
-            "scratch_dir": "/data/tmp",
-            "apis": [],
-        },
-        "jobs": {
-            "source_root": "/uploads",
-            "auto_run": True,
-            "watch": False,
-            "watch_interval_seconds": 30,
-            "watch_bucket": "",
-        },
-        "upload": {
-            "source_dir": "/uploads",
-            "allowed_extensions": [],
-            "max_file_size_mb": 0,
-            "sleep_min_seconds": 60,
-            "sleep_max_seconds": 90,
-            "max_files_per_run": 12,
-            "max_files_per_day": 100,
-            "retry_attempts": 5,
-            "backoff_base_seconds": 10,
-            "floodwait_buffer_seconds": 5,
-            "caption_template": "{name}",
-            "send_mode": "document",
-        },
-        "state": {"database_url": "sqlite:////data/state.db"},
-        "logging": {"log_path": "/data/uploader.log", "level": "INFO"},
-        "app": {"auto_run": False, "run_interval_minutes": 60},
-    }
-
-
-def ensure_config() -> None:
-    _secure_mkdir(CONFIG_PATH.parent)
-    if CONFIG_PATH.is_symlink():
-        raise RuntimeError("Refusing to use a symlinked TeleDrive config file")
-    _secure_mkdir(AUTH_DIR)
-    _secure_mkdir(AUTH_DIR.parent / "sessions")
-    # Scratch and source roots follow the settings (env/config), not
-    # hardcoded /data and /uploads — non-Docker deployments broke here.
-    _secure_mkdir(Path(STORAGE_SCRATCH_DIR))
-    # Inline YAML parse: read_raw_config()/effective_config() both call
-    # ensure_config() and would recurse.
-    try:
-        raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except OSError:
-        raw = {}
-    source_dir = str(((raw.get("upload") or {}).get("source_dir"))
-                     or "/uploads")
-    Path(source_dir).mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
-        _secure_write(CONFIG_PATH, yaml.safe_dump(default_config(), sort_keys=False))
-    else:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(str(CONFIG_PATH), flags)
-            try:
-                try:
-                    os.fchmod(fd, 0o600)
-                except PermissionError:
-                    # A mounted config may be owned by another uid; accept it
-                    # only when it is already private.
-                    if os.fstat(fd).st_mode & 0o077:
-                        raise
-            finally:
-                os.close(fd)
-        except OSError as exc:
-            raise RuntimeError("Unable to safely open TeleDrive config file") from exc
-
-
-def _read_config_file() -> dict[str, Any]:
-    """The bootstrap file, parsed. Never consults the database."""
-    ensure_config()
-    return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-
-
-# Authentication is no longer configured: the first-boot admin is
-# hardcoded and sessions/API keys are the only mechanisms. These keys are
-# stripped from config.yaml (and from the SQL settings document) so an
-# upgraded deployment does not keep a credential-looking field that does
-# nothing. The next settings save persists the stripped document.
-_RETIRED_AUTH_KEYS = ("user", "password", "password_file", "allow_insecure")
-
-
-def _drop_retired_auth_settings(document: dict[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(document)
-    web_cfg = result.get("web")
-    if isinstance(web_cfg, dict):
-        for key in _RETIRED_AUTH_KEYS:
-            web_cfg.pop(key, None)
-    return result
-
-
-def _settings_store() -> "SettingsStore | None":
-    """A store bound to the database named by the BOOTSTRAP FILE.
-
-    The database URL itself lives in the settings, so resolving settings
-    through the normal db_connect() would recurse. The file is therefore
-    the bootstrap anchor: it names the database, and the database then
-    carries the authoritative settings document.
-    """
-    from teledrive.settings_store import SettingsStore
-    raw = _read_config_file()
-    state = raw.get("state") or {}
-    url = state.get("database_url") or state.get("db_path")
-    if not url:
-        return None
-    try:
-        connection = uploader.connect_db(str(url))
-    except Exception:
-        return None
-    try:
-        return SettingsStore(connection, load_master_key())
-    except Exception:
-        connection.close()
-        return None
-
-
-def read_raw_config() -> dict[str, Any]:
-    """Authoritative settings: SQL document, else the bootstrap file.
-
-    The SQL document is written on every save (and seeded from the file
-    on first boot), so every process sharing the database agrees. If the
-    row is missing or undecryptable (master-key rotation), the file is
-    used and the next save re-seeds the database.
-    """
-    from teledrive.settings_store import SettingsStoreError
-    file_document = _drop_retired_auth_settings(_read_config_file())
-    store = _settings_store()
-    if store is None:
-        return file_document
-    try:
-        stored = store.load()
-    except SettingsStoreError as exc:
-        _log(f"settings: {exc}; falling back to config.yaml", "config")
-        stored = None
-    finally:
-        store.db.close()
-    if stored is None:
-        # First boot (or an unusable row): seed SQL from the file so the
-        # database becomes authoritative from now on.
-        _seed_settings_document(file_document)
-        return file_document
-    document = _drop_retired_auth_settings(stored.document)
-    return copy.deepcopy(document)
-
-
-def _seed_settings_document(document: dict[str, Any]) -> None:
-    store = _settings_store()
-    if store is None:
-        return
-    try:
-        store.save(document, by="bootstrap:config.yaml")
-        _log("settings: seeded the SQL document from config.yaml", "config")
-    except Exception as exc:  # noqa: BLE001 - never block startup
-        _log(f"settings: seed failed: {type(exc).__name__}", "config")
-    finally:
-        store.db.close()
-
-
-# Field names whose VALUE is a credential, matched at any depth across the
-# whole document. A two-key denylist (api_hash) leaked the live Telethon
-# StringSession -- full control of the storage account -- to a viewer.
-_SECRET_FIELD_NAMES = frozenset({
-    "api_hash", "api_id", "session_string", "session", "session_file",
-    "password", "secret", "secret_key", "token", "access_key",
-    "private_key", "master_key", "webhook_secret", "client_secret",
-})
-
-
-def _redact_tree(node):
-    """Redact every credential-looking field, at any depth."""
-    if isinstance(node, dict):
-        for key, value in list(node.items()):
-            normalised = str(key).lower().replace("-", "_")
-            if normalised in _SECRET_FIELD_NAMES and value:
-                node[key] = REDACTED
-            else:
-                _redact_tree(value)
-    elif isinstance(node, list):
-        for item in node:
-            _redact_tree(item)
-    return node
-
-
-def _redacted_config(raw: dict[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(raw)
-    # One recursive pass instead of an enumerated denylist: the previous
-    # version only knew about telegram.api_hash, so storage.apis[*]
-    # .session_string and account api_hash went out verbatim.
-    _redact_tree(result)
-    state_cfg = result.get("state", {})
-    db_url = state_cfg.get("database_url") or state_cfg.get("db_path")
-    if db_url:
-        state_cfg["database_url"] = redact_database_url(str(db_url))
-        state_cfg.pop("db_path", None)
-    return result
-
-
-def _restore_tree(node, previous):
-    """Put back any REDACTED value the client echoed from the GET.
-
-    Symmetric with _redact_tree, and positional in the same way: a list is
-    matched by index and a dict by key, so an entry the client added has no
-    previous value and keeps whatever it sent.
-    """
-    if isinstance(node, dict) and isinstance(previous, dict):
-        for key, value in list(node.items()):
-            if value == REDACTED and key in previous:
-                node[key] = previous[key]
-            else:
-                _restore_tree(value, previous.get(key))
-    elif isinstance(node, list) and isinstance(previous, list):
-        for index, item in enumerate(node):
-            if index < len(previous):
-                _restore_tree(item, previous[index])
-    return node
-
-
-def _restore_secrets(candidate: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    result = _drop_retired_auth_settings(candidate)
-    _restore_tree(result, current)
-    new_state = result.setdefault("state", {})
-    old_state = current.get("state", {})
-    old_url = old_state.get("database_url") or old_state.get("db_path")
-    submitted = new_state.get("database_url")
-    if old_url and submitted == redact_database_url(str(old_url)):
-        new_state["database_url"] = old_url
-    return result
-
-
-def effective_config():
-    """The parsed configuration the runtime uses.
-
-    The SQL settings document is authoritative; the YAML file is a
-    materialized mirror (and the bootstrap when SQL is empty). On a cache
-    miss the authoritative document is compared with the file and the
-    file is re-written only when they differ, so a mounted stale file is
-    self-healing without a write on every request. The cache key stays
-    the file mtime: every save rewrites the file, which invalidates the
-    cache in every process sharing the volume.
-    """
-    try:
-        mtime = CONFIG_PATH.stat().st_mtime_ns
-    except OSError:
-        mtime = None
-    if _CONFIG_CACHE["config"] is not None and _CONFIG_CACHE["mtime"] == mtime:
-        return _CONFIG_CACHE["config"]
-    ensure_config()
-    document = read_raw_config()
-    try:
-        on_disk = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except OSError:
-        on_disk = {}
-    if document != on_disk:
-        _secure_write(CONFIG_PATH,
-                      yaml.safe_dump(document, sort_keys=False))
-        try:
-            mtime = CONFIG_PATH.stat().st_mtime_ns
-        except OSError:
-            mtime = None
-    _CONFIG_CACHE["config"] = uploader.load_config(str(CONFIG_PATH))
-    _CONFIG_CACHE["mtime"] = mtime
-    return _CONFIG_CACHE["config"]
-
-
-_CONFIG_CACHE: dict = {"mtime": None, "config": None}
-
-
-def _persist_settings_document(document: dict[str, Any], *, by: str) -> None:
-    """Write the SQL settings document; never fail the save on this."""
-    store = _settings_store()
-    if store is None:
-        _log("settings: no database reachable; file-only save", "config")
-        return
-    try:
-        store.save(document, by=by)
-    except Exception as exc:  # noqa: BLE001 - the file write already succeeded
-        _log(f"settings: SQL persist failed: {type(exc).__name__}", "config")
-    finally:
-        store.db.close()
-
-
-def validate_and_write_config(raw: dict[str, Any], *,
-                             by: str = "system") -> None:
-    current = read_raw_config()
-    merged = _restore_secrets(raw, current)
-    tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
-    _secure_write(tmp, yaml.safe_dump(merged, sort_keys=False))
-    try:
-        cfg = uploader.load_config(str(tmp))
-        uploader.validate_config(cfg)
-        conn = uploader.connect_db(cfg.db_path)
-        conn.close()
-    except ValueError:
-        tmp.unlink(missing_ok=True)
-        raise
-    except Exception as exc:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError("Database connection/initialization failed") from exc
-    os.replace(tmp, CONFIG_PATH)
-    # Persist the authoritative copy in SQL as well. The file stays the
-    # bootstrap/recovery source and its mtime invalidates every process's
-    # settings cache; the database is what a rebuild reads back.
-    _persist_settings_document(merged, by=by)
-    _CONFIG_CACHE["config"] = None
-    _CONFIG_CACHE["mtime"] = None
-    _reload_service_settings()
-    # The administrator bootstrap belongs to startup only. Running it here
-    # meant that a save pointing at a fresh database would silently create
-    # admin/admin in it; the save path can no longer change the database, but
-    # startup-only is the correct place for it regardless.
-    # Core schema (including users.enabled) is brought current by the one
-    # schema coordinator when the database engine is first built; there is
-    # deliberately no DDL here any more.
-
-
 def db_connect():
     cfg = effective_config()
     uploader.validate_storage_paths(cfg)
     return uploader.connect_db(cfg.db_path)
 
 
-_SCHEDULER_IDLE_NOTICE: dict = {"message": None}
-
-
-async def upload_job_scheduler_loop() -> None:
-    """Opt-in durable job worker; SQL leases prevent duplicate claims.
-
-    Disabled unless jobs.auto_run is enabled in config. Every cycle gets its
-    own connection; failures retain job metadata for explicit operator retry.
-    """
-    while True:
-        conn = None
-        try:
-            if not JOB_AUTO_RUN:
-                await asyncio.sleep(10)
-                continue
-            root = _storage_job_root()
-            conn = db_connect()
-            queue = StorageUploadJobs(BucketCatalog(ManifestStore(conn)))
-            scratch = Path(STORAGE_SCRATCH_DIR)
-            _secure_mkdir(scratch)
-            result = await queue.run_next(
-                storage_transport(conn), allowed_root=root,
-                scratch_directory=scratch, chunk_size=RECOMMENDED_CHUNK_SIZE,
-            )
-            _SCHEDULER_IDLE_NOTICE["message"] = None
-            await asyncio.sleep(2 if result else 10)
-        except asyncio.CancelledError:
-            raise
-        except HTTPException as exc:
-            # Expected while no Telegram session or source root is configured;
-            # log the state change once instead of spamming every cycle.
-            message = f"scheduler idle: {exc.detail}"
-            if _SCHEDULER_IDLE_NOTICE["message"] != message:
-                _log(message, "scheduler")
-                _SCHEDULER_IDLE_NOTICE["message"] = message
-            await asyncio.sleep(60)
-        except Exception as exc:
-            # Do not log source paths, credentials or Telegram tokens.
-            _log("durable upload job scheduler: " + type(exc).__name__, "scheduler")
-            await asyncio.sleep(20)
-        finally:
-            if conn is not None:
-                conn.close()
-
-
-async def lifecycle_scheduler_loop() -> None:
-    """Apply bounded SQL-only lifecycle rules hourly, in this one process."""
-    while True:
-        connection = None
-        try:
-            from teledrive.s3.lifecycle import BucketLifecycleStore
-            connection = db_connect()
-            # Abandoned login sessions otherwise accumulate forever. The
-            # purge runs first so a lifecycle failure cannot starve it.
-            _session_store.purge_expired(connection, int(time.time()))
-            cat = BucketCatalog(ManifestStore(connection))
-            BucketLifecycleStore(cat).apply_due(now=int(time.time()), limit=100)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _log("lifecycle scheduler: " + type(exc).__name__, "scheduler")
-        finally:
-            if connection is not None:
-                connection.close()
-        await asyncio.sleep(3600)
-
-
-async def tiering_scheduler_loop() -> None:
-    """Apply enabled Intelligent-Tiering configurations hourly, bounded.
-
-    The pass only updates this catalog's access gate; Telegram bytes are
-    never moved or deleted. Disabled configurations are ignored.
-    """
-    while True:
-        connection = None
-        try:
-            from teledrive.s3.tiering import TieringStore
-            connection = db_connect()
-            cat = BucketCatalog(ManifestStore(connection))
-            TieringStore(cat).apply_due(now_ns=time.time_ns(), limit=1000)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _log("tiering scheduler: " + type(exc).__name__, "scheduler")
-        finally:
-            if connection is not None:
-                connection.close()
-        await asyncio.sleep(3600)
-
-
-async def notification_scheduler_loop() -> None:
-    """Deliver due S3 webhook events with bounded exponential backoff."""
-    while True:
-        connection = None
-        delivered = 0
-        try:
-            from teledrive.s3.credentials import load_master_key
-            from teledrive.s3.notifications import NotificationDelivery
-            connection = db_connect()
-            cat = BucketCatalog(ManifestStore(connection))
-            result = NotificationDelivery(
-                cat, master_key=load_master_key(),
-            ).deliver_due(now_ns=time.time_ns(), limit=50)
-            delivered = result.delivered
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _log("notification scheduler: " + type(exc).__name__, "scheduler")
-        finally:
-            if connection is not None:
-                connection.close()
-        await asyncio.sleep(30 if delivered else 60)
-
-
-async def report_scheduler_loop() -> None:
-    """Generate due analytics/inventory/metrics report objects hourly.
-
-    The configuration PUTs only store intent; without this pass no report
-    object is ever produced. The runner is itself bounded and records a
-    per-configuration failure in ``last_error`` instead of raising.
-    """
-    while True:
-        connection = None
-        try:
-            from teledrive.s3.report_runner import run_due_reports
-            connection = db_connect()
-            cat = BucketCatalog(ManifestStore(connection))
-            scratch = Path(STORAGE_SCRATCH_DIR)
-            _secure_mkdir(scratch)
-            await run_due_reports(
-                cat, int(time.time()),
-                transport=storage_transport(connection),
-                scratch_directory=scratch,
-            )
-        except asyncio.CancelledError:
-            raise
-        except HTTPException as exc:
-            # No Telegram session yet: expected on an unconfigured install.
-            message = f"report scheduler idle: {exc.detail}"
-            if _SCHEDULER_IDLE_NOTICE.get("reports") != message:
-                _log(message, "scheduler")
-                _SCHEDULER_IDLE_NOTICE["reports"] = message
-        except Exception as exc:
-            _log("report scheduler: " + type(exc).__name__, "scheduler")
-        finally:
-            if connection is not None:
-                connection.close()
-        await asyncio.sleep(3600)
-
-
-def folder_watch_scan() -> dict:
-    """One auto-sync pass: enqueue new/changed files from the source root.
-
-    Returns the enqueue_legacy_folder report (queued, already_queued,
-    excluded, job_ids). Raises when the source root is not configured.
-    """
-    from teledrive.storage.legacy_bridge import enqueue_legacy_folder
-    root = _storage_job_root()
-    conn = db_connect()
-    try:
-        cfg = effective_config()
-        source_root = Path(cfg.source_dir).resolve(strict=True)
-        if not source_root.is_relative_to(root):
-            raise RuntimeError("watch source is outside the job root")
-        manager = StorageUploadJobs(BucketCatalog(ManifestStore(conn)))
-        report = enqueue_legacy_folder(
-            cfg, manager, bucket=WATCH_BUCKET, prefix="",
-            max_files=100, dry_run=False, lease_heartbeat=None,
-        )
-        conn.connection.commit()
-        return {"queued": report.queued, "already_queued": report.already_queued,
-                "excluded": report.excluded, "job_ids": list(report.job_ids)}
-    finally:
-        conn.close()
-
-
-async def folder_watch_loop() -> None:
-    """Optional folder auto-sync (jobs.watch in config/config.yaml).
-
-    Every jobs.watch_interval_seconds the source root is scanned and
-    new/changed files are enqueued as durable upload jobs targeting
-    jobs.watch_bucket. Failures never crash the loop; the durable job
-    scheduler performs the actual Telegram uploads.
-    """
-    while True:
-        interval = max(5, int(WATCH_INTERVAL))
-        try:
-            if not WATCH_ENABLED:
-                await asyncio.sleep(10)
-                continue
-            if not WATCH_BUCKET:
-                _log("folder watch enabled but jobs.watch_bucket is not "
-                     "configured; skipping scans", "watcher")
-                await asyncio.sleep(60)
-                continue
-            report = folder_watch_scan()
-            if report.get("queued"):
-                _log(f"folder watch queued {report['queued']} file(s)",
-                     "watcher")
-        except asyncio.CancelledError:
-            raise
-        except HTTPException as exc:
-            # Source root not configured yet — expected on fresh installs.
-            message = f"folder watch idle: {exc.detail}"
-            if _SCHEDULER_IDLE_NOTICE.get("watch") != message:
-                _log(message, "watcher")
-                _SCHEDULER_IDLE_NOTICE["watch"] = message
-            interval = max(interval, 60)
-        except Exception as exc:
-            _log("folder watch: " + type(exc).__name__, "watcher")
-        await asyncio.sleep(interval)
+# The settings-document cache lives here (not in web.settings_runtime)
+# because tests replace it wholesale with
+# ``monkeypatch.setattr(web.app, "_CONFIG_CACHE", ...)`` and
+# ``effective_config`` resolves it through this module at call time.
+_CONFIG_CACHE: dict = {"mtime": None, "config": None}
 
 
 @asynccontextmanager
@@ -933,16 +303,21 @@ async def lifespan(_: FastAPI):
     # coordinator had already applied it, so it was dead code that only
     # looked like the thing keeping startup working.
     _create_default_admin()
-    # Opening the database keeps a bad database loud at startup.
+    # Probe the database at startup: a broken database must be visible
+    # immediately. It does not abort startup (the health endpoint reports
+    # the same failure and recovery is a config fix, not a process
+    # restart), but the error is logged with its cause, not swallowed.
     try:
         db_connect().close()
-    except Exception:
-        pass
+    except Exception as exc:
+        _module_logger.error("startup database probe failed: %s", exc)
     # Set up rotating compressed log file.
     try:
         cfg = read_raw_config()
-        log_path = (cfg.get("logging") or {}).get("log_path", "/data/teledrive.log")
-        log_dir = os.path.dirname(log_path) or "/data"
+        log_path = (cfg.get("logging") or {}).get("log_path",
+                                                  os.path.join(DATA_DIR,
+                                                               "teledrive.log"))
+        log_dir = os.path.dirname(log_path) or DATA_DIR
         os.makedirs(log_dir, exist_ok=True)
         file_handler = RotatingCompressedFileHandler(
             log_path, maxBytes=10 * 1024 * 1024, backupCount=5,
@@ -967,7 +342,8 @@ async def lifespan(_: FastAPI):
     transport_mode()  # Enforce Telethon USER mode at startup; Bot mode no longer exists.
     if DB_EXTRA_PACKAGES:
         from teledrive.settings import install_db_extra_packages
-        install_db_extra_packages(DB_EXTRA_PACKAGES, "/data/site-packages")
+        install_db_extra_packages(DB_EXTRA_PACKAGES,
+                                  os.path.join(DATA_DIR, "site-packages"))
     # Permit a new unconfigured installation to serve health/configuration;
     # writes fail closed until a USER session connects.
     try:
@@ -1272,20 +648,6 @@ def redoc_docs(_: None = Depends(require_auth)):
     return get_redoc_html(openapi_url="/openapi.json", title="TeleDrive API · ReDoc")
 
 
-def _storage_job_root() -> Path:
-    """Durable jobs may read only an operator-configured local source root."""
-    raw = JOB_SOURCE_ROOT.strip()
-    if not raw:
-        raise HTTPException(503, "Configure TELEDRIVE_JOB_SOURCE_ROOT for local upload jobs")
-    try:
-        root = Path(raw).resolve(strict=True)
-    except OSError as exc:
-        raise HTTPException(503, "Upload source root does not exist") from exc
-    if not root.is_dir():
-        raise HTTPException(503, "Upload source root must be a directory")
-    return root
-
-
 def _rest_read_gate(manifests, catalog, item) -> dict:
     """The access gate every REST read applies before any byte is produced.
 
@@ -1520,8 +882,11 @@ def prometheus_metrics(_: None = Depends(require_auth)):
                     lines.append('teledrive_flood_observations_total'
                                  '{account="%s"} %d'
                                  % (_prom_escape(account), int(obs)))
-        except Exception:
-            pass
+        except Exception as exc:
+            # Metrics degrade by omitting the series; a scrape that is
+            # quietly missing series is worth a trace for the operator.
+            _module_logger.debug(
+                "flood observation metrics unavailable: %s", exc)
         now_ms = int(time.time() * 1000)
         try:
             cooldowns = conn.connection.execute(_text(
@@ -1536,8 +901,9 @@ def prometheus_metrics(_: None = Depends(require_auth)):
                                  '{account="%s"} %d'
                                  % (_prom_escape(account),
                                     max(0, (int(until or 0) - now_ms) // 1000)))
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug(
+                "flood cooldown metrics unavailable: %s", exc)
     finally:
         conn.close()
     return Response(content="\n".join(lines) + "\n",
@@ -1558,6 +924,8 @@ from web.routers.telegram import (  # noqa: E402  (re-exports used via web.app)
 from web.routers.buckets import _public_s3_origin  # noqa: E402
 from web.routers.rest import _stream_object_upload  # noqa: E402
 from web import s3_governance_api  # noqa: E402  (router import, no app logic)
+
+_module_logger = logging.getLogger(__name__)
 # FastAPI 0.142 keeps an included router lazy behind an ``_IncludedRouter``
 # placeholder instead of copying its routes into ``app.routes``. Every
 # consumer that reasons about "the routes" -- the permission registry and the

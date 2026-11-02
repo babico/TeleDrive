@@ -158,10 +158,15 @@ def test_db_and_desktop_matrix_and_storage_contracts_are_present():
     # sets the live URLs and names the file in its pytest invocation.
     assert db["env"]["DB_TEST_POSTGRES_URL"].startswith("postgresql")
     assert db["env"]["DB_TEST_MYSQL_URL"].startswith("mysql")
+    # The S3 retry/race and restart matrices must run in this job too: it
+    # is the only one with the live URLs, so it is where their PostgreSQL
+    # and MySQL parametrizations actually execute.
     assert any("tests/e2e/test_database_live.py" in s.get("run", "")
                and "tests/storage/test_storage_engine.py" in s.get("run", "")
                and "tests/storage/test_storage_recovery.py" in s.get("run", "")
                and "tests/storage/test_schema_init_race.py" in s.get("run", "")
+               and "tests/s3/test_s3_retry_race_matrix.py" in s.get("run", "")
+               and "tests/s3/test_s3_restart_matrix.py" in s.get("run", "")
                for s in db["steps"])
 
     api = workflow("integration-storage.yml")["jobs"]["storage-api"]

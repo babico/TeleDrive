@@ -5,6 +5,7 @@ transport holds real bytes while SQLite stores only metadata and encrypted keys.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import time
@@ -45,16 +46,19 @@ class FakeTelegram:
         destination.write_bytes(self.parts[f"file-{reference.message_id}"])
 
 
-@pytest.fixture
-def service(monkeypatch, tmp_path):
+def build_service(monkeypatch, tmp_path, db_url):
+    """Wire the S3 gateway and admin app onto ``db_url``; return the tuple.
+
+    ``db_url`` is anything ``connect_database`` accepts: a filesystem path
+    (the historical per-test tmp SQLite database) or a full SQLAlchemy URL.
+    """
     key = Fernet.generate_key()
-    database_path = tmp_path / "state.db"
-    db = connect_database(str(database_path))
+    db = connect_database(db_url)
     cred_store = S3CredentialStore(db, key)
     issued = cred_store.create("S3 integration", list(DEFAULT_PERMISSIONS))
     db.close()
     telegram = FakeTelegram()
-    connection = lambda: connect_database(str(database_path))
+    connection = lambda: connect_database(db_url)
     factory = lambda db: telegram
     monkeypatch.setattr(gateway, "db_connect", connection)
     monkeypatch.setattr(gateway, "storage_transport", factory)
@@ -62,10 +66,159 @@ def service(monkeypatch, tmp_path):
     monkeypatch.setattr(admin, "STORAGE_SCRATCH_DIR", str(tmp_path / "staging"))
     monkeypatch.setattr(admin, "REST_MAX_UPLOAD_BYTES", 8 * 1024 * 1024)
     client = TestClient(gateway.app, base_url="http://localhost:9000")
+    return client, issued, telegram, connection, key
+
+
+@contextlib.contextmanager
+def sqlite_service(monkeypatch, tmp_path):
+    """The historical per-test tmp SQLite service, unchanged."""
+    client, issued, telegram, connection, key = build_service(
+        monkeypatch, tmp_path, str(tmp_path / "state.db"))
     try:
         yield client, issued, telegram, connection, key
     finally:
         client.close()
+
+
+@pytest.fixture
+def service(monkeypatch, tmp_path):
+    with sqlite_service(monkeypatch, tmp_path) as parts:
+        yield parts
+
+
+# ---------------------------------------------------------------------------
+# Opt-in real-backend parametrization for the retry/race and restart
+# matrices. The matrices assert DATABASE-WIDE invariants (total chunk rows,
+# GC metrics over the whole catalog), so a shared PostgreSQL/MySQL server
+# needs the same empty-database guarantee a fresh tmp SQLite file gives
+# every test. CI grants and the local test servers deny CREATE DATABASE,
+# so ``_reset_external_database`` instead drops TeleDrive-owned tables and
+# evicts the cached engine, forcing the next ``connect_database`` to rebuild
+# it and re-run ``ensure_schema`` on the empty database.
+# ---------------------------------------------------------------------------
+
+EXTERNAL_DB_ENVS = ("DB_TEST_POSTGRES_URL", "DB_TEST_MYSQL_URL")
+
+
+def external_backend_params():
+    """``[sqlite]`` plus one param per configured ``DB_TEST_*_URL``.
+
+    Local runs and every CI job without those envs collect exactly the
+    historical single SQLite variant: no new skips, no added runtime.
+    """
+    params = [pytest.param(None, id="sqlite")]
+    for env, backend in (("DB_TEST_POSTGRES_URL", "postgres"),
+                         ("DB_TEST_MYSQL_URL", "mysql")):
+        url = os.environ.get(env)
+        if url:
+            params.append(pytest.param(url, id=backend))
+    return params
+
+
+def _teledrive_table_names():
+    """Every table TeleDrive's migrations can create.
+
+    Mirrors ``tests/storage/test_schema_init_race.py::_telemetry`` (kept
+    local so this module owns its runtime); a new store must be added to
+    both inventories or the wipe below silently leaves its table behind.
+    """
+    from teledrive import api_keys, db, settings_store
+    from teledrive.s3 import (annotations, bucket_encryption, cors, credentials,
+                              lifecycle, metadata_journal, multipart,
+                              notifications, object_metadata, policy,
+                              replication, report_configs, tagging, tiering,
+                              website)
+    from teledrive.storage import (catalog, gc_collect, jobs, manifest,
+                                   mtproto_rate_guard, user_mode)
+    _ = (annotations, bucket_encryption, cors, lifecycle, object_metadata,
+         policy, replication, tagging, website, gc_collect)
+    names = {"schema_migrations", "object_content_fts"}
+    for metadata in (db.metadata, manifest.metadata, catalog.catalog_metadata,
+                     notifications.outbox_metadata,
+                     metadata_journal.metadata_journal_metadata,
+                     tiering.tiering_metadata, report_configs.report_metadata,
+                     multipart._meta, credentials._meta, jobs._meta,
+                     mtproto_rate_guard._meta, user_mode._meta,
+                     api_keys._metadata, settings_store._metadata):
+        names.update(metadata.tables)
+    return names
+
+
+def _dispose_cached_engine(url):
+    """Evict and dispose the shared engine for ``url``, if any are cached."""
+    from teledrive import db as _db
+
+    with _db._engine_cache_lock:
+        engine = _db._engine_cache.pop(url, None)
+    if engine is not None:
+        engine.dispose()
+
+
+def _reset_external_database(url):
+    """Give one matrix test an empty database on a shared real server.
+
+    Drops only TeleDrive-owned tables (never unrelated ones), exactly like
+    ``tests/storage/test_schema_init_race.py::_fresh_live_database``.
+    """
+    from sqlalchemy import create_engine
+
+    from teledrive.db import normalize_database_url
+
+    _dispose_cached_engine(url)
+    admin_engine = create_engine(normalize_database_url(url))
+    try:
+        with admin_engine.begin() as connection:
+            if admin_engine.dialect.name == "mysql":
+                connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS=0")
+            preparer = admin_engine.dialect.identifier_preparer
+            for name in sorted(_teledrive_table_names()):
+                quoted = preparer.quote(name)
+                suffix = (" CASCADE" if admin_engine.dialect.name
+                          == "postgresql" else "")
+                connection.exec_driver_sql(
+                    f"DROP TABLE IF EXISTS {quoted}{suffix}")
+            if admin_engine.dialect.name == "mysql":
+                connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS=1")
+    finally:
+        admin_engine.dispose()
+
+
+@contextlib.contextmanager
+def external_database_service(url, monkeypatch, tmp_path):
+    """A ``service`` tuple on a real PostgreSQL/MySQL server, wiped per test.
+
+    The wipe runs before the service is built, so every test starts from
+    the same empty, freshly migrated database a new tmp SQLite file
+    provides — including for the database-wide GC and chunk assertions.
+    """
+    _reset_external_database(url)
+    client, issued, telegram, connection, key = build_service(
+        monkeypatch, tmp_path, url)
+    try:
+        yield client, issued, telegram, connection, key
+    finally:
+        client.close()
+        # Release the pooled connections promptly; the next external test
+        # rebuilds the engine anyway (and re-runs the migrations).
+        _dispose_cached_engine(url)
+
+
+@pytest.fixture(params=external_backend_params())
+def backend_service(request, monkeypatch, tmp_path):
+    """``service`` on SQLite plus every configured real backend.
+
+    The retry/race and restart matrices import this (aliased as
+    ``service``) so their concurrency and crash-restart contracts are also
+    proven on real row-lock and snapshot semantics. Every other test
+    module keeps the plain unparametrized SQLite ``service`` fixture.
+    """
+    if request.param is None:
+        with sqlite_service(monkeypatch, tmp_path) as parts:
+            yield parts
+    else:
+        with external_database_service(request.param, monkeypatch,
+                                       tmp_path) as parts:
+            yield parts
 
 
 def signed(service, method, path, body=b"", *, extra_headers=None, access=None, secret=None, date=None):

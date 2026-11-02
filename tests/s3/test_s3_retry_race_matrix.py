@@ -18,6 +18,14 @@ connection). Races run at the catalog/store level because that is where two
 processes actually contend; the gateway adds no extra concurrency primitive
 of its own. Physical GC is not an S3 operation, so it is a standalone case.
 
+When ``DB_TEST_POSTGRES_URL`` / ``DB_TEST_MYSQL_URL`` are set (the database
+CI job), every case additionally runs on that real server: the fixture
+drops TeleDrive-owned tables and re-runs ``ensure_schema`` first, so each
+test starts from the same empty database the tmp SQLite path gives. Row
+locks, gap locks and snapshot isolation are exactly what these matrices
+exist to prove. Without the envs, collection is SQLite-only, exactly as
+before.
+
 Every table is keyed by manifest operation name; the meta-test fails if a name
 stops being ``supported``.
 """
@@ -40,7 +48,10 @@ from defusedxml import ElementTree as ET
 from sqlalchemy import func, select, text
 
 import web.s3 as gateway
-from tests.s3.test_s3_gateway import service, signed
+# `backend_service` is the parametrized twin of the plain SQLite `service`
+# fixture: [sqlite] plus one entry per configured DB_TEST_*_URL.
+from tests.s3.test_s3_gateway import signed
+from tests.s3.test_s3_gateway import backend_service as service
 from tests.s3.test_s3_multipart import begin, complete, part, setup, xml_text
 from teledrive.db import connect_database
 from teledrive.s3.credentials import S3CredentialStore

@@ -210,7 +210,12 @@ jobs:
           python -m pip install pytest "pytest-xdist>=3.6,<4" "psycopg[binary]>=3.2,<4" "PyMySQL>=1.1,<2" "defusedxml==0.7.1" "cryptography>=50,<51"
           python -m pip check
       - name: Run live PostgreSQL/MySQL integration tests
-        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py tests/storage/test_schema_init_race.py
+        # The S3 matrices run LAST: each of their external-backend tests
+        # wipes TeleDrive-owned tables in the shared test database and
+        # re-runs ensure_schema (CREATE DATABASE is not granted), so they
+        # must not interleave with the e2e DB tests above. Both matrices
+        # on both backends add roughly two minutes to this job.
+        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py tests/storage/test_schema_init_race.py tests/s3/test_s3_retry_race_matrix.py tests/s3/test_s3_restart_matrix.py
       - name: Seed realistic metadata before native database backup
         run: |
           python scripts/ops/rehearse_native_database_restore.py seed --url-env DB_TEST_POSTGRES_URL --receipt "$RUNNER_TEMP/pg-dr.json" --source "$RUNNER_TEMP/pg-source.bin"

@@ -21,6 +21,14 @@ real process death would drop it.
 The table is keyed by manifest operation name, and the meta-test fails if a
 name stops being `supported`. Physical GC is not an S3 operation, so it is a
 standalone case below rather than a table entry.
+
+When ``DB_TEST_POSTGRES_URL`` / ``DB_TEST_MYSQL_URL`` are set (the database
+CI job), every case additionally runs on that real server: the fixture
+drops TeleDrive-owned tables and re-runs ``ensure_schema`` first, so each
+test starts from the same empty database the tmp SQLite path gives — the
+restart is then a reconnect to a real server with real row locks and
+snapshot isolation. Without the envs, collection is SQLite-only, exactly
+as before.
 """
 from __future__ import annotations
 
@@ -33,7 +41,10 @@ from defusedxml import ElementTree as ET
 import pytest
 from sqlalchemy import func, select, text, update
 
-from tests.s3.test_s3_gateway import service, signed
+from tests.s3.test_s3_gateway import signed
+# `backend_service` is the parametrized twin of the plain SQLite `service`
+# fixture: [sqlite] plus one entry per configured DB_TEST_*_URL.
+from tests.s3.test_s3_gateway import backend_service as service
 from tests.s3.test_s3_multipart import begin, complete, part, setup, xml_text
 from teledrive.db import connect_database
 from teledrive.s3.multipart import (

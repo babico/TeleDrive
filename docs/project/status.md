@@ -9,7 +9,7 @@ approval to operate on production data or to delete Telegram messages.
 | Item | Value |
 | --- | --- |
 | Current release line | **v1.0.9** |
-| Tag / commit | `v1.0.9` resolves to `393b67e4d9172380794e109f883f948fde6c1db6` in this repository |
+| Tag / commit | `v1.0.9` resolves to `69a503ab07b4d372d3dcdba887204228c3e52c4f` in this repository |
 | Previous release | `v1.0.8` at `7d2aa773d3839a65899815dd9f3fa2ed2e534324` |
 | Previous release | `v1.0.7` at `747747652cd1ca36878453d49daf627d8c0a60ad` |
 | Package version | `1.0.9` in `pyproject.toml` |

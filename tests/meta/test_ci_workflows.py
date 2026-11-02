@@ -168,6 +168,12 @@ def test_db_and_desktop_matrix_and_storage_contracts_are_present():
                and "tests/s3/test_s3_retry_race_matrix.py" in s.get("run", "")
                and "tests/s3/test_s3_restart_matrix.py" in s.get("run", "")
                for s in db["steps"])
+    # Those matrices import the gateway test helpers (FastAPI app +
+    # botocore signing), so the job must install the full web stack —
+    # `-e .` alone left fastapi/botocore missing and collection failed.
+    db_install = "\n".join(s.get("run", "") for s in db["steps"])
+    assert "pip install -r requirements.txt" in db_install
+    assert "httpx" in db_install and "boto3" in db_install
 
     api = workflow("integration-storage.yml")["jobs"]["storage-api"]
     commands = "\n".join(s.get("run", "") for s in api["steps"])

@@ -205,9 +205,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - name: Install application and DB drivers
+        # requirements.txt (not just `-e .`): the S3 matrices at the end of
+        # this job import the gateway test helpers, which build the real
+        # FastAPI app and sign with botocore — fastapi/httpx/boto3 must be
+        # present or collection fails before a single DB test runs.
         run: |
           python -m pip install -e .
-          python -m pip install pytest "pytest-xdist>=3.6,<4" "psycopg[binary]>=3.2,<4" "PyMySQL>=1.1,<2" "defusedxml==0.7.1" "cryptography>=50,<51"
+          python -m pip install -r requirements.txt
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
           python -m pip check
       - name: Run live PostgreSQL/MySQL integration tests
         # The S3 matrices run LAST: each of their external-backend tests

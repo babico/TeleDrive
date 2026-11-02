@@ -9,6 +9,7 @@ the [roadmap](../roadmap.md) for the current queue.
 
 | Document | Status | What it contains |
 | --- | --- | --- |
+| [S3 fidelity and recovery 2026-11-02](2026-11-02-s3-fidelity.md) | New execution plan, not implemented | Real S3 Express sessions, physical cold-tier restore, GetObject partNumber, submode parity, bootstrap password enforcement, owner-run DR and independent payload backup. See handoffs 06-10. |
 | [Local acceptance](local-acceptance.md) | Executable mission; owner gates remain blocked | Instructions for an agent on the owner's machine: isolated Docker setup, byte fixtures, independent SQL and payload backups, recovery drills, GC race tests and evidence files. It explicitly forbids using production data or treating one host as two. |
 | [Metadata parity](metadata-parity.md) | Complete design record | The stance change that made SQL-backed S3 metadata honest, and the phases (GC deletes, versioning states, object lock, ACLs, PAB/ownership, notifications, replication, website, CORS, tagging) that were implemented from it. Final inventory 114/0/2. |
 | [Post-1.0.8 plan](post-108.md) | Tracking file, mostly complete | The work requested after the S3 parity push: the last S3 gaps, removal of HTTP Basic, the first-boot admin, the schema coordinator, credentials UI, and the module-split handoffs. Its "Released" section records the 1.0.8 tag. |

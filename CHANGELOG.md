@@ -8,10 +8,17 @@ Entries describe the behaviour change and why it mattered. A version is
 listed only after its commits exist; a release tag is cut separately after
 the mandatory checks pass on the exact SHA.
 
-## [Unreleased]
+## [1.0.9] - 2026-11-02
 
-The security-hardening and refactor cycle that followed the 1.0.8 candidate.
-**Several of these are breaking**; `docs/UPGRADING.md` §7 lists the
+The review release. A whole-tree review by six independent readers found 55
+verified defects — including three unbound names that produced bare 500s, an
+admin log websocket with no authorization, a CopyObject path that permanently
+broke envelope-encrypted objects and a reindex filter that silently returned
+nothing on MySQL — and every one of them is fixed here, with the regression
+test next to the fix. Schema 27 adds the identity constraints the upsert
+logic always assumed. The manual is now a published documentation site, and
+the license is the WTFPL.
+**Several of these are breaking**; `docs/operate/upgrade.md` §7 lists the
 operator-visible consequences and the migration for each.
 
 ### Security

@@ -11,11 +11,12 @@ points at them and summarises the theme of each release.
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| [1.0.9](https://github.com/babico/TeleDrive/releases/tag/v1.0.9) | 2026-11-02 | The review release: 55 verified defects closed with regression tests, InnoDB deadlock recovery, schema 27 identity constraints, the documentation site, WTFPL. |
 | [1.0.8](https://github.com/babico/TeleDrive/releases/tag/v1.0.8) | 2026-10-28 | S3 metadata parity (policies, ACLs, object lock, notifications, replication, website, reports, SSE-C), HTTP Basic removed, API-key delegation ceilings, opt-in envelope encryption, serialized schema coordinator. |
 | [1.0.7](https://github.com/babico/TeleDrive/releases/tag/v1.0.7) | — | Previous release line: the single-container WebUI/REST/S3 service, published through the CI-gated release workflow. |
 
 Dates are the changelog dates, not a promise about publication time. The
-1.0.8 tag resolves to `7d2aa773d3839a65899815dd9f3fa2ed2e534324`; verify the
+1.0.8 tag resolves to `393b67e4d9172380794e109f883f948fde6c1db6`; verify the
 exact-SHA workflows in [Actions](https://github.com/babico/TeleDrive/actions)
 rather than inferring them from this table.
 

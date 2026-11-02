@@ -131,4 +131,5 @@ nav:
           - Local acceptance: project/plans/local-acceptance.md
       - Releases:
           - Overview: project/releases/index.md
+          - v1.0.9: project/releases/v1.0.9.md
           - v1.0.8: project/releases/v1.0.8.md

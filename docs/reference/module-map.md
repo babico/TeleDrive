@@ -31,7 +31,7 @@ they are a size signal, not the boundary.
 
 | Module | Lines | Responsibility |
 | --- | ---: | --- |
-| `teledrive/storage/schema.py` | 726 | **The only DDL issuer.** 27 append-only, idempotent steps; `SCHEMA_VERSION` is the step count; a real cross-process lock (flock / `pg_advisory_xact_lock` / `GET_LOCK`). |
+| `teledrive/storage/schema.py` | 726 | **The only DDL issuer.** 27 append-only, idempotent steps; `SCHEMA_VERSION` is the step count; a real cross-process lock (flock / `pg_advisory_xact_lock` / `GET_LOCK`). Every step is catalogued in [Schema steps](schema-steps.md). |
 | `teledrive/storage/catalog.py` | 132 | `BucketCatalog` assembly: construction, static validators, cross-cutting transaction helpers, table re-exports. |
 | `teledrive/storage/catalog_tables.py` | — | Table and index declarations. |
 | `teledrive/storage/catalog_buckets.py` | 273 | Bucket create/list/delete, versioning state, public read, Public Access Block, ownership. |

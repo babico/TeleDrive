@@ -59,24 +59,49 @@ docker compose logs --tail=120 teledrive
 `docker compose up -d --build` recreates the container. Migrations run
 automatically on startup; there is no separate migrate command.
 
-## Schema version 27
+## Schema migrations
 
 `SCHEMA_VERSION` is the length of the append-only step list in
-`teledrive/storage/schema.py`, currently **27**. The coordinator:
+`teledrive/storage/schema.py`, currently **27**. Migrations run
+automatically on startup — there is no separate migrate command and no
+step you must run by hand. The per-step reference, including what each
+step creates and what a rollback would leave behind, is
+[Schema steps](../reference/schema-steps.md).
+
+The coordinator:
 
 - reads the highest applied version from `schema_migrations`;
 - if it is current, performs no DDL;
 - otherwise takes a cross-process lock and runs every idempotent step in order
   (SQLite `flock` on `<db>.schema-lock`, PostgreSQL advisory lock, MySQL
-  `GET_LOCK` with a 30-second timeout);
+  `GET_LOCK` — all with a 30-second timeout);
 - records the new version.
 
-Two consequences matter during an upgrade:
+Three consequences matter during an upgrade:
 
 - An interrupted migration is safe to re-run; every step is idempotent.
 - Steps are append-only and there is no down-migration. Rolling back the code
   after the schema advanced requires restoring the pre-upgrade database
   backup.
+- On a busy database the lock wait is bounded at 30 seconds. If another
+  worker is mid-migration longer than that, the starting worker fails with a
+  timeout rather than queueing indefinitely; let the first worker finish and
+  start again. A stopped container while another holds the lock is the
+  normal cause.
+
+Before a major version jump, check three things:
+
+1. **Backup.** Take the database backup described under
+   [Before you upgrade](#before-you-upgrade). Step 27 deletes duplicate rows;
+   only the backup can bring them back.
+2. **Recorded version.** Note the value of
+   `select max(version) from schema_migrations` before upgrading, so you can
+   say afterwards which steps ran.
+3. **Concurrent workers.** Every worker that opens the same database runs
+   the same serialized migration. One worker migrates while the others wait
+   on the lock; you do not need to drain workers first, but avoid restarting
+   the whole fleet simultaneously on a slow database, because each worker's
+   lock wait is capped at 30 seconds.
 
 Step 27 deduplicates `telegram_sessions.account` and
 `telegram_channels.channel_id` (keeping the most recently updated row) before

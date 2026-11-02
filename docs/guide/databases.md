@@ -104,6 +104,9 @@ All DDL goes through one coordinator in `teledrive/storage/schema.py`:
 - Steps are append-only. Adding a step bumps the version; existing steps are
   never edited or removed. An interrupted migration is safe to re-run because
   every step is idempotent.
+- The full catalogue of all 27 steps, their families, locking and undo
+  residue, lives in the [Schema steps](../reference/schema-steps.md)
+  reference.
 
 Migrations run automatically at startup and on first database access. There is
 no separate migrate command and no down-migration. Rolling back to older code

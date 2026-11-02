@@ -118,7 +118,19 @@ rclone copy ./local-dir td:backups/local-dir --progress
 
 rclone's S3 backend performs several probe requests at startup. The gateway answers the optional read-only probes with valid AWS shapes and rejects configuration attempts it cannot honour instead of pretending.
 
-The compatibility matrix names boto3, the AWS CLI and rclone as the tested clients. Other SDKs and Cyberduck are not verified, and checksum modes vary by SDK version.
+### Tested clients
+
+The compatibility contract is verified against three real clients in CI. Everything else is untested, however likely it is to work; the gateway implements the documented S3 contract, but only these three binaries and SDKs are exercised by the test suite. The full operation-by-operation matrix is [S3 compatibility](../reference/s3-specs.md).
+
+| Client | Version | What is actually exercised | Where |
+| --- | --- | --- | --- |
+| boto3 / botocore | `boto3>=1.35,<2` (development pin); CI installs the current release | Put/get/head/list/delete, multipart, versioning and delete markers, presigned URLs, POST policies, tagging, CORS, conditional writes, batch delete, object attributes, policy status, directory-bucket refusals. botocore's SigV4 signer also signs the raw-HTTP test harness | [S3 test suite](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_gateway.py) and ~20 sibling modules in `tests/s3/` |
+| AWS CLI | Current PyPI release at run time; CI installs it unpinned and prints `aws --version` per run | `s3api` create-bucket, put-object, head-object, get-object, list-objects-v2, delete-object; high-level `aws s3 sync` round trip including `--delete` and directory semantics | [CLI compat tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_cli_compat.py) |
+| rclone | Pinned v1.66.0, installed from the official release archive | `copyto`, `lsf`, `lsd`, `ls`, `cat`, `size`, `mkdir`, `delete`, `deletefile`, overwrite semantics, and the multipart path (CreateMultipartUpload, UploadPart, Complete) forced via a 5 MiB upload cutoff | [CLI compat tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_cli_compat.py) and [rclone compat tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_rclone_compat.py) |
+| Cyberduck and other S3 browsers | Untested — likely works, not warranted | Only the read-only startup probes such clients send (ownership controls, request payment, accelerate, notification, logging) are covered, via raw signed requests; the applications themselves are never run | [compat-read probes](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_compat_reads.py) |
+| MinIO client (`mc`), s3fs, Terraform AWS provider, other SDKs | Untested — likely works, not warranted | Same as above: their documented probe requests are answered with valid AWS shapes, but no binary or SDK other than the three above is exercised by CI | [compat-read probes](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_compat_reads.py) |
+
+Local test runs skip the CLI binaries when they are absent; CI sets `TELEDRIVE_REQUIRE_CLI_CLIENTS=1` so a missing client fails the job instead of silently skipping. Checksum behavior in particular varies by SDK version, and no SDK checksum mode other than the ones listed under [Consistency and integrity](#consistency-and-integrity) is verified.
 
 ## Quickstart
 

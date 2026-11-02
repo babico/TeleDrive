@@ -108,6 +108,7 @@ nav:
       - Access model: security/model.md
   - Reference:
       - S3 compatibility: reference/s3-specs.md
+      - Schema steps: reference/schema-steps.md
       - Configuration: reference/configuration.md
       - Module map: reference/module-map.md
       - CI and tests: reference/ci.md

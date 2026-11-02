@@ -36,21 +36,14 @@ Every candidate passes the filters below. The same checks are repeated inside `_
 
 The plan contract adds a SQL reference fingerprint. `scripts/ops/gc_dry_run.py` writes a fingerprint over the head, published/removed versions, aliases, writer fence, multipart parts, send intents, durable jobs and chunk journal. `verify_plan()` rejects a plan if any reference changed, if the plan is not a dry run, or if `deletion_permitted` is not exactly `false`.
 
-## Owner gates and `deletion_permitted`
+## Owner control, evidence and `deletion_permitted`
 
-`deletion_permitted` is a field in the GC plan and evidence contract. It is **always false in the current product**. It is not an environment variable and it is not a value an operator can flip through the API. It means: the independent payload backup, the verified restore drill and the writer barrier have all been proven, so a physical delete would be an authorised owner decision rather than an unbacked gamble.
+**GC is an explicit admin choice.** Its actual execution gate is the persisted `enabled` toggle plus the typed `PHYSICAL-GC` and `DELETE-RETAINED` confirmations. The dry-run/evidence contract's `deletion_permitted: false` indicates that the report itself cannot authorize deletion; it does **not** prevent an admin from deliberately enabling GC. No signed acceptance bundle, second-person approval, independent host attestation or production soak is required by the current API for the owner to use this switch.
 
-The owner gates are:
-
-1. **Independent payload backup.** A second copy of the actual media exists on a host that is independent of the TeleDrive host and its database.
-2. **Verified restore drill.** The backup has been restored and read back, including the chunk journal and the encryption material, without modifying the source.
-3. **Writer barrier.** No queued or running writer can publish a new head for the candidate during collection.
-4. **Authorised soak and acceptance.** The production evidence requires at least one hour of real 429 soak telemetry, independent hosts and a verified DR receipt. The bundle verifier reports `physical_telegram_deletion_enabled: false` regardless; production acceptance remains an owner decision.
-
-The GC status endpoint reports these gates as informational fields. The collect endpoint enforces `enabled` plus the typed confirmation; it does not re-derive the gates from evidence. That gap is deliberate and is exactly why the toggle is an owner decision with a typed confirmation, a loud log line and a last-writer record in `storage_gc_state`, not an automated policy.
+A separate independent payload backup, a successful isolated restore and a reviewed dry-run/reference inventory are strongly recommended **before choosing to delete media**. They remain owner-operated safety practices, not application-level enablement gates. Once enabled, the collector still checks live heads, aliases, retention/legal holds, unresolved send intents and concurrent writer fences. It must never use the toggle to bypass object-level safety.
 
 !!! danger
-    Enabling physical GC without all three technical gates destroys the only copy of the affected Telegram media. A SQL backup cannot restore those bytes, and there is no undelete in Telegram through TeleDrive. The product defaults to `enabled: false`; keep it there unless the evidence exists and the owner has accepted the loss of recoverability.
+    Physical Telegram message deletion is irreversible through TeleDrive. A SQL backup restores metadata but **not** the missing Telegram payload bytes. The owner assumes this risk when enabling GC. GC defaults to off, and switching it off does not cancel a collection already in progress.
 
 ## Preview and collect workflow
 

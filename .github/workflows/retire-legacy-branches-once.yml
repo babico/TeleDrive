@@ -26,8 +26,9 @@ jobs:
           while read -r branch expected tag; do
             [[ -n "$branch" ]] || continue
             ref="repos/${GH_REPO}/git/ref/heads/${branch}"
-            if ! actual="$(gh api "$ref" --jq '.object.sha' 2>/dev/null)"; then
+            if ! actual="$(gh api "$ref" --jq '.object.sha' 2>/dev/null)" || [[ "$actual" == "null" ]]; then
               archived="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
+              [[ "$archived" == "null" ]] && archived=""
               if [[ "$archived" != "$expected" ]]; then
                 echo "::error::${branch} is absent without its expected archive tag"; exit 1
               fi
@@ -46,6 +47,7 @@ jobs:
               echo "::error::${branch} has an open PR; refuse deletion"; exit 1
             fi
             old_tag="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
+            [[ "$old_tag" == "null" ]] && old_tag=""
             if [[ -n "$old_tag" && "$old_tag" != "$expected" ]]; then
               echo "::error::archive tag ${tag} points elsewhere"; exit 1
             fi

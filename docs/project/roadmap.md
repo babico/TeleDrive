@@ -8,7 +8,7 @@ Evidence boundaries are in [Project status](status.md), CI mechanics in
 
 ## New queued implementation track (2026-11-02)
 
-The [S3 fidelity and recovery execution plan](plans/2026-11-02-s3-fidelity.md) and [handoffs 06–10](handoffs/README.md) describe the next implementation queue. These are **planned, not delivered**: GetObject partNumber, true directory bucket sessions, cold payload archival/restore, versioning/Object Lock/lifecycle/ACL/policy submode parity, server-enforced first-boot admin password rotation, and expanded P1/P2/P3 tests, refactor and documentation checks. Original-media DR and independent-host payload backup are owner-run procedures. Physical GC remains an owner-operated toggle without a mandatory signed acceptance bundle.
+The [S3 fidelity and recovery execution plan](plans/2026-11-02-s3-fidelity.md) and [handoffs 06–10](https://github.com/babico/TeleDrive/tree/main/docs/project/handoffs) describe the next implementation queue. These are **planned, not delivered**: GetObject partNumber, true directory bucket sessions, cold payload archival/restore, versioning/Object Lock/lifecycle/ACL/policy submode parity, server-enforced first-boot admin password rotation, and expanded P1/P2/P3 tests, refactor and documentation checks. Original-media DR and independent-host payload backup are owner-run procedures. Physical GC remains an owner-operated toggle without a mandatory signed acceptance bundle.
 
 ## 1. Completed milestones (summary)
 

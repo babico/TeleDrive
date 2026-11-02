@@ -16,11 +16,11 @@ approval to operate on production data or to delete Telegram messages.
 | Schema version | 27 recorded, append-only steps in `teledrive/storage/schema.py` |
 | S3 inventory | **114 supported / 0 partial / 2 unsupported** of 116 operations |
 
-The tag message and [release notes](releases/v1.0.8.md) state that the six
+The tag message and [release notes](releases/v1.0.9.md) state that the six
 mandatory workflows were green on the tagged SHA. This page does not copy
 run logs: confirm the exact SHA in
 [Actions](https://github.com/babico/TeleDrive/actions) before treating it as
-evidence. Commits after `7d2aa77` are post-release and are not in the image or
+evidence. Commits after `69a503a` are post-release and are not in the image or
 the release notes.
 
 Do not claim a newer SHA than the one a check actually ran on. A green commit

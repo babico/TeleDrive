@@ -39,33 +39,49 @@ The [S3 fidelity and recovery execution plan](plans/2026-11-02-s3-fidelity.md) a
 
 ## 2. Correctness and maintainability
 
-- [ ] **Finish the `web/app.py` extraction — what is actually left.** The
+- [x] **Finish the `web/app.py` extraction — what is actually left.** The
       router split itself is complete: only four system routes
       (`/openapi.json`, `/docs`, `/redoc`, `/api/v1/metrics`), the three
-      middlewares and the shared stream cores remain. What is still fused to
+      middlewares and the shared stream cores remain. What was still fused to
       app construction is (a) the settings/config machinery (roughly the
       first 500 lines: `read_raw_config`, `effective_config`,
       `_persist_settings_document`, secret scrubbing) and (b) the seven
-      scheduler loops with their job cores. Extract those into
-      `web/settings_runtime.py` and `web/schedulers.py`. Prerequisite: keep
-      `tests/meta/test_route_surface.py` byte-identical; a moved route that
-      loses its `Depends(...)` is an unauthenticated route. Acceptance: no
-      behaviour change, surface test unchanged, `web/app.py` under ~700
-      lines with imports, re-exports, middleware and the stream cores.
+      scheduler loops with their job cores. Both are now extracted into
+      `web/settings_runtime.py` and `web/schedulers.py`, re-exported through
+      `web.app` so callers and test monkeypatching keep working;
+      `tests/meta/test_route_surface.py` stayed byte-identical. The result is
+      **944 lines, not the estimated ~700**: what remains is exactly the
+      parts this item reserved (system routes, middlewares, stream cores)
+      plus the audit/log plumbing and the Prometheus renderer, and this
+      roadmap's own rule is no split for line count alone. `teledrive/settings.py`
+      gained `paths.data_dir` / `TELEDRIVE_DATA_DIR` so every stateful default
+      hangs off one relocatable root (see §4).
 - [ ] **Split the remaining `catalog_*` growth points only when a real change
       touches them.** `catalog_versions.py` (775) and `manifest.py` (712) are
       large but cohesive; do not split for line count alone. Acceptance: a
       concrete bug or feature that needs a new seam, not a refactor-only PR.
-- [ ] **Consolidate the WebUI page groups that still duplicate fetch/render
-      helpers.** `telegram.js`, `buckets.js` and `admin.js` each carry a
-      variant of the same table/toast code. Acceptance: one shared helper per
-      behaviour, `test_page_composition.py` updated, no fragment loaded on a
-      page whose `init()` does not need it.
-- [ ] **Audit the remaining `except Exception` sites for silent work loss.**
+- [x] **Consolidate the WebUI page groups that still duplicate fetch/render
+      helpers.** `telegram.js`, `buckets.js` and `admin.js` each carried a
+      variant of the same table/toast code. Done: one `apiFetch()` base plus
+      `api()`/`govCall()` as the only front doors (session cookie, CSRF
+      header, JSON-or-text body handling in one place), shared
+      toast/confirm helpers in `app.js`, and `bucketUrl()`/`govDeleteUrl()`
+      builders for the URL shapes each page repeats. `settings.html` drift
+      fixed in the same pass (the scheduler toggle is wired back to
+      `jobs.auto_run`); four new pinning tests in `test_settings_ui.py` /
+      `test_page_composition.py` lock the wiring.
+- [x] **Audit the remaining `except Exception` sites for silent work loss.**
       The swallowed-name test catches the two known shapes; it cannot catch a
-      broad handler that hides a legitimate failure. Acceptance: each
-      remaining broad catch in `web/` and `teledrive/storage/` either logs a
-      reason class or has a comment explaining why silence is correct.
+      broad handler that hides a legitimate failure. Done across 108
+      handlers: four legitimate narrowings (`sqlite_database_path` to
+      `ArgumentError`; the pins/content_index/gc-collect `_claim` paths to
+      `IntegrityError`), a fail-closed 503 where the session-delete usage
+      guard silently disabled itself on a DB error, and a log line with a
+      severity matching the blast radius on every other best-effort catch.
+      Exactly one documented exception remains silent — the file-log
+      emitter, which cannot report its own failure without recursing.
+      Startup-protection catches keep their broad shape with rationale
+      comments.
 
 ## 3. S3 parity and protocol evidence
 
@@ -108,17 +124,27 @@ The operation list and current status are **not duplicated here**; use the
 
 ## 4. Operations and test realism
 
-- [ ] **Make `/data` and `/uploads` test-configurable.** Two tests patch
-      `pathlib.Path.mkdir` globally because the app still hardcodes those
-      roots in a few places. Acceptance: the roots come from settings in every
-      path, the global patch disappears, and the tests pass under xdist.
-- [ ] **Consolidate the repeated tmp-app fixtures into a shared `conftest.py`.**
-      Four fixtures re-implement setup with small drift. Acceptance: one
-      factory, no behavioural change, full suite green.
-- [ ] **Port the restart/retry matrices to PostgreSQL where SQLite is the only
+- [x] **Make `/data` and `/uploads` test-configurable.** Two tests patched
+      `pathlib.Path.mkdir` globally because the app still hardcoded those
+      roots in a few places. Done: `paths.data_dir` /
+      `TELEDRIVE_DATA_DIR` in `teledrive/settings.py` derives every stateful
+      default (scratch, auth, sessions, logs, SQLite roots), the test
+      factory points every root at `tmp_path` through the config file
+      itself, and the global patches are gone — `grep 'Path, "mkdir"'
+      tests/` is empty and the suite passes.
+- [x] **Consolidate the repeated tmp-app fixtures into a shared `conftest.py`.**
+      Four fixtures re-implemented setup with small drift. Done: one
+      `make_app_env` factory in `tests/web/conftest.py` (tmp SQLite, config
+      naming every root, transport/db patches, the knobs the special cases
+      need); five modules build on it. No behavioural change, full suite
+      green; `test_settings_persistence.py` stays separate on purpose (it
+      tests the raw store path with its own master-key knob).
+- [x] **Port the restart/retry matrices to PostgreSQL where SQLite is the only
       backend.** SQLite cannot prove row-lock or advisory-lock behaviour.
-      Acceptance: at least the GC lease, schema init and publish/delete races
-      run on both backends.
+      Done: both matrices run on real PostgreSQL 17 and MySQL 8.4 via the
+      opt-in `DB_TEST_*_URL` parameters, dropping TeleDrive-owned tables per
+      test so inventories stay in sync; the CI database job executes them
+      with the live URLs (and now installs the web stack they import).
 - [ ] **Harden the documentation build in review.** The site test already
       checks nav, links, language, one H1 and placeholders. Acceptance: keep
       it green in every PR and add a check only when a real doc regression

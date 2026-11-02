@@ -44,9 +44,9 @@ telegram_sessions = Table(
     # 0 = expired/revoked/unusable.
     Column("authorized", Integer),
     Column("health_checked_at", BigInteger),
-    # Soft quota: preferred routing keeps accounts under this; NULL =
-    # unlimited. Monitored in UI/metrics; routing enforcement is a
-    # separate increment (see TODO).
+    # Soft quota: routing PREFERs accounts under this (user_mode switches
+    # to an under-quota peer); it never rejects an upload. NULL =
+    # unlimited. Monitored in UI/metrics.
     Column("soft_quota_bytes", BigInteger),
 )
 

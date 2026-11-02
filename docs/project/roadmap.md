@@ -28,19 +28,26 @@ Evidence boundaries are in [Project status](status.md), CI mechanics in
 - [x] Module split: `web/app.py` 6027 → 1576 lines, `web/s3.py` 5106 → 191,
       `web/static/app.js` 1469 → 167, `catalog.py` 1465 → 132, with the route
       surface frozen by a meta-test.
-- [x] Raw SQL reduced to five annotated read-only aggregate call sites; no
+- [x] Raw SQL reduced to four annotated read-only aggregate call sites; no
       mutating handler SQL remains in `web/`.
 - [x] Disposable 13-gate Docker acceptance, live user E2E and multiworker
       PostgreSQL E2E in CI; docs site built with `mkdocs --strict`.
 
 ## 2. Correctness and maintainability
 
-- [ ] **Finish the `web/app.py` router split.** Move the remaining handler
-      groups into `web/routers/*` per the handoff notes under
-      `docs/project/handoffs/`. Prerequisite: keep
+- [ ] **Finish the `web/app.py` extraction — what is actually left.** The
+      router split itself is complete: only four system routes
+      (`/openapi.json`, `/docs`, `/redoc`, `/api/v1/metrics`), the three
+      middlewares and the shared stream cores remain. What is still fused to
+      app construction is (a) the settings/config machinery (roughly the
+      first 500 lines: `read_raw_config`, `effective_config`,
+      `_persist_settings_document`, secret scrubbing) and (b) the seven
+      scheduler loops with their job cores. Extract those into
+      `web/settings_runtime.py` and `web/schedulers.py`. Prerequisite: keep
       `tests/meta/test_route_surface.py` byte-identical; a moved route that
       loses its `Depends(...)` is an unauthenticated route. Acceptance: no
-      behaviour change, surface test unchanged, file under ~800 lines.
+      behaviour change, surface test unchanged, `web/app.py` under ~700
+      lines with imports, re-exports, middleware and the stream cores.
 - [ ] **Split the remaining `catalog_*` growth points only when a real change
       touches them.** `catalog_versions.py` (775) and `manifest.py` (712) are
       large but cohesive; do not split for line count alone. Acceptance: a

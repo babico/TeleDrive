@@ -140,9 +140,10 @@ the gate is off.
 
 ## 7. Open engineering work
 
-Tracked in the [roadmap](roadmap.md): the remaining `web/app.py` split and
-raw-SQL extraction, the exhaustive per-operation crash/restart and
-multiworker-race matrices, and test-realism items from the reviews. None of
+Tracked in the [roadmap](roadmap.md): the final `web/app.py` extraction
+(settings machinery and scheduler loops), the exhaustive per-operation
+crash/restart and multiworker-race matrices, and test-realism items from the
+reviews. None of
 these is required for the 1.0.8 release to be correct; they reduce future
 risk.
 

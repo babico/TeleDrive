@@ -104,7 +104,7 @@ tailwind.config = {
 <section class="space-y-4">
   <div class="card">
     <h3>Upload</h3>
-    <div class="field"><label>Source directory<span class="hint" data-tip="Local folder scanned for new files to upload. The folder auto-sync on the Storage page watches this root; files outside it are ignored.">i</span></label><input x-model="config.upload.source_dir" class="input"></div>
+    <div class="field"><label>Source directory<span class="hint" data-tip="Local folder scanned for new files to upload. The optional folder auto-sync (jobs.watch in config.yaml) watches this root; files outside it are ignored.">i</span></label><input x-model="config.upload.source_dir" class="input"></div>
     <div class="field"><label>Send mode<span class="hint" data-tip="document: send every file as a Telegram document (original bytes, any type). media: send photos/videos as media. auto: let Telegram pick per file.">i</span></label>
       <select x-model="config.upload.send_mode" class="input"><option>document</option><option>media</option><option>auto</option></select>
     </div>
@@ -130,14 +130,14 @@ tailwind.config = {
 
   <div class="card">
     <h3>Automation</h3>
-    <div class="field"><label class="flex items-center gap-2"><input type="checkbox" x-model="config.app.auto_run" class="w-4 h-4"> Run upload batches automatically<span class="hint" data-tip="When on, the scheduler uploads queued files by itself. When off, uploads only start through the Queue page or the API.">i</span></label></div>
-    <div class="field"><label>Interval (minutes)<span class="hint" data-tip="Minutes between automatic upload batches.">i</span></label><input x-model="config.app.run_interval_minutes" class="input" type="number"></div>
+    <div class="field"><label class="flex items-center gap-2"><input type="checkbox" x-model="config.jobs.auto_run" class="w-4 h-4"> Run upload batches automatically<span class="hint" data-tip="When on, the durable worker uploads queued files by itself. When off, uploads only start through the Queue page or the API.">i</span></label></div>
+    <p class="muted text-xs">This is the jobs.auto_run setting the worker reads; a save here takes effect immediately. The worker polls continuously, so there is no batch interval to configure.</p>
   </div>
 
   <div class="card">
     <h3>Storage</h3>
     <div class="field"><label>Scratch directory<span class="hint" data-tip="Temporary staging area for chunked uploads. Must have free space for the largest file being uploaded; cleaned automatically after each upload.">i</span></label><input x-model="config.storage.scratch_dir" class="input" placeholder="/data/tmp"></div>
-    <p class="muted text-xs">The upload routing strategy and Telegram accounts are managed on the Storage page.</p>
+    <p class="muted text-xs">The upload routing strategy and Telegram accounts are managed on the Telegram settings page.</p>
   </div>
 
   <div class="card">

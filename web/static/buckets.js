@@ -5,10 +5,12 @@
 // (`typeof bucketState === 'function'`), because buckets.js is loaded on the
 // pages that can reach these methods and nowhere else.
 //
-// Move-only split from app.js: the bodies below are verbatim, including the
-// historical duplicate `downloadObject` (the async fetch/decrypt definition
-// later in this object shadowed the earlier window.open one in app.js, and
-// still does). Do not "fix" that here without a separate behaviour change.
+// Move-only split from app.js; the shared fetch/toast/confirm helpers stay
+// there. Bucket-scoped API URLs are built by the one bucketUrl() helper
+// below. The historical duplicate `downloadObject` is kept verbatim (the
+// async fetch/decrypt definition later in this object shadowed the earlier
+// window.open one in app.js, and still does). Do not "fix" that here
+// without a separate behaviour change.
 (function (global) {
   'use strict';
 
@@ -43,6 +45,11 @@
 
   global.bucketMethods = function () {
     return {
+      // Every bucket-scoped admin endpoint shares this prefix; one builder
+      // so the encodeURIComponent discipline cannot drift per call site.
+      bucketUrl(bucket, suffix){
+        return '/api/v1/admin/storage/buckets/' + encodeURIComponent(bucket) + (suffix || '');
+      },
       presignKey: null,
       presignBucket: '',
       presignExpiry: 3600,
@@ -52,7 +59,7 @@
         this.presignKey = key;
         this.presignedUrl = '';
         try {
-          const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/presign',
+          const r = await this.api(this.bucketUrl(bucket, '/presign'),
             {method:'POST', body: JSON.stringify({key, expires: Number(this.presignExpiry)||3600})});
           this.presignedUrl = r.url;
           this.toast('Presigned link generated (' + r.expires_in + 's)');
@@ -84,7 +91,7 @@
           if(this.shareExpiry) body.expires_in = Number(this.shareExpiry);
           if(this.shareMaxDownloads) body.max_downloads = Number(this.shareMaxDownloads);
           if(this.sharePassword) body.password = this.sharePassword;
-          const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.shareBucket)+'/shares',
+          const r = await this.api(this.bucketUrl(this.shareBucket, '/shares'),
             {method:'POST', body: JSON.stringify(body)});
           this.shareUrl = this.shareOrigin + r.path;
           this.toast('Share link created');
@@ -109,18 +116,18 @@
         this.pinBucket = bucket;
         await this.refreshTgSessionStatus();
         try {
-          const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/pin');
+          const r = await this.api(this.bucketUrl(bucket, '/pin'));
           this.pinAccount = r.account || '';
         } catch(e){ this.toast(e.message,true); }
       },
       async savePin(){
         try {
           if(this.pinAccount){
-            await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.pinBucket)+'/pin',
+            await this.api(this.bucketUrl(this.pinBucket, '/pin'),
               {method:'PUT', body: JSON.stringify({account: this.pinAccount})});
             this.toast('Pin saved: '+this.pinAccount);
           } else {
-            await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.pinBucket)+'/pin',
+            await this.api(this.bucketUrl(this.pinBucket, '/pin'),
               {method:'DELETE'});
             this.toast('Pin removed');
           }
@@ -130,7 +137,7 @@
       async editCors(bucket){
         this.corsBucket = bucket;
         try {
-          const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/cors');
+          const r = await this.api(this.bucketUrl(bucket, '/cors'));
           this.corsRules = (r.rules||[]).map(r => ({
             origins: (r.origins||[]).join(','),
             methods: (r.methods||[]).join(','),
@@ -148,16 +155,16 @@
           max_age: Number(r.max_age)||0,
         })).filter(r => r.origins.length && r.methods.length);
         try {
-          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.corsBucket)+'/cors',
+          await this.api(this.bucketUrl(this.corsBucket, '/cors'),
             {method:'PUT', body: JSON.stringify({rules})});
           this.toast('CORS rules saved');
         } catch(e){ this.toast(e.message,true); }
       },
       downloadObject(bucket, key){
-        window.open('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key), '_blank');
+        window.open(this.bucketUrl(bucket, '/content?key=' + encodeURIComponent(key)), '_blank');
       },
       contentUrl(bucket, key){
-        return '/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/content?key='+encodeURIComponent(key);
+        return this.bucketUrl(bucket, '/content?key=' + encodeURIComponent(key));
       },
       previewUrl(){ return this.contentUrl(this.previewBucket, this.previewKey); },
       previewKindFor(key){
@@ -206,7 +213,7 @@
         let ok = 0;
         for(const key of this.selectedKeys){
           try {
-            await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.currentBucket)+'/objects?'+new URLSearchParams({key}), {method:'DELETE'});
+            await this.api(this.bucketUrl(this.currentBucket, '/objects?' + new URLSearchParams({key})), {method:'DELETE'});
             ok++;
           } catch(e){}
         }
@@ -222,9 +229,9 @@
         const next = prompt('New key:', key);
         if(!next || next === key) return;
         try {
-          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects/copy?'+new URLSearchParams({key}),
+          await this.api(this.bucketUrl(bucket, '/objects/copy?' + new URLSearchParams({key})),
             {method:'POST', body: JSON.stringify({destination_key: next})});
-          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}), {method:'DELETE'});
+          await this.api(this.bucketUrl(bucket, '/objects?' + new URLSearchParams({key})), {method:'DELETE'});
           this.toast('Renamed');
           await this.browseBucket(bucket);
         } catch(e){ this.toast(e.message,true); }
@@ -239,9 +246,9 @@
           if(!destKey) destKey = key;
         }
         try {
-          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects/copy?'+new URLSearchParams({key}),
+          await this.api(this.bucketUrl(bucket, '/objects/copy?' + new URLSearchParams({key})),
             {method:'POST', body: JSON.stringify({destination_bucket: destBucket, destination_key: destKey})});
-          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}), {method:'DELETE'});
+          await this.api(this.bucketUrl(bucket, '/objects?' + new URLSearchParams({key})), {method:'DELETE'});
           this.toast('Moved');
           await this.browseBucket(bucket);
           await this.refreshBuckets();
@@ -338,23 +345,23 @@
       },
       async deleteBucket(name){
         if(!this.confirmDelete('bucket ' + name, 'Only possible when the bucket is empty.')) return;
-        try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name),{method:'DELETE'}); this.toast('Deleted'); await this.refreshBuckets(); if(this.currentBucket===name) this.currentBucket=null; }
+        try { await this.api(this.bucketUrl(name), {method:'DELETE'}); this.toast('Deleted'); await this.refreshBuckets(); if(this.currentBucket===name) this.currentBucket=null; }
         catch(e){ this.toast(e.message,true); }
       },
       async browseBucket(name){
         this.currentBucket = name;
-        try { const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name)+'/objects'); this.bucketObjects = r.objects||[]; }
+        try { const r = await this.api(this.bucketUrl(name, '/objects')); this.bucketObjects = r.objects||[]; }
         catch(e){ this.toast(e.message,true); }
       },
       async deleteObject(bucket,key){
         if(!this.confirmDelete(key, 'Telegram media is retained (physical GC is owner-gated).')) return;
-        try { await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(bucket)+'/objects?'+new URLSearchParams({key}),{method:'DELETE'}); this.toast('Unlinked; Telegram media is retained until physical GC'); await this.browseBucket(bucket); await this.refreshBuckets(); }
+        try { await this.api(this.bucketUrl(bucket, '/objects?' + new URLSearchParams({key})), {method:'DELETE'}); this.toast('Unlinked; Telegram media is retained until physical GC'); await this.browseBucket(bucket); await this.refreshBuckets(); }
         catch(e){ this.toast(e.message,true); }
       },
       async editQuota(name){
         this.quotaEditBucket = name;
         try {
-          const r = await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(name)+'/quota');
+          const r = await this.api(this.bucketUrl(name, '/quota'));
           this.quotaMaxSize = r.max_size_bytes||'';
           this.quotaMaxObjects = r.max_objects||'';
         } catch(e){ this.toast(e.message,true); }
@@ -364,7 +371,7 @@
           const body = {};
           if(this.quotaMaxSize) body.max_size_bytes = Number(this.quotaMaxSize);
           if(this.quotaMaxObjects) body.max_objects = Number(this.quotaMaxObjects);
-          await this.api('/api/v1/admin/storage/buckets/'+encodeURIComponent(this.quotaEditBucket)+'/quota',{method:'PUT',body:JSON.stringify(body)});
+          await this.api(this.bucketUrl(this.quotaEditBucket, '/quota'), {method:'PUT', body:JSON.stringify(body)});
           this.toast('Quota saved');
           this.quotaEditBucket = null;
           await this.refreshBuckets();

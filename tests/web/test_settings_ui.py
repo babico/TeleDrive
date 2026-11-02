@@ -147,6 +147,33 @@ def test_settings_page_contains_ui_elements():
     assert 'showAddChannel' in html
 
 
+def test_general_settings_page_tells_the_truth():
+    """The Automation card binds the setting the durable worker reads.
+
+    jobs.auto_run (teledrive/settings.py job_auto_run, live-reloaded on
+    every config save) gates the worker loop. The legacy app.* section
+    drives nothing, so a checkbox or interval field bound to config.app.*
+    was UI that saved values nothing consumed. The page also must not
+    point users at a "Storage page" that does not exist.
+    """
+    from pathlib import Path
+    html = Path("web/static/settings.html").read_text(encoding="utf-8")
+    assert 'x-model="config.jobs.auto_run"' in html
+    assert "config.app.auto_run" not in html
+    assert "config.app.run_interval_minutes" not in html
+    assert "Storage page" not in html
+    assert "Telegram settings page" in html
+
+
+def test_telegram_js_normalizes_jobs_auto_run():
+    """loadSettings() must normalize the jobs section, not the dead app one."""
+    from pathlib import Path
+    js = Path("web/static/telegram.js").read_text(encoding="utf-8")
+    assert "this.config.jobs.auto_run = !!jobs.auto_run;" in js
+    assert "config.app.auto_run" not in js
+    assert "config.app.run_interval_minutes" not in js
+
+
 def test_app_js_valid_syntax():
     """Verify app.js has no syntax errors (checked via node if available)."""
     import shutil, subprocess

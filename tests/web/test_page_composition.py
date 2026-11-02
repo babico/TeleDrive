@@ -188,3 +188,37 @@ def test_fragment_pages_load_fragment_before_app():
             if path.exists() and is_group_file(path):
                 assert scripts.index(src) < app_at, (
                     f"{page.name}: {src} must load before /static/app.js")
+
+
+def test_csrf_fetch_plumbing_is_shared_not_duplicated():
+    """One fetch base: app.js apiFetch().
+
+    api() and governance.js govCall() both wrap it, so the CSRF header
+    and the credentials:'include' discipline are built in exactly one
+    place. The only other site allowed to spell the header out is the
+    buckets.js XHR upload, which needs per-file progress events and
+    therefore cannot go through fetch().
+    """
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "async apiFetch(" in app_js
+    assert app_js.count("X-TeleDrive-CSRF") == 1, (
+        "apiFetch must be the only header builder in app.js")
+    buckets = (STATIC / "buckets.js").read_text(encoding="utf-8")
+    assert buckets.count("X-TeleDrive-CSRF") == 1, (
+        "buckets.js may spell the header out only for the XHR upload")
+    for name in ("telegram.js", "admin.js", "credentials.js",
+                 "governance.js"):
+        text = (STATIC / name).read_text(encoding="utf-8")
+        assert "X-TeleDrive-CSRF" not in text, name
+
+
+def test_bucket_scoped_urls_have_one_builder():
+    """buckets.js builds every bucket-scoped endpoint URL via bucketUrl().
+
+    The encodeURIComponent discipline must not drift back into inline
+    string concatenation at individual call sites.
+    """
+    buckets = (STATIC / "buckets.js").read_text(encoding="utf-8")
+    assert "bucketUrl(bucket, suffix)" in buckets
+    # The only inline construction left is the builder itself.
+    assert buckets.count("storage/buckets/' + encodeURIComponent(bucket)") == 1

@@ -7,12 +7,15 @@
 // (`typeof governanceState === 'function'`), because only that page can reach
 // these methods.
 //
-// It calls out to two things that stay in app.js / buckets.js:
+// It calls out to three things that stay in app.js / buckets.js:
 //   * this.refreshBuckets() and this.buckets  -> buckets.js (loaded first on
 //     this page, and on /history and /s3/buckets for other reasons)
 //   * this.toast() and the isAdmin getter     -> app.js
+//   * this.apiFetch()                         -> app.js (govCall wraps it;
+//     the fetch/CSRF/JSON plumbing is shared, only the error shape is local)
 //
-// Move-only split from app.js: the bodies below are verbatim.
+// Consolidated from app.js: shared helpers live there; everything here is
+// governance-specific.
 (function (global) {
   'use strict';
 
@@ -61,23 +64,29 @@
       govUrl(suffix){
         return '/api/v1/admin/s3-governance/' + encodeURIComponent(this.govBucket) + suffix;
       },
+      // DELETE endpoints take the acting S3 credential as a query param
+      // instead of a body; every governance delete shares this suffix.
+      govDeleteUrl(suffix){
+        return this.govUrl(suffix) + (this.govCredentialId ? '?credential_id=' + encodeURIComponent(this.govCredentialId) : '');
+      },
       govCredentialBody(){
         return this.govCredentialId ? {credential_id:this.govCredentialId} : {};
       },
       async govCall(url, opt={}){
-        const headers = {'Content-Type':'application/json','X-TeleDrive-CSRF':'1', ...(opt.headers||{})};
-        const r = await fetch(url, {credentials:'include', headers, ...opt});
-        const text = await r.text();
-        let data = {};
-        try { data = text ? JSON.parse(text) : {}; } catch(e){ data = {detail:text}; }
+        // Same fetch/CSRF/JSON plumbing as api() (app.js apiFetch); this
+        // wrapper only enriches the error, because the governance endpoints
+        // answer with AWS-style {code, message} bodies that the error panel
+        // renders field by field.
+        const {r, text, data, parsed} = await this.apiFetch(url, opt);
+        const body = parsed ? data : (text ? {detail: text} : {});
         if(!r.ok){
-          const err = new Error(data.code ? (data.code + ': ' + data.message) : (data.detail || r.statusText));
-          err.code = data.code || r.headers.get('X-AWS-Error-Code') || null;
-          err.awsMessage = data.message || data.detail || r.statusText;
+          const err = new Error(body.code ? (body.code + ': ' + body.message) : (body.detail || r.statusText));
+          err.code = body.code || r.headers.get('X-AWS-Error-Code') || null;
+          err.awsMessage = body.message || body.detail || r.statusText;
           err.status = r.status;
           throw err;
         }
-        return data;
+        return body;
       },
       govFail(e){
         this.govError = {code:e.code, message:e.awsMessage || e.message, status:e.status};
@@ -144,8 +153,7 @@
       async deleteGovPolicy(){
         if(!confirm('Delete the bucket policy?\n\nAll policy-based Allow/Deny statements stop applying immediately. IAM is not used here; the bucket returns to owner-only access.')) return;
         const r = await this.govMutate('Bucket policy deleted', () => this.govCall(
-          this.govUrl('/policy') + (this.govCredentialId ? '?credential_id=' + encodeURIComponent(this.govCredentialId) : ''),
-          {method:'DELETE'}));
+          this.govDeleteUrl('/policy'), {method:'DELETE'}));
         if(r) await this.loadGovPolicy();
       },
 
@@ -227,8 +235,7 @@
       async deleteGovWebsite(){
         if(!confirm('Delete the website configuration?\n\nThis also revokes public_read, so /site/' + this.govBucket + '/ stops serving objects.')) return;
         const r = await this.govMutate('Website deleted', () => this.govCall(
-          this.govUrl('/website') + (this.govCredentialId ? '?credential_id=' + encodeURIComponent(this.govCredentialId) : ''),
-          {method:'DELETE'}));
+          this.govDeleteUrl('/website'), {method:'DELETE'}));
         if(r) await this.loadGovWebsite();
       },
 
@@ -289,8 +296,7 @@
       async deleteGovReplication(){
         if(!confirm('Delete the replication configuration?\n\nNew objects stop being copied to a second Telegram account. Existing replica chunks are kept.')) return;
         const r = await this.govMutate('Replication configuration deleted', () => this.govCall(
-          this.govUrl('/replication') + (this.govCredentialId ? '?credential_id=' + encodeURIComponent(this.govCredentialId) : ''),
-          {method:'DELETE'}));
+          this.govDeleteUrl('/replication'), {method:'DELETE'}));
         if(r) await this.loadGovReplication();
       },
 
@@ -334,8 +340,7 @@
       async deleteGovTiering(config){
         if(!confirm('Delete tiering configuration "' + config.id + '"?\n\nObjects already gated as ARCHIVE_ACCESS stay gated until a read/restore cycle; deleting the configuration stops future transitions.')) return;
         const r = await this.govMutate('Tiering configuration deleted', () => this.govCall(
-          this.govUrl('/tiering/' + encodeURIComponent(config.id)) + (this.govCredentialId ? '?credential_id=' + encodeURIComponent(this.govCredentialId) : ''),
-          {method:'DELETE'}));
+          this.govDeleteUrl('/tiering/' + encodeURIComponent(config.id)), {method:'DELETE'}));
         if(r){ this.govLoaded.tiering = false; await this.loadGovTiering(); }
       },
 
@@ -378,8 +383,7 @@
       async deleteGovReport(kind, config){
         if(!confirm('Delete ' + kind + ' configuration "' + config.id + '"?\n\nScheduled report generation stops. Reports already written to the destination bucket stay there.')) return;
         const r = await this.govMutate('Report configuration deleted', () => this.govCall(
-          this.govUrl('/reports/' + kind + '/' + encodeURIComponent(config.id)) + (this.govCredentialId ? '?credential_id=' + encodeURIComponent(this.govCredentialId) : ''),
-          {method:'DELETE'}));
+          this.govDeleteUrl('/reports/' + kind + '/' + encodeURIComponent(config.id)), {method:'DELETE'}));
         if(r){ this.govLoaded.reports = false; await this.loadGovReports(); }
       },
     };

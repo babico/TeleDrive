@@ -127,21 +127,35 @@ function app(){
       setTimeout(()=>{ this.toastMsg = ''; }, 4000);
     },
 
-    async api(url, opt={}){
-      // Session auth flows through the httpOnly teledrive_session cookie
-      // (credentials:'include'); no token is kept in localStorage.
+    // Shared fetch base for every API call: session auth flows through the
+    // httpOnly teledrive_session cookie (credentials:'include'), no token is
+    // kept in localStorage, and every request carries the CSRF header the
+    // mutating endpoints require. api() below and govCall() in governance.js
+    // are the only two front doors — neither re-implements this plumbing.
+    // Returns the raw response plus the body text and its JSON parse (with a
+    // `parsed` flag, because "not JSON" is an outcome callers distinguish).
+    async apiFetch(url, opt={}){
       const headers = {'Content-Type':'application/json','X-TeleDrive-CSRF':'1',...(opt.headers||{})};
       const r = await fetch(url, {credentials:'include', headers, ...opt});
+      const text = await r.text();
+      let data; let parsed = false;
+      try { data = JSON.parse(text); parsed = true; } catch(e){}
+      return {r, text, data, parsed};
+    },
+
+    async api(url, opt={}){
+      const {r, text, data, parsed} = await this.apiFetch(url, opt);
       if(!r.ok){
         let msg = r.statusText;
-        try {
-          const b = JSON.parse(await r.text());
-          if(typeof b.detail === 'string') msg = b.detail;
-          else if(b.detail && typeof b.detail === 'object' && b.detail.message) msg = b.detail.message;
-        } catch(e){}
+        if(parsed && data){
+          if(typeof data.detail === 'string') msg = data.detail;
+          else if(data.detail && typeof data.detail === 'object' && data.detail.message) msg = data.detail.message;
+        }
         throw new Error(msg);
       }
-      return r.json();
+      // Empty or non-JSON success body: fail exactly like r.json() did.
+      if(!parsed) return JSON.parse(text);
+      return data;
     },
 
     fmtTs(v){ if(!v) return '-'; return new Date(v*1000).toLocaleString(); },

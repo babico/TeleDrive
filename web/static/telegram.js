@@ -7,7 +7,9 @@
 // buckets.html also loads it: buckets.js editPin() calls
 // refreshTgSessionStatus().
 //
-// Move-only split from app.js: the bodies below are verbatim.
+// Split from app.js; shared fetch/toast/confirm helpers stay there. The
+// Automation switch normalizes jobs.auto_run — the setting the durable
+// worker actually reads (the legacy app.* section drives nothing).
 (function (global) {
   'use strict';
 
@@ -51,14 +53,19 @@
       async loadSettings(){
         try {
           const config = await this.api('/api/v1/config');
-          const tg = config.telegram||{}, up = config.upload||{}, st = config.state||{}, app = config.app||{};
+          const tg = config.telegram||{}, up = config.upload||{}, st = config.state||{};
           const storage = config.storage||{}, jobs = config.jobs||{};
           this.config = config;
           if(!this.config.storage) this.config.storage = {};
           if(!this.config.upload) this.config.upload = {};
           if(!this.config.state) this.config.state = {};
-          if(!this.config.app) this.config.app = {};
           if(!this.config.telegram) this.config.telegram = {};
+          // The durable worker reads jobs.auto_run (teledrive/settings.py
+          // job_auto_run), and a config save live-reloads it — the
+          // Automation card on settings.html binds this field. The legacy
+          // app.* section is passed through untouched on save but drives
+          // nothing, so the UI must not present it as the switch.
+          if(!this.config.jobs) this.config.jobs = {};
           this.config.storage.channel = storage.channel||'';
           this.config.storage.strategy = storage.strategy||'round_robin';
           this.config.storage.scratch_dir = storage.scratch_dir||'/data/tmp';
@@ -76,8 +83,7 @@
           this.config.upload.allowed_extensions = up.allowed_extensions||[];
           this.extensionsStr = (up.allowed_extensions||[]).join(',');
           this.config.state.database_url = st.database_url||st.db_path||'sqlite:////data/state.db';
-          this.config.app.auto_run = !!app.auto_run;
-          this.config.app.run_interval_minutes = app.run_interval_minutes??60;
+          this.config.jobs.auto_run = !!jobs.auto_run;
           this.activeChannelId = storage.channel||'';
           await this.refreshChannels();
           await this.refreshTgSessionStatus();

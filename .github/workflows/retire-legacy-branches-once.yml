@@ -46,15 +46,12 @@ jobs:
             if [[ "$open" != "0" ]]; then
               echo "::error::${branch} has an open PR; refuse deletion"; exit 1
             fi
-            old_tag="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
-            [[ "$old_tag" == "null" ]] && old_tag=""
-            if [[ -n "$old_tag" && "$old_tag" != "$expected" ]]; then
-              echo "::error::archive tag ${tag} points elsewhere"; exit 1
+            # Create if absent; on rerun an existing tag can return 422.
+            gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${tag}" -f "sha=${expected}" >/dev/null 2>&1 || true
+            verified="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
+            if [[ "$verified" != "$expected" ]]; then
+              echo "::error::archive tag ${tag} is not verified (actual: ${verified}); refusing branch deletion"; exit 1
             fi
-            if [[ -z "$old_tag" ]]; then
-              gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${tag}" -f "sha=${expected}" >/dev/null
-            fi
-            [[ "$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.sha')" == "$expected" ]]
             gh api -X DELETE "repos/${GH_REPO}/git/refs/heads/${branch}" >/dev/null
             if gh api "$ref" >/dev/null 2>&1; then
               echo "::error::${branch} survived deletion"; exit 1

@@ -11,6 +11,7 @@ missing context key fails a positive condition, so the defaults MUST be
 present for the request to be evaluated as AWS would evaluate it.
 """
 from __future__ import annotations
+import logging
 
 from urllib.parse import unquote
 
@@ -22,6 +23,8 @@ from teledrive.s3.policy import (
     evaluate_abac,
 )
 from teledrive.s3.sigv4 import SigV4Error
+
+_module_logger = logging.getLogger(__name__)
 from teledrive.s3.tagging import object_tags
 
 
@@ -43,8 +46,12 @@ def _policy_context(catalog, store, access_key: str, bucket: str,
     try:
         for tag_key, tag_value in store.principal_tags(access_key).items():
             context["aws:PrincipalTag/" + tag_key] = tag_value
-    except Exception:
-        pass
+    except Exception as exc:
+        # Policies that reference PrincipalTag evaluate without the tags
+        # when this read fails -- usually failing closed, but the operator
+        # should know their ABAC silently degraded.
+        _module_logger.warning(
+            "principal tags unavailable during policy evaluation: %s", exc)
     if key is not None:
         try:
             item = catalog.get(bucket, key).item

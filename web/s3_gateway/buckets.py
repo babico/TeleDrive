@@ -3,6 +3,7 @@
 Move-only extraction from ``web/s3.py`` (handoff 01, step 5).
 """
 from __future__ import annotations
+import logging
 
 import base64
 import hashlib
@@ -118,8 +119,11 @@ from web.s3_gateway.common import (
 from web.s3_gateway.multipart import _list_multipart_uploads
 from web.s3_gateway.ranges import _cursor_decode, _cursor_encode, _page
 from web.s3_gateway.xml import (
+
     NAMESPACE, _compat_bucket_read_response, _error, _list_xml, _tag_xml, _xml,
 )
+
+_module_logger = logging.getLogger(__name__)
 
 
 def _replication_destinations(db) -> set[str]:
@@ -135,15 +139,15 @@ def _replication_destinations(db) -> set[str]:
     if callable(transports):
         try:
             labels.update(str(label) for label in transports())
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug("live account listing failed: %s", exc)
     try:
         rows = db.connection.execute(text(
             "SELECT account FROM telegram_sessions "
             "WHERE account IS NOT NULL AND account != ''")).all()
         labels.update(str(row[0]) for row in rows)
-    except Exception:
-        pass
+    except Exception as exc:
+        _module_logger.debug("session account listing failed: %s", exc)
     return labels
 
 
@@ -332,8 +336,13 @@ async def _handle_batch_delete(ctx: _S3RequestContext) -> Response:
                     gcx = RetainedMediaGC(db)
                     if gcx.state()["enabled"]:
                         gcx.enqueue([version_id], "batch-version-delete")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Same contract as the single version delete: never
+                    # break the batch, but an unqueued version is media
+                    # the GC will never see, so the failure must show.
+                    _module_logger.warning(
+                        "GC enqueue after batch version delete failed: %s",
+                        exc)
             except ValueError:
                 problem = ET.SubElement(result, "Error")
                 ET.SubElement(problem, "Key").text = key_to_delete

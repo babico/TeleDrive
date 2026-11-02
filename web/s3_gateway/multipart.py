@@ -3,6 +3,7 @@
 Move-only extraction from ``web/s3.py`` (handoff 01, step 4).
 """
 from __future__ import annotations
+import logging
 
 import base64
 import hashlib
@@ -38,6 +39,8 @@ from web.s3_gateway.checksums import (
 )
 from web.s3_gateway.common import _chunk_size, _quota_guard, storage_transport
 from web.s3_gateway.xml import NAMESPACE, _error, _xml
+
+_module_logger = logging.getLogger(__name__)
 
 
 def _list_multipart_uploads(ctx: _S3RequestContext) -> Response:
@@ -148,7 +151,12 @@ async def _handle_multipart(ctx: _S3RequestContext) -> Response:
             part_ids = [row for row in ctx.db.connection.execute(
                 select(_part_rows.c.object_id).where(
                     _part_rows.c.upload_id == upload_id)).scalars()]
-        except Exception:
+        except Exception as exc:
+            # Without the part ids nothing is queued for collection: the
+            # staged media is orphaned instead of reclaimed. The abort
+            # itself still proceeds (the upload is dead either way).
+            _module_logger.warning(
+                "could not list aborted upload parts for GC: %s", exc)
             part_ids = []
         mpu.abort(upload_id, ctx.bucket, ctx.key, ctx.owner)
         if part_ids:
@@ -156,8 +164,11 @@ async def _handle_multipart(ctx: _S3RequestContext) -> Response:
                 gcx = RetainedMediaGC(ctx.db)
                 if gcx.state()["enabled"]:
                     gcx.enqueue(part_ids, "mpu-abort")
-            except Exception:
-                pass
+            except Exception as exc:
+                # Same contract as the version-delete enqueue: never break
+                # the abort, but never hide stranded media either.
+                _module_logger.warning(
+                    "GC enqueue after multipart abort failed: %s", exc)
         return Response(status_code=204)
     if ctx.mpu_list:
         return await _mpu_list_parts(ctx, mpu, upload_id)

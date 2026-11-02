@@ -19,6 +19,8 @@ Phase O wire shapes implemented here:
 """
 from __future__ import annotations
 
+import logging
+
 import os
 import time
 from urllib.parse import unquote
@@ -50,6 +52,8 @@ from web.s3_gateway.ranges import _page, _virtual_host_bucket
 from web.s3_gateway.dispatch import _handle
 from web.s3_gateway.xml import _error
 
+_module_logger = logging.getLogger(__name__)
+
 NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 app = FastAPI(title="TeleDrive S3 (initial compatibility subset)", docs_url=None,
               redoc_url=None, openapi_url=None)
@@ -62,8 +66,13 @@ def _notification_allowlist() -> tuple[str, ...]:
         storage = getattr(_webapp.effective_config(), "storage", None)
         if isinstance(storage, dict) and storage.get("notification_destinations"):
             raw = str(storage["notification_destinations"])
-    except Exception:
-        pass
+    except Exception as exc:
+        # Falling back to the environment allowlist is the documented
+        # behaviour; doing it because of an ERROR rather than an absent
+        # setting is worth one debug line.
+        _module_logger.debug(
+            "notification destinations fell back to the environment: %s",
+            exc)
     return approved_destinations(raw)
 
 

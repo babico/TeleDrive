@@ -5,6 +5,8 @@ matches the full route path.
 """
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import hmac
 import secrets
@@ -17,6 +19,8 @@ from fastapi.responses import JSONResponse
 from teledrive.stores import sessions as _session_store
 from teledrive.stores import users as _user_store
 from web.deps import _same_origin, client_identity, require_auth
+
+_module_logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -61,7 +65,11 @@ def _verify_password(password: str, stored: str) -> bool:
                 "sha256", password.encode(), b"teledrive-legacy-timing",
                 _PBKDF2_ITERATIONS)
             return valid
-    except Exception:
+    except Exception as exc:
+        # Fail closed (a broken hash must never log anyone in), but say so:
+        # without this log a crypto/DB failure is indistinguishable from a
+        # wrong password.
+        _module_logger.warning("password verification failed: %s", exc)
         return False
     return False
 
@@ -98,7 +106,12 @@ def _default_admin_password_in_use(username: str = "admin") -> bool:
             cached = bool(
                 record is not None
                 and _verify_password("admin", record["password_hash"]))
-        except Exception:
+        except Exception as exc:
+            # Fail closed: treat the password as already changed so the
+            # nudge disappears rather than loops. Visible, because a DB
+            # blip silently disabling the must-change warning is confusing.
+            _module_logger.warning(
+                "default-admin password probe failed: %s", exc)
             cached = False
         _DEFAULT_ADMIN_PW_CACHE[username] = cached
     return cached
@@ -145,7 +158,11 @@ def _get_current_user(request: Request) -> dict | None:
     conn = _webapp().db_connect()
     try:
         return _session_store.resolve(conn, digest, int(time.time()))
-    except Exception:
+    except Exception as exc:
+        # Fail closed: an unreadable session store must not authenticate.
+        # Logged because a DB blip otherwise looks exactly like an expired
+        # session and sends operators chasing ghosts.
+        _module_logger.warning("session resolution failed: %s", exc)
         return None
     finally:
         conn.close()

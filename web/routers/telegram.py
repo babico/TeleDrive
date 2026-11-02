@@ -12,6 +12,7 @@ at the end of its own body.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from pathlib import Path
@@ -24,6 +25,8 @@ from teledrive.stores import telegram_accounts as _accounts
 from teledrive.stores import telegram_pending as _pending_store
 from web.deps import _same_origin, require_auth
 from web.errors import _telegram_error_response
+
+_module_logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -62,8 +65,10 @@ async def _probe_telegram_session(api_id: int, api_hash: str,
     finally:
         try:
             await client.disconnect()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Best-effort teardown of a connection that may already be
+            # dead; the health probe result was already returned.
+            _module_logger.debug("disconnect after health probe: %s", exc)
 
 
 def _store_session_health(account: str, authorized: bool) -> None:
@@ -220,29 +225,29 @@ def list_telegram_sessions(_: None = Depends(require_auth)):
                     "JOIN storage_object_heads h "
                     "ON h.object_id = c.object_id GROUP BY c.account")):
                 usage[str(acct)] = (int(objects or 0), int(total or 0))
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug("usage aggregate unavailable: %s", exc)
         try:
             for acct, objects, total in conn.connection.execute(_text(
                     "SELECT account, COUNT(DISTINCT object_id), SUM(size) "
                     "FROM storage_chunks GROUP BY account")):
                 retained[str(acct)] = (int(objects or 0), int(total or 0))
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug("retained aggregate unavailable: %s", exc)
         try:
             for acct, until in conn.connection.execute(_text(
                     "SELECT account, MAX(cooldown_until_ms) FROM "
                     "storage_mtproto_chat_cooldowns GROUP BY account")):
                 cooldowns[str(acct)] = int(until or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug("cooldown aggregate unavailable: %s", exc)
         try:
             for acct, obs in conn.connection.execute(_text(
                     "SELECT account, SUM(observations) FROM "
                     "storage_mtproto_flood_observations GROUP BY account")):
                 floods[str(acct)] = int(obs or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug("flood aggregate unavailable: %s", exc)
     finally:
         conn.close()
     sessions = []
@@ -307,8 +312,21 @@ def delete_telegram_session_account(account: str, request: Request,
             ), {"account": account}).fetchone()
             if guard is not None:
                 objects, total = int(guard[0] or 0), int(guard[1] or 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            # The table is absent on a fresh deployment (documented), but a
+            # real database error must NOT silently disable the deletion
+            # guard: falling back to objects=0 here would let the caller
+            # delete a session whose objects are still readable only
+            # through it. Fail closed with the same 409 the guard raises,
+            # naming the real cause.
+            _module_logger.warning(
+                "session-delete usage check failed for %s: %s",
+                account, exc)
+            raise HTTPException(503, {
+                "message": "Cannot verify whether this account still "
+                           "stores objects. The session was not deleted.",
+                "account": account,
+            }) from exc
         if objects and not force:
             raise HTTPException(409, {
                 "message": "This account still stores objects in the "
@@ -371,8 +389,12 @@ def _record_verify_attempt(token: str) -> None:
     conn = _webapp().db_connect()
     try:
         _pending_store.bump_attempts(conn, token)
-    except Exception:
-        pass
+    except Exception as exc:
+        # The attempt counter is the brute-force bound: losing an increment
+        # is losing part of that bound, so it must be visible. The request
+        # itself still fails (the code was wrong), which is safe.
+        _module_logger.warning(
+            "could not record a failed verify attempt: %s", exc)
     finally:
         conn.close()
 
@@ -467,8 +489,11 @@ def request_telegram_session_code(payload: TelegramSessionRequestCode,
                     channel = channels[0]["channel_id"]
             finally:
                 conn_ch.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # The code request proceeds without a pre-selected channel;
+            # Telethon still sends it, but the fallback deserves a trace.
+            _module_logger.debug(
+                "channel pre-selection before code send: %s", exc)
     # Send the code via Telethon (synchronously).
     phone_code_hash = None
     try:
@@ -669,8 +694,14 @@ def verify_telegram_session_code(payload: TelegramSessionVerifyCode,
     try:
         _webapp()._secure_mkdir(sessions_dir)
         _webapp()._secure_write(Path(session_file), session_string + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        # The session is verified and recorded in the database, but the
+        # Telethon session file is what a cold start resumes from: losing
+        # it silently would make the "session verified and saved" line
+        # below a lie. Loud, because operators act on that line.
+        _module_logger.error(
+            "could not persist the Telethon session file for %s: %s",
+            account, exc)
 
     _webapp()._log(f"session verified and saved: account={account} user_id={me.id} channel={channel}", "telegram-session")
     _webapp()._schedule_storage_runtime_reload()

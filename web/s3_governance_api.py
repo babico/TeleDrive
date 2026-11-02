@@ -30,6 +30,8 @@ stdlib ``http.client`` is used: httpx is a test-only dependency.
 """
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import hmac
 import http.client
@@ -65,6 +67,8 @@ from teledrive.s3.tiering import (ACCESS_TIERS, STATUSES as TIERING_STATUSES,
 from teledrive.s3.website import (parse_website_xml, website_xml)
 from teledrive.storage.catalog import BucketCatalog
 from teledrive.storage.manifest import ManifestStore
+
+_module_logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["S3 governance"])
 
@@ -557,16 +561,16 @@ def _destination_labels() -> list[str]:
     if callable(transports):
         try:
             labels.update(str(label) for label in transports())
-        except Exception:
-            pass
+        except Exception as exc:
+            _module_logger.debug("live account listing failed: %s", exc)
     conn = webapp.db_connect()
     try:
         rows = conn.connection.execute(text(
             "SELECT account FROM telegram_sessions WHERE account IS NOT NULL "
             "AND account != ''")).all()
         labels.update(str(row[0]) for row in rows)
-    except Exception:
-        pass
+    except Exception as exc:
+        _module_logger.debug("session account listing failed: %s", exc)
     finally:
         conn.close()
     return sorted(labels)
@@ -980,8 +984,13 @@ def _approved_destinations() -> tuple[str, ...]:
         storage = getattr(webapp.effective_config(), "storage", None)
         if isinstance(storage, dict) and storage.get("notification_destinations"):
             raw = str(storage["notification_destinations"])
-    except Exception:
-        pass
+    except Exception as exc:
+        # Falling back to the environment allowlist is the documented
+        # behaviour; doing it because of an ERROR rather than an absent
+        # setting is worth one debug line.
+        _module_logger.debug(
+            "notification destinations fell back to the environment: %s",
+            exc)
     return approved_destinations(raw)
 
 

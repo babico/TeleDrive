@@ -3,6 +3,7 @@
 Move-only extraction from ``web/s3.py`` (handoff 01, step 5).
 """
 from __future__ import annotations
+import logging
 
 import base64
 import hashlib
@@ -66,6 +67,8 @@ from web.s3_gateway.common import (
 )
 from web.s3_gateway.ranges import _range
 from web.s3_gateway.xml import NAMESPACE, _error
+
+_module_logger = logging.getLogger(__name__)
 
 
 def _headers(item, etag: str | None = None,
@@ -205,8 +208,12 @@ async def _handle_version_delete(ctx: _S3RequestContext) -> Response:
         gcx = RetainedMediaGC(db)
         if gcx.state()["enabled"]:
             gcx.enqueue([version_id], "version-delete")
-    except Exception:
-        pass  # queueing must never break the logical delete
+    except Exception as exc:
+        # Queueing must never break the logical delete (the media stays
+        # retained either way), but an unqueued version is media the GC
+        # will never see, so the failure must be visible.
+        _module_logger.warning(
+            "GC enqueue after version delete failed: %s", exc)
     headers = {"x-amz-version-id": version_id}
     if is_marker:
         headers["x-amz-delete-marker"] = "true"

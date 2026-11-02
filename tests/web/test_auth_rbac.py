@@ -15,88 +15,25 @@ import pytest
 from fastapi.testclient import TestClient
 
 import web.app as web
-from teledrive.db import connect_database
+from tests.web.conftest import seed_user
 
 CSRF = {"X-TeleDrive-CSRF": "1"}
 
 
-def _seed_user(connect, username: str, password: str, role: str,
-               enabled: bool = True, legacy_hash: bool = False) -> None:
-    if legacy_hash:
-        salt = secrets.token_hex(16)
-        stored = salt + ":" + hashlib.sha256(
-            (salt + password).encode()).hexdigest()
-    else:
-        stored = web._hash_password(password)
-    db = connect()
-    try:
-        db.connection.execute(
-            __import__("sqlalchemy").text(
-                "INSERT INTO users (username, password_hash, role, enabled, "
-                "created_at, updated_at) VALUES (:u, :ph, :r, :e, :now, :now)"
-            ), {"u": username, "ph": stored, "r": role,
-                "e": 1 if enabled else 0, "now": int(time.time())})
-        db.connection.commit()
-    finally:
-        db.close()
-
-
 @pytest.fixture
-def authenv(tmp_path, monkeypatch):
+def authenv(make_app_env):
     """SQLite-backed app with admin/operator/viewer/disabled users seeded."""
-    path = tmp_path / "auth.sqlite"
-    connect = lambda: connect_database(str(path))
-    monkeypatch.setattr(web, "db_connect", connect)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "web:\n  user: testadmin\n  password: long-secure-test-password\n"
-        "  allowed_hosts: localhost,127.0.0.1,[::1]\n"
-        "storage:\n  channel: ''\n  apis: []\n  scratch_dir: "
-        + str(tmp_path / "scratch") + "\n"
-        "state:\n  database_url: sqlite:////" + str(path) + "\n"
-        "jobs:\n  source_root: " + str(tmp_path / "uploads") + "\n"
-        "  auto_run: false\n",
-        encoding="ascii",
-    )
-    monkeypatch.setattr(web, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(web, "AUTH_DIR", tmp_path / "auth")
-    monkeypatch.setattr(web, "STORAGE_SCRATCH_DIR", str(tmp_path / "scratch"))
-    (tmp_path / "scratch").mkdir()
-    # Fake USER-MTProto transport for the object download path.
-    from tests.web.test_rest_transfer import FakeUserTransport
-    transport = FakeUserTransport()
-    monkeypatch.setattr(web, "storage_transport", lambda db: transport)
-    # Redirect hardcoded /data and /uploads paths in ensure_config.
-    import pathlib as _pl
-    orig_secure_mkdir = web._secure_mkdir
-
-    def patched_secure_mkdir(path):
-        ps = str(path)
-        if ps.startswith("/data") or ps.startswith("/uploads"):
-            path = _pl.Path(str(tmp_path / ps.lstrip("/")))
-        return orig_secure_mkdir(path)
-
-    monkeypatch.setattr(web, "_secure_mkdir", patched_secure_mkdir)
-    orig_path_mkdir = _pl.Path.mkdir
-
-    def patched_path_mkdir(self, *a, **k):
-        s = str(self)
-        if s.startswith("/data") or s.startswith("/uploads"):
-            return orig_path_mkdir(tmp_path / s.lstrip("/"), *a, **k)
-        return orig_path_mkdir(self, *a, **k)
-
-    monkeypatch.setattr(_pl.Path, "mkdir", patched_path_mkdir)
-    web.AUTH_FAILURES.clear()
-    _seed_user(connect, "admin", "admin-password-1", "admin")
-    _seed_user(connect, "opuser", "operator-password-1", "operator")
-    _seed_user(connect, "viewuser", "viewer-password-1", "viewer")
-    _seed_user(connect, "legacyuser", "legacy-password-1", "viewer",
-               legacy_hash=True)
-    _seed_user(connect, "disableduser", "disabled-password-1", "viewer",
-               enabled=False)
+    env = make_app_env(db_name="auth.sqlite")
+    seed_user(env.connect, "admin", "admin-password-1", "admin")
+    seed_user(env.connect, "opuser", "operator-password-1", "operator")
+    seed_user(env.connect, "viewuser", "viewer-password-1", "viewer")
+    seed_user(env.connect, "legacyuser", "legacy-password-1", "viewer",
+              legacy_hash=True)
+    seed_user(env.connect, "disableduser", "disabled-password-1", "viewer",
+              enabled=False)
     client = TestClient(web.app, base_url="http://localhost:8080")
-    return {"client": client, "connect": connect, "transport": transport,
-            "tmp": tmp_path}
+    return {"client": client, "connect": env.connect,
+            "transport": env.transport, "tmp": env.tmp}
 
 
 def _login(client, username: str, password: str):
@@ -1574,3 +1511,52 @@ def test_admin_download_applies_the_same_read_gate_as_rest(authenv):
                          headers=admin, params={"key": "enc.bin"})
     assert refused.status_code == 400, refused.text
     assert "SSE-C" in refused.text
+
+
+def test_telegram_session_delete_fails_closed_when_the_usage_check_errors(
+        authenv, monkeypatch):
+    """A DB error must disable the deletion guard loudly, not silently.
+
+    The usage query used to sit in ``except Exception: pass`` with
+    ``objects = 0``: any database failure made the 409 "account still
+    stores objects" guard disappear and the session was deleted as if the
+    account were unused. The guard now fails closed with a 503.
+    """
+    client = authenv["client"]
+    admin = _bearer(client, "admin", "admin-password-1")
+    db = authenv["connect"]()
+    try:
+        _insert_session(db, "user-4004")
+    finally:
+        db.close()
+
+    # Break ONLY the usage aggregate: auth, the session lookup and the
+    # listing must keep working so the test isolates the guard itself.
+    from sqlalchemy import text as _text
+
+    class _Boom(Exception):
+        pass
+
+    real_execute = type(db.connection).execute
+
+    def broken_execute(self, statement, *args, **kwargs):
+        if "storage_chunks" in str(statement):
+            raise _Boom("database is gone")
+        return real_execute(self, statement, *args, **kwargs)
+
+    # Restore manually: monkeypatch.undo() would also revert the fixture's
+    # AUTH_DIR/db_connect patches (same MonkeyPatch instance).
+    conn_type = type(db.connection)
+    conn_type.execute = broken_execute
+    try:
+        r = client.delete(
+            "/api/v1/admin/storage/telegram-sessions/user-4004",
+            headers={**admin, **CSRF})
+        assert r.status_code == 503, r.text
+        assert "not deleted" in r.json()["detail"]["message"]
+    finally:
+        conn_type.execute = real_execute
+    # The session survived the refused delete.
+    r = client.get("/api/v1/admin/storage/telegram-sessions",
+                   headers=admin)
+    assert {s["account"] for s in r.json()["sessions"]} == {"user-4004"}

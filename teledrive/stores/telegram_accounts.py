@@ -21,50 +21,15 @@ from __future__ import annotations
 import time
 
 from sqlalchemy import delete, insert, select, update
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 
 from teledrive.db import flood_waits, telegram_channels, telegram_sessions
 
-# ---------------------------------------------------------------------------
-# Deadlock recovery
-#
-# "UPDATE first, INSERT if missing" is the portable upsert shape, but on
-# MySQL/InnoDB an UPDATE that matches no row still takes a gap lock. Two
-# sessions racing the same new account therefore both hold a shared gap lock
-# and then both ask for an insert lock on the same gap: InnoDB picks a victim
-# and raises 1213 rather than letting one wait. InnoDB rolls the victim's
-# whole transaction back, so the correct response is to run the sequence
-# again -- by then the winner has committed and the UPDATE lands on a real
-# row. PostgreSQL reports the same situation as 40P01/40001.
-#
-# Retrying is bounded: a persistent conflict is a real problem, not a coin
-# flip, and silently looping on it would turn a bug into a hang.
-# ---------------------------------------------------------------------------
-_RETRYABLE_DB_CODES = frozenset({1205, 1213})  # MySQL lock-wait / deadlock
-_RETRYABLE_PG_CODES = frozenset({"40P01", "40001"})
-
-
-def _is_retryable_conflict(exc: OperationalError) -> bool:
-    original = getattr(exc, "orig", None)
-    args = getattr(original, "args", ()) or ()
-    if args and isinstance(args[0], int) and args[0] in _RETRYABLE_DB_CODES:
-        return True
-    return getattr(original, "pgcode", None) in _RETRYABLE_PG_CODES
-
-
-def _write_with_deadlock_retry(db, operation, *, attempts: int = 3):
-    for attempt in range(attempts):
-        try:
-            return operation()
-        except OperationalError as exc:
-            if attempt + 1 >= attempts or not _is_retryable_conflict(exc):
-                raise
-            # The backend already discarded the victim transaction; rolling
-            # back here only resets our own wrapper state.
-            db.connection.rollback()
-            time.sleep(0.02 * (attempt + 1))
-    raise AssertionError("unreachable: the loop returns or raises")
-
+# Deadlock recovery: the shared helper lives in teledrive.db (see its
+# comment there for the InnoDB gap-lock explanation). Both the account
+# upserts here and the storage-layer lease claims hit the identical
+# "empty UPDATE takes a gap lock, racing INSERTs deadlock" shape.
+from teledrive.db import retry_deadlocked_write as _write_with_deadlock_retry
 
 # api_id is metadata (the numeric app id), not a credential: only api_hash
 # and session_string are secrets, and those are what the listing excludes.

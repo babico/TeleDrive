@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -14,7 +16,57 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import ArgumentError, IntegrityError, NoSuchModuleError
+from sqlalchemy.exc import (ArgumentError, IntegrityError, NoSuchModuleError,
+                              OperationalError)
+
+# ---------------------------------------------------------------------------
+# Retryable lock conflicts
+#
+# "UPDATE first, INSERT if missing" is the portable upsert shape, but on
+# MySQL/InnoDB an UPDATE that matches no row still takes a gap lock. Two
+# sessions racing the same new row therefore both hold a shared gap lock
+# and then both ask for an insert lock on the same gap: InnoDB picks a
+# victim and raises 1213 rather than letting one wait. InnoDB rolls the
+# victim's whole transaction back, so the correct response is to run the
+# sequence again -- by then the winner has committed and the UPDATE lands
+# on a real row (or the INSERT reports a clean duplicate key). PostgreSQL
+# reports the same situation as 40P01/40001.
+#
+# Retrying is bounded: a persistent conflict is a real problem, not a coin
+# flip, and silently looping on it would turn a bug into a hang.
+# ---------------------------------------------------------------------------
+_RETRYABLE_DB_CODES = frozenset({1205, 1213})  # MySQL lock-wait / deadlock
+_RETRYABLE_PG_CODES = frozenset({"40P01", "40001"})
+
+
+def is_retryable_lock_conflict(exc: OperationalError) -> bool:
+    """True when the backend rolled this transaction back as a lock victim."""
+    original = getattr(exc, "orig", None)
+    args = getattr(original, "args", ()) or ()
+    if args and isinstance(args[0], int) and args[0] in _RETRYABLE_DB_CODES:
+        return True
+    return getattr(original, "pgcode", None) in _RETRYABLE_PG_CODES
+
+
+def retry_deadlocked_write(db, operation, *, attempts: int = 3):
+    """Run a write sequence, retrying when InnoDB/PG picked it as victim.
+
+    ``operation`` must be idempotent from a rolled-back state: the backend
+    already discarded the victim transaction, so re-running the whole
+    sequence (not resuming mid-way) is the recovery.
+    """
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except OperationalError as exc:
+            if attempt + 1 >= attempts or not is_retryable_lock_conflict(exc):
+                raise
+            # The backend already discarded the victim transaction; rolling
+            # back here only resets our own wrapper state.
+            db.connection.rollback()
+            time.sleep(0.02 * (attempt + 1))
+    raise AssertionError("unreachable: the loop returns or raises")
+
 
 metadata = MetaData()
 

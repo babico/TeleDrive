@@ -516,3 +516,48 @@ def test_collect_reverifies_a_head_published_after_the_preview(admin):
         if other is not None:
             other.close()
         db.close()
+
+
+def test_a_deadlocked_claim_is_retried_and_still_wins(store, monkeypatch):
+    """An InnoDB deadlock victim re-runs the claim sequence and succeeds.
+
+    The two-collector MySQL matrix hit this in CI: the empty lease UPDATE
+    takes a gap lock, both collectors then INSERT the same lease, and InnoDB
+    picks a victim (pymysql 1213) instead of reporting a clean duplicate
+    key. The claim must retry the whole UPDATE/INSERT pair -- by then the
+    winner committed, so the second attempt sees the row and skips.
+    """
+    cat = store
+    old = int(time.time()) - 48 * 3600
+    oid, _message = _publish(cat, "deadlock.bin", size=200, now=old)
+
+    gcx = RetainedMediaGC(cat.manifests.db)
+    gcx.set_enabled(True, by="test")
+
+    from sqlalchemy.exc import OperationalError
+    from teledrive.storage import gc_collect as gc_module
+
+    class _FakeOrig(Exception):
+        def __init__(self):
+            super().__init__(1213, "Deadlock found when trying to get lock")
+
+    real_insert = gc_module.insert
+
+    state = {"raised": False}
+
+    def deadlock_once(*args, **kwargs):
+        # Simulate InnoDB electing this transaction the victim on the very
+        # first INSERT attempt only; the retry takes the normal path.
+        if not state["raised"] and args and args[0] is gc_module.gc_leases:
+            state["raised"] = True
+            raise OperationalError(
+                "INSERT INTO storage_gc_leases ...", {},
+                _FakeOrig())
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(gc_module, "insert", deadlock_once)
+
+    assert gcx._claim(oid) is True
+    assert state["raised"] is True
+    # The retry committed a real lease: a second claim respects it.
+    assert gcx._claim(oid) is False

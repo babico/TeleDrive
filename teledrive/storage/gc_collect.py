@@ -30,6 +30,8 @@ from sqlalchemy import (BigInteger, Boolean, Column, Index, Integer, String,
                         or_, select, text, update)
 from sqlalchemy.exc import IntegrityError
 
+from teledrive.db import retry_deadlocked_write
+
 from .catalog import heads, published_versions, removed_versions
 from .manifest import (ChunkReference, chunks, metadata,
                        object_aliases, objects, replica_chunks)
@@ -337,30 +339,39 @@ class RetainedMediaGC:
 
         Cross-database portable (no RETURNING, no ON CONFLICT): UPDATE an
         expired/missing lease first, INSERT when there is none, and treat an
-        integrity error as "someone else owns it".
+        integrity error as "someone else owns it". The whole UPDATE/INSERT
+        sequence retries when the backend picked this transaction as a
+        deadlock victim: on MySQL the empty UPDATE takes a gap lock, so two
+        collectors racing the same new lease deadlock (1213) instead of one
+        of them getting a clean duplicate key. InnoDB already rolled the
+        victim back; re-running the sequence then sees the winner's row.
         """
         now = time.time_ns()
         stale = now - int(lease_seconds) * 1_000_000_000
-        changed = self.db.connection.execute(
-            update(gc_leases)
-            .where(gc_leases.c.object_id == object_id,
-                   gc_leases.c.claimed_ns < stale)
-            .values(claimed_ns=now, owner=self._owner))
-        if changed.rowcount:
+
+        def _attempt() -> bool:
+            changed = self.db.connection.execute(
+                update(gc_leases)
+                .where(gc_leases.c.object_id == object_id,
+                       gc_leases.c.claimed_ns < stale)
+                .values(claimed_ns=now, owner=self._owner))
+            if changed.rowcount:
+                self.db.commit()
+                return True
+            try:
+                self.db.connection.execute(insert(gc_leases).values(
+                    object_id=object_id, claimed_ns=now, owner=self._owner))
+            except IntegrityError:
+                # Only the documented race ("someone else owns it") lands
+                # here. Any other INSERT failure must propagate: swallowing
+                # it would report a healthy claim skip for what is really a
+                # DB outage, hiding the failure from the report.
+                self.db.connection.rollback()
+                return False
             self.db.commit()
             return True
-        try:
-            self.db.connection.execute(insert(gc_leases).values(
-                object_id=object_id, claimed_ns=now, owner=self._owner))
-        except IntegrityError:
-            # Only the documented race ("someone else owns it") lands
-            # here. Any other INSERT failure must propagate: swallowing
-            # it would report a healthy claim skip for what is really a
-            # DB outage, hiding the failure from the report.
-            self.db.connection.rollback()
-            return False
-        self.db.commit()
-        return True
+
+        return retry_deadlocked_write(self.db, _attempt, attempts=3)
 
     def _release(self, object_id: str) -> None:
         try:

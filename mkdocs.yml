@@ -129,6 +129,7 @@ nav:
           - S3 full coverage: project/plans/s3-full-coverage.md
           - Metadata parity: project/plans/metadata-parity.md
           - Local acceptance: project/plans/local-acceptance.md
+          - S3 fidelity and recovery (2026-11-02): project/plans/2026-11-02-s3-fidelity.md
       - Releases:
           - Overview: project/releases/index.md
           - v1.0.9: project/releases/v1.0.9.md

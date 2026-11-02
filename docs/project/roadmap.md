@@ -129,34 +129,16 @@ The operation list and current status are **not duplicated here**; use the
       run with real disk/network, p50/p95 timings and no fabricated rate
       limits.
 
-## 5. Owner gates — physical GC
+## 5. Owner-run recovery and production evidence (not a GC toggle gate)
 
-These are owner actions, not engineering tasks. `deletion_permitted` stays
-`False` and no Telegram media is deleted until all of them are satisfied.
-Two-person GC approval is **not** required (owner decision).
+These items are **owner-run operational tests** for disaster recovery and production certification, not mandatory technical prerequisites for enabling physical GC. The admin can enable GC with the existing typed confirmation, and the collector must still protect live/retained/referenced chunks. No mandatory signed acceptance bundle or two-person GC approval should be introduced.
 
-- [ ] **Independent backup host.** A second physical host or a verified
-      rclone/payload export that is not the TeleDrive data volume. Acceptance:
-      a restore from that copy into an isolated environment.
-- [ ] **Authorized rate-limit soak.** One hour on 2–8 HTTPS endpoints with
-      genuine observed 429s, coherent shared counters, drained queues and no
-      unresolved send ACK. Do not induce abuse to force 429s.
-- [ ] **Original-media recovery rehearsal.** The owner's sealed SQL archive,
-      independent SHA-256, real Telegram credentials and channel; verify one
-      named object's whole-body SHA, size and cross-chunk range in an isolated
-      restore.
-- [ ] **Legacy cutover decision.** Either a verified cutover from a real
-      legacy source or an independent signed no-legacy attestation. Never
-      invent a legacy fixture.
-- [ ] **Evidence bundle verification.** Produce the canonical JSON and check
-      it with `scripts/ops/verify_production_bundle.py`, using two distinct
-      Ed25519 keys and two independently attested hosts sharing one database.
-      The `approvals` block is optional by owner decision; the technical
-      families are required.
-- [ ] **Authorize physical GC.** Only after all gates pass, with a signed
-      dry-run plan, complete remote inventory and resolved references. The
-      WebUI toggle and collect endpoint remain admin-only and refuse while
-      the gate is off.
+- [ ] **Independent payload backup and isolated restore.** On separate hardware or a verified remote export, make encrypted media plus SQL and key-material backups, then prove bytes and cross-chunk ranges can be restored.
+- [ ] **Authorized real-world capacity/rate-limit soak.** One hour on permitted real endpoints, record genuine observations; no synthetic 429s represented as production.
+- [ ] **Original-media recovery rehearsal.** Run the read-only sample test on the owner's sealed real SQL snapshot, actual credentials and known SHA-256. Never substitute CI fixtures.
+- [ ] **Legacy cutover applicability.** Only run a migration if a real legacy source exists; otherwise record 'not applicable' without creating a fake test.
+- [ ] **Production evidence bundle (optional certification).** Record host topology, RPO/RTO, durability and restore receipts. The offline verifier is for production certification, **not** for granting permission to click the GC toggle.
+- [ ] **GC dry-run and owner decision.** The owner reviews eligible objects and independently chooses whether to enable irreversible physical deletion. Keep reference/retention/race fences mandatory regardless of this choice.
 
 ## 6. How this list is maintained
 

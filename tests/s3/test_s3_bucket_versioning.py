@@ -178,9 +178,9 @@ def test_real_boto3_get_put_bucket_versioning(service):
 
 
 def test_suspended_bucket_write_semantics(service):
-    """Phase B: Suspended buckets replace the current version on write
-    and delete without markers — AWS unversioned-style behavior with
-    pre-suspension history retained."""
+    """Suspended buckets follow the AWS null-version contract: each write
+    occupies the single NULL version slot and permanently retires the
+    previous occupant; enabled-era versions stay immutable history."""
     import xml.etree.ElementTree as ET
     ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
     assert signed(service, "PUT", "/versioning-ci").status_code == 200
@@ -200,27 +200,51 @@ def test_suspended_bucket_write_semantics(service):
     state = signed(service, "GET", "/versioning-ci?versioning")
     assert b"Suspended" in state.content
 
-    # A new PUT replaces the current version: the superseded version
-    # retires from the journal in the same transaction.
+    # The FIRST suspended PUT becomes the NULL version; the enabled-era
+    # head (v2) is preserved as noncurrent history (AWS: "the version
+    # you PUT becomes the current version; VersionId 111111 is not
+    # overwritten").
     assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v3").status_code == 200
     assert signed(service, "GET", "/versioning-ci/susp.bin").content == b"v3"
-    after = signed(service, "GET", "/versioning-ci?versions&prefix=susp.bin")
-    versions_after = ET.fromstring(after.content).findall(ns + "Version")
-    assert len(versions_after) == 2  # v1 (history) + v3 (current); v2 retired
-    listed = sorted(v.findtext(ns + "ETag") for v in versions_after)
+    after = ET.fromstring(signed(
+        service, "GET", "/versioning-ci?versions&prefix=susp.bin").content)
+    assert len(after.findall(ns + "Version")) == 3  # v1 + v2 (history) + v3 (NULL)
 
-    # DELETE removes the head WITHOUT a marker and without version
-    # headers (unversioned-style delete).
+    # A second suspended PUT replaces the NULL version: v3 is permanently
+    # retired, enabled-era history is untouched.
+    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v4").status_code == 200
+    assert signed(service, "GET", "/versioning-ci/susp.bin").content == b"v4"
+    listed = ET.fromstring(signed(
+        service, "GET", "/versioning-ci?versions&prefix=susp.bin").content)
+    assert len(listed.findall(ns + "Version")) == 3  # v1 + v2 + v4
+
+    # DELETE without a VersionId inserts a delete marker that occupies
+    # the NULL version slot (permanently replacing v4) and becomes the
+    # current version, with the AWS marker response headers.
     deleted = signed(service, "DELETE", "/versioning-ci/susp.bin")
     assert deleted.status_code == 204
-    assert "x-amz-version-id" not in deleted.headers
-    assert "x-amz-delete-marker" not in deleted.headers
+    assert deleted.headers.get("x-amz-delete-marker") == "true"
+    assert deleted.headers.get("x-amz-version-id")
     assert signed(service, "GET", "/versioning-ci/susp.bin").status_code == 404
+    markers = ET.fromstring(signed(
+        service, "GET", "/versioning-ci?versions&prefix=susp.bin").content)
+    assert len(markers.findall(ns + "Version")) == 2  # v1 + v2 survive
+    assert len(markers.findall(ns + "DeleteMarker")) == 1  # the null marker
 
-    # Re-enable: versioning resumes appending.
+    # A further suspended DELETE replaces the previous null marker with a
+    # new one: only ONE null version ever exists per key.
+    again = signed(service, "DELETE", "/versioning-ci/susp.bin")
+    assert again.status_code == 204
+    assert again.headers.get("x-amz-delete-marker") == "true"
+    markers = ET.fromstring(signed(
+        service, "GET", "/versioning-ci?versions&prefix=susp.bin").content)
+    assert len(markers.findall(ns + "Version")) == 2
+    assert len(markers.findall(ns + "DeleteMarker")) == 1
+
+    # Re-enable: versioning resumes appending with distinct version IDs.
     assert signed(service, "PUT", "/versioning-ci?versioning", b"""<?xml version="1.0"?>
 <VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>""").status_code == 200
-    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v4").status_code == 200
+    assert signed(service, "PUT", "/versioning-ci/susp.bin", b"v5").status_code == 200
     marker_delete = signed(service, "DELETE", "/versioning-ci/susp.bin")
     assert marker_delete.status_code == 204
     assert marker_delete.headers.get("x-amz-delete-marker") == "true"

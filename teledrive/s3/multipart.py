@@ -807,6 +807,13 @@ class MultipartStore:
                     ))
                     if moved.rowcount != 1:
                         raise MultipartError("OperationAborted", "Concurrent object replacement", 409)
+                if self.catalog.versioning_state(bucket) == "Suspended":
+                    # Cross-surface parity with PUT: a completed multipart
+                    # upload into a suspended bucket occupies the NULL
+                    # version slot and permanently retires the previous
+                    # occupant; enabled-era versions stay history.
+                    self.catalog._publish_null_slot_uncommitted(
+                        bucket, key, object_id)
 
                 # A multipart completion IS a publish, so the destination
                 # bucket's default object lock applies exactly as it does to

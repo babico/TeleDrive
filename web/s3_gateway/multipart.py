@@ -513,10 +513,15 @@ async def _mpu_complete(ctx: _S3RequestContext, mpu: MultipartStore,
                      ("ETag", '"' + finished.etag + '"')]
     if composite_checksum is not None:
         result_fields.append(("ChecksumSHA256", composite_checksum))
+    # AWS returns the published version ID on CompleteMultipartUpload;
+    # on a suspended destination it names the NULL-version occupant.
     return Response(_xml("CompleteMultipartUploadResult", result_fields),
                     status_code=200, media_type="application/xml",
-                    headers=(_ssec_response_headers(sse_key)
-                             if sse_key is not None else None))
+                    headers={
+                        "x-amz-version-id": finished.object_id,
+                        **(_ssec_response_headers(sse_key)
+                           if sse_key is not None else {}),
+                    })
 
 
 async def _mpu_upload_part(ctx: _S3RequestContext, mpu: MultipartStore,

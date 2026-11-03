@@ -18,6 +18,23 @@ from .catalog_tables import (
 )
 from .manifest import StoredObject, objects
 
+# AWS gives each key in a versioning-suspended bucket exactly ONE null
+# version. Every write published while the bucket is Suspended — a PUT, a
+# server-side copy, a multipart completion, or the delete marker of a
+# DELETE without a VersionId — occupies that single slot and permanently
+# retires the previous occupant; versions published while versioning was
+# Enabled are immutable history and are never retired by a suspended
+# write (Amazon S3 User Guide, "Adding objects to versioning-suspended
+# buckets" and "Deleting objects from versioning-suspended buckets").
+#
+# The slot occupant is recorded on the object row's ``error`` column.
+# That column is NULL for every ready/delete-marker object (it only ever
+# carried failed-upload reasons and nothing reads it for published
+# versions), no schema step exists for a dedicated column, and the mark
+# is written inside the same SQL transaction as the head CAS that owns
+# the slot, so it can never disagree with the publication journal.
+NULL_VERSION_MARK = "s3-null-version-slot"
+
 
 class BucketVersionMixin:
     def get(self, bucket: str, key: str) -> ObjectHead:
@@ -55,6 +72,72 @@ class BucketVersionMixin:
         return row is not None
 
 
+    def _null_slot_version(self, bucket: str, key: str) -> str | None:
+        """The key's current NULL-version slot occupant, if any.
+
+        At most one exists per key: every suspended write retires the
+        previous occupant in its own publication transaction.
+        """
+        digest = self._keyhash(key)
+        return self.db.connection.execute(
+            select(published_versions.c.object_id)
+            .select_from(published_versions.join(
+                objects, objects.c.id == published_versions.c.object_id,
+            ).outerjoin(
+                removed_versions,
+                removed_versions.c.object_id == published_versions.c.object_id,
+            )).where(
+                published_versions.c.bucket == bucket,
+                published_versions.c.key_hash == digest,
+                objects.c.error == NULL_VERSION_MARK,
+                removed_versions.c.object_id.is_(None),
+            ).limit(1)
+        ).scalar_one_or_none()
+
+    def _retire_null_slot_uncommitted(self, bucket: str, key: str) -> str | None:
+        """Permanently revoke the NULL-version slot occupant.
+
+        Object lock still fences the removal exactly like an explicit
+        version delete: a retained or legal-held null version cannot be
+        overwritten by a suspended write. Returns the retired version
+        ID, or None when the slot was empty. Callers run this inside
+        the publication transaction so a failure rolls back the write.
+        """
+        occupant = self._null_slot_version(bucket, key)
+        if occupant is None:
+            return None
+        locked = self.db.connection.execute(select(
+            objects.c.retention_until_ns, objects.c.legal_hold,
+        ).where(objects.c.id == occupant)).first()
+        if locked is not None and (
+                locked[1] or (locked[0] is not None
+                              and int(locked[0]) > time.time_ns())):
+            raise PermissionError("Object is under retention")
+        self.db.connection.execute(insert(removed_versions).values(
+            object_id=occupant, removed_ns=time.time_ns(),
+        ))
+        self._delete_pending_tags(occupant)
+        self._delete_annotations(occupant)
+        self._enqueue_notification(
+            "s3:ObjectRemoved:Delete", bucket, key, version_id=occupant)
+        self._journal_metadata(
+            "version_revoked", bucket, key, version_id=occupant,
+            detail={"reason": "suspended_null_version_replaced"})
+        return occupant
+
+    def _mark_null_slot_uncommitted(self, identifier: str) -> None:
+        """Record this freshly published version as the NULL-slot occupant."""
+        self.db.connection.execute(update(objects).where(
+            objects.c.id == identifier,
+        ).values(error=NULL_VERSION_MARK))
+
+    def _publish_null_slot_uncommitted(self, bucket: str, key: str,
+                                       identifier: str) -> None:
+        """Suspended-bucket publication: retire the previous NULL occupant
+        and mark this version as the new one (AWS null-version semantics)."""
+        self._retire_null_slot_uncommitted(bucket, key)
+        self._mark_null_slot_uncommitted(identifier)
+
     def delete_marker(self, bucket: str, key: str, *,
                       expected_generation: int | None = None,
                       expected_object_id: str | None = None) -> str:
@@ -62,6 +145,13 @@ class BucketVersionMixin:
 
         The marker is NOT a ready payload manifest; Telegram is never touched.
         A concurrent write must not be overwritten by a stale DELETE.
+
+        In a SUSPENDED bucket this is the AWS null-version contract: the
+        marker occupies the NULL version slot and permanently replaces the
+        previous null version (data or marker), while enabled-era versions
+        are never touched ("Deleting objects from versioning-suspended
+        buckets", Amazon S3 User Guide). The marker ID is returned so
+        callers emit the delete-marker response headers.
         """
         if bucket not in self.list_buckets():
             raise FileNotFoundError("Bucket does not exist")
@@ -75,19 +165,15 @@ class BucketVersionMixin:
             (int(row[1]) if row else 0) != expected_generation
         ):
             raise ValueError("Delete precondition generation changed")
-        if self.versioning_state(bucket) == "Suspended":
-            # AWS suspended semantics: DELETE removes the head and
-            # retires the current version WITHOUT creating a marker
-            # (unversioned-style delete). Returns None so callers omit
-            # the marker headers.
-            try:
-                if row is None:
-                    return None
-                # A legal hold or an open retention window forbids removing the
-                # version. The explicit-version path enforces this; the suspended
-                # branch did not, so on a lock-enabled bucket whose versioning was
-                # set to Suspended, an ordinary DELETE hid a COMPLIANCE-retained
-                # object -- recoverable bytes, but a real immutability breach.
+        suspended = self.versioning_state(bucket) == "Suspended"
+        evicted: str | None = None
+        if suspended:
+            # Object-lock fence kept from the pre-parity branch: a retained
+            # or legal-held current head must not be hidden by an ordinary
+            # DELETE even on a suspended bucket. AWS cannot suspend
+            # versioning on an Object Lock bucket at all, so this stricter
+            # stance only fires in states AWS cannot reach.
+            if row is not None:
                 lock_row = self.db.connection.execute(select(
                     objects.c.legal_hold, objects.c.retention_until_ns,
                 ).where(objects.c.id == row[0])).first()
@@ -99,31 +185,9 @@ class BucketVersionMixin:
                             and int(lock_row[1]) > time.time_ns()):
                         raise PermissionError(
                             "Object is under retention and cannot be deleted")
-                changed = self.db.connection.execute(delete(heads).where(
-                    heads.c.bucket == bucket, heads.c.key_hash == digest,
-                    heads.c.object_id == row[0],
-                    heads.c.generation == row[1],
-                ))
-                if changed.rowcount != 1:
-                    self.db.connection.rollback()
-                    raise ValueError("Concurrent object deletion/write")
-                self.db.connection.execute(insert(removed_versions).values(
-                    object_id=row[0], removed_ns=time.time_ns(),
-                ))
-                self._enqueue_notification(
-                    "s3:ObjectRemoved:Delete", bucket, key, version_id=row[0])
-                self._journal_metadata(
-                    "deleted", bucket, key, version_id=row[0],
-                    detail={"reason": "suspended_version_removed"})
-                self._delete_pending_tags(row[0])
-                self.db.commit()
-                return None
-            except BaseException:
-                # The suspended branch used to run outside any rollback guard;
-                # an exception left the connection in an open transaction and
-                # the next request inherited it.
-                self.db.connection.rollback()
-                raise
+            # AWS: the null version (wherever it sits in the history) is
+            # permanently removed and this marker replaces it in the slot.
+            evicted = self._retire_null_slot_uncommitted(bucket, key)
         marker = str(uuid4())
         now = int(time.time())
         try:
@@ -153,6 +217,12 @@ class BucketVersionMixin:
                 object_id=marker, bucket=bucket, key_hash=digest,
                 committed_ns=time.time_ns(),
             ))
+            if suspended:
+                self._mark_null_slot_uncommitted(marker)
+            if evicted is not None:
+                self._journal_metadata(
+                    "deleted", bucket, key, version_id=evicted,
+                    detail={"reason": "suspended_null_version_removed"})
             self._enqueue_notification(
                 "s3:ObjectRemoved:DeleteMarkerCreated", bucket, key,
                 version_id=marker)
@@ -529,6 +599,10 @@ class BucketVersionMixin:
             except IntegrityError as exc:
                 self.db.connection.rollback()
                 raise ValueError("Concurrent object creation; retry with generation") from exc
+            if self.versioning_state(item.bucket) == "Suspended":
+                # AWS: the first write to a suspended key is the NULL
+                # version too (the slot was simply empty until now).
+                self._mark_null_slot_uncommitted(item.id)
             self._record_published_uncommitted(item)
             self._apply_pending_tags(identifier)
             self._enqueue_notification(
@@ -572,12 +646,14 @@ class BucketVersionMixin:
             self.db.connection.rollback()
             raise ValueError("Concurrent object modification")
         if self.versioning_state(item.bucket) == "Suspended":
-            # AWS suspended semantics: a new write replaces the current
-            # version; the superseded version retires from the journal
-            # in the SAME transaction (no unversioned-history growth).
-            self.db.connection.execute(insert(removed_versions).values(
-                object_id=existing[0], removed_ns=time.time_ns(),
-            ))
+            # AWS suspended semantics: this write becomes the NULL
+            # version and permanently retires the previous NULL-slot
+            # occupant (data or delete marker) in the SAME transaction.
+            # Enabled-era versions are immutable history: the previous
+            # head survives as a noncurrent published version instead of
+            # being retired wholesale.
+            self._publish_null_slot_uncommitted(
+                item.bucket, item.key, item.id)
         self._record_published_uncommitted(item)
         self._apply_pending_tags(identifier)
         self._enqueue_notification(

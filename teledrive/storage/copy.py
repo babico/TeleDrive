@@ -146,6 +146,13 @@ def copy_object(
             ))
             if updated.rowcount != 1:
                 raise CopyConflict("Destination was changed concurrently")
+        if catalog.versioning_state(destination_bucket) == "Suspended":
+            # Cross-surface parity with PUT: a copy into a suspended
+            # bucket occupies the NULL version slot and permanently
+            # retires the previous occupant (data or delete marker);
+            # enabled-era versions stay immutable history.
+            catalog._publish_null_slot_uncommitted(
+                destination_bucket, destination_key, identifier)
         # A copy is a publish: the destination bucket's default object lock
         # applies exactly as it does to an upload. Skipping it let a copy
         # (and a version restore, which shares this path) place an

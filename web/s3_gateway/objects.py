@@ -745,6 +745,68 @@ def _object_attributes(ctx: _S3RequestContext, item,
     )
 
 
+def _invalid_part_number(requested: int, actual: int) -> Response:
+    """416 InvalidPartNumber: the AWS error for a part the object lacks.
+
+    The code, message and HTTP status follow the AWS wire contract: every
+    independent AWS-compatible implementation models AWS's answer as HTTP
+    416 with code ``InvalidPartNumber`` and the message below (MinIO and
+    Scality Zenko's error tables, SeaweedFS, OpenStack Swift's S3
+    middleware), and AWS's body also names the requested part number and
+    the object's actual part count.
+    """
+    root = ET.Element("Error")
+    ET.SubElement(root, "Code").text = "InvalidPartNumber"
+    ET.SubElement(root, "Message").text = (
+        "The requested partnumber is not satisfiable")
+    ET.SubElement(root, "PartNumberRequested").text = str(requested)
+    ET.SubElement(root, "ActualPartCount").text = str(actual)
+    return Response(
+        ET.tostring(root, encoding="utf-8", xml_declaration=True),
+        media_type="application/xml", status_code=416,
+    )
+
+
+def _requested_part_number(request) -> int | None:
+    """Parse GetObject's ``?partNumber``: one decimal integer, 1..10000.
+
+    AWS behavior decisions for TeleDrive (handoff 06, Task A), each tied
+    to evidence rather than guesswork:
+
+    * The S3 API reference documents ``partNumber`` as "a positive integer
+      between 1 and 10,000" that "effectively performs a 'ranged' GET
+      request for the part specified". Anything that is not exactly one
+      decimal integer inside that domain is a malformed parameter and
+      answers ``400 InvalidArgument`` (S3-compatible implementations
+      agree for values below 1; duplicate parameters are already rejected
+      by route_guard's generic duplicate check).
+    * A ``Range`` header cannot select bytes together with ``partNumber``:
+      ``400 InvalidRequest`` with the exact AWS-modeled wording MinIO
+      uses ("Cannot specify both Range header and partNumber query
+      parameter"), which other implementations observed from AWS.
+    * ``HEAD ?partNumber`` is NOT enabled: TeleDrive's HeadObject
+      part-read contract is unspecified, so it keeps failing closed with
+      501. route_guard already rejects it before routing; this guard is
+      defense in depth inside the read handler.
+    """
+    if "partNumber" not in request.query_params:
+        return None
+    if request.method != "GET":
+        raise SigV4Error(
+            "NotImplemented", "HeadObject partNumber reads are unsupported")
+    raw = request.query_params["partNumber"]
+    if (re.fullmatch(r"[0-9]{1,5}", raw) is None
+            or not 1 <= int(raw) <= MAX_PARTS):
+        raise SigV4Error(
+            "InvalidArgument",
+            "Part number must be an integer between 1 and 10000, inclusive")
+    if request.headers.get("range") is not None:
+        raise SigV4Error(
+            "InvalidRequest",
+            "Cannot specify both Range header and partNumber query parameter")
+    return int(raw)
+
+
 async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     """Object GET/HEAD: versioned reads, preconditions, ranges and
     streaming downloads. Sets ctx.retain for streamed responses."""
@@ -754,6 +816,11 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     db = ctx.db
     catalog = ctx.catalog
     checksum_mode = ctx.checksum_mode
+    # Fail fast on a malformed part selector before any object lookup,
+    # layout read or Telegram I/O: authentication has already succeeded
+    # (the handler runs after SigV4 verification), which matches AWS's
+    # auth-then-validate ordering.
+    part_number = _requested_part_number(request)
     if ctx.is_version_read:
         version_id = request.query_params["versionId"]
         if not version_id or len(version_id) > 80:
@@ -881,13 +948,65 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
         if restore_state is not None:
             headers["x-amz-restore"] = restore_state
         return Response(status_code=200, headers=headers)
-    range_header = request.headers.get("range")
-    if_range = request.headers.get("if-range")
-    if (range_header is not None and if_range is not None
-            and not _if_range_matches(if_range, item_etag, item.created_at)):
-        # The validator is stale: ignore Range and serve the full 200.
-        range_header = None
-    start, end, partial = _range(range_header, item.size)
+    parts_count: int | None = None
+    if part_number is not None:
+        # --- GetObject ?partNumber=N (handoff 06, Task A) ---------------
+        # The logical S3 part layout comes ONLY from the immutable
+        # completion snapshot (``object_parts_for_version`` verifies the
+        # part count, total length, ordering, per-part SHA-256 and the
+        # multipart ETag). Telegram chunk boundaries are physical storage
+        # details and are NEVER treated as part boundaries; a corrupt or
+        # absent-but-required snapshot fails closed inside that call
+        # (MultipartError -> 409 InvalidObjectState) rather than being
+        # reconstructed from chunk sizes.
+        layout = MultipartStore(catalog).object_parts_for_version(
+            item.id, item.size)
+        if layout is None:
+            # A single-PUT object is its own part 1: AWS's partNumber
+            # "effectively performs a 'ranged' GET request for the part
+            # specified", and an object written in one piece has exactly
+            # one part. There is no part 2+, and AWS never reports
+            # x-amz-mp-parts-count for an object that was not uploaded as
+            # a multipart upload (so parts_count stays None here).
+            if part_number != 1:
+                return _invalid_part_number(part_number, 1)
+            start, end = 0, item.size
+        else:
+            parts_count = len(layout)
+            # The snapshot is stored in COMPLETION order: the selected
+            # part list of CompleteMultipartUpload must be strictly
+            # increasing, so ascending part-number order IS the order the
+            # parts were concatenated in. Completed uploads may also be
+            # sparse (parts 1 and 3 with no part 2), so a part's byte
+            # offset is the sum of the stored sizes of every part BEFORE
+            # it in this order -- never part-number arithmetic.
+            offset = 0
+            window = None
+            for number, size, _digest, _etag in layout:
+                if number == part_number:
+                    window = (offset, offset + size)
+                    break
+                offset += size
+            if window is None:
+                # A part number the completed object does not have: a gap
+                # in sparse numbering, or beyond the recorded part count.
+                return _invalid_part_number(part_number, parts_count)
+            start, end = window
+        # A part read behaves like a ranged GET, so a non-empty part
+        # answers 206 with Content-Range. A zero-byte part (an empty
+        # single-PUT object, or a completed multipart upload whose final
+        # part is empty) cannot be described by any byte range, so it
+        # answers an empty 200 with no Content-Range -- the same answer
+        # AWS gives for part 1 of an empty object.
+        partial = end > start
+    else:
+        range_header = request.headers.get("range")
+        if_range = request.headers.get("if-range")
+        if (range_header is not None and if_range is not None
+                and not _if_range_matches(if_range, item_etag, item.created_at)):
+            # The validator is stale: ignore Range and serve the full 200.
+            range_header = None
+        start, end, partial = _range(range_header, item.size)
     transport = storage_transport(db)
     scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
     _secure_mkdir(scratch)
@@ -910,10 +1029,16 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     # client (boto3, aws-cli) reject the response as a checksum mismatch.
     # SSE-C objects also never advertise a plaintext checksum: the stored
     # manifest digest can be the ciphertext digest for multipart uploads.
+    # A partNumber read adds one more rule: the body must actually BE the
+    # whole object (only an empty object's part 1 can produce a 200 part
+    # read), because a zero-byte part of a larger object must not
+    # advertise the digest of bytes it is not returning.
+    whole_body = start == 0 and end == item.size
     headers = _headers(item, item_etag, http_properties,
                        checksum_mode=(checksum_mode == "ENABLED"
                                       and not partial
-                                      and not sse_c))
+                                      and not sse_c
+                                      and whole_body))
     if server_side:
         headers["x-amz-server-side-encryption"] = "AES256"
     elif sse_key is not None:
@@ -925,6 +1050,11 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
     headers["Content-Length"] = str(end - start)
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end-1}/{item.size}"
+    if parts_count is not None:
+        # AWS models x-amz-mp-parts-count as "only returned if you specify
+        # partNumber in your request and the object was uploaded as a
+        # multipart upload"; single-PUT objects keep parts_count None.
+        headers["x-amz-mp-parts-count"] = str(parts_count)
     return StreamingResponse(stream(), status_code=206 if partial else 200, headers=headers)
 
 

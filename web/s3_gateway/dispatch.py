@@ -142,6 +142,16 @@ async def _handle(request: Request):
             )
             if has_write_cond and not (simple_object or multipart_completion):
                 return _error("NotImplemented", "Unsupported conditional S3 operation", 501)
+        # GetObject ?partNumber=N reads one logical part of an object
+        # version. It is a parameter of the already-supported GetObject
+        # operation: the SigV4 action stays s3:GetObject and authorization is
+        # unchanged (no fallthrough to another action). route_guard only
+        # admits partNumber on a signed object GET, so HEAD/PUT/DELETE and
+        # every selector combination (uploadId/ListParts, tagging,
+        # attributes, ...) have already failed closed before this point.
+        is_part_read = bool(
+            separator and request.method == "GET"
+            and "partNumber" in request.query_params)
         is_version_read = bool(
             separator and request.method in ("GET", "HEAD")
             and "versionId" in request.query_params
@@ -149,6 +159,7 @@ async def _handle(request: Request):
                 key_name == "versionId"
                 or (key_name == "attributes" and "attributes" in request.query_params
                     and request.method == "GET")
+                or (key_name == "partNumber" and is_part_read)
                 or key_name.startswith("X-Amz-")
                 for key_name in request.query_params
             )
@@ -543,7 +554,8 @@ async def _handle(request: Request):
             return _error("NotImplemented", "Public access control is bucket-only", 501)
         if "versioning" in request.query_params and not is_bucket_versioning:
             return _error("NotImplemented", "Bucket versioning is a bucket-only operation", 501)
-        if action is None or (separator and "partNumber" in request.query_params and not mpu_part):
+        if action is None or (separator and "partNumber" in request.query_params
+                              and not mpu_part and not is_part_read):
             return _error("NotImplemented", "This S3 operation is not supported yet", 501)
         # Unknown control-plane query operations must not be misinterpreted as
         # ordinary object reads/writes (e.g. ?tagging, ?versioning, ?acl).

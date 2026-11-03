@@ -295,11 +295,23 @@ def validate_s3_query(method: str, bucket: str, object_path: bool, params,
                        if method in {"GET", "HEAD", "DELETE"} else frozenset())
             if method in {"GET", "HEAD"}:
                 allowed |= _RESPONSE_OVERRIDES
+            if method == "GET":
+                # GetObject ?partNumber&versionId reads one logical part of a
+                # pinned version (handoff 06, Task A). partNumber is a
+                # parameter of the already-supported GetObject operation, so
+                # the SigV4 action stays s3:GetObject. HEAD deliberately keeps
+                # rejecting partNumber: the HeadObject part read contract is
+                # not modelled yet, and every other selector combination
+                # (uploadId, tagging, attributes, ...) still fails closed.
+                allowed |= frozenset({"partNumber"})
         else:
             # A bare object GET/HEAD is the only operation that honours the
             # response-* header overrides.
             allowed = (_RESPONSE_OVERRIDES if method in {"GET", "HEAD"}
                        else frozenset())
+            if method == "GET":
+                # GetObject ?partNumber=N (see the versionId branch above).
+                allowed |= frozenset({"partNumber"})
 
     # A recognized ListObjects cursor in the wrong API dialect is an
     # InvalidArgument (400), not an unsupported AWS extension (501).

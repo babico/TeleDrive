@@ -90,11 +90,19 @@ Before any GC experiment, produce a **separate encrypted payload archive**, inde
 For an owner-authorized **original** dataset, run the read-only original-media check separately, with the original *sealed* archive and its independent hash:
 
 ```bash
+# Prove the rehearsal machinery offline before touching original data:
+python scripts/ops/rehearse_telegram_dr.py --self-test
+
 python scripts/ops/rehearse_telegram_dr.py \
   --snapshot "$ORIGINAL_SEALED_DB" --sha256 "$ORIGINAL_SEALED_SHA256" \
   --bucket "$ORIGINAL_BUCKET" --key "$ORIGINAL_KEY" \
-  --account "$ORIGINAL_ACCOUNT" --chat-id "$ORIGINAL_CHAT_ID"
+  --account "$ORIGINAL_ACCOUNT" --chat-id "$ORIGINAL_CHAT_ID" \
+  --object-sha256 "$ORIGINAL_OBJECT_SHA256" \
+  --object-size "$ORIGINAL_OBJECT_SIZE" \
+  --evidence-dir "$EVIDENCE_DIR"
 ```
+
+`--target` is optional and defaults to the numeric `--chat-id`. The script verifies full bytes plus first/middle/cross-boundary/last ranges, cross-checks `--object-sha256`/`--object-size` against the catalog, restores envelope-encrypted objects when `--master-key-file` is supplied, and writes a redacted `0600` evidence record (commit SHA, tool versions, verified object count, size, digest, ranges, redacted stdout/stderr) into `--evidence-dir`. Exit codes: `0` PASS, `2` snapshot rejected, `3` object or chunk not found, `4` scope refused or budget exceeded, `5` verification failed, `6` missing key material. The full owner procedure is [DR checklist](../../operate/dr-checklist.md).
 
 Do not substitute synthetic fixtures for this command or reuse production DB paths. Record `BLOCKED_OWNER_ACTION` if original inputs or permissions do not exist.
 

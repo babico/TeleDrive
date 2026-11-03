@@ -126,6 +126,8 @@ A successful verify prints `restore_valid: true` and confirms the exact head, ge
 
 The same fixture runs in CI against real PostgreSQL and MySQL. CI evidence proves the SQL backup/restore machinery; it does not prove recovery of the owner's original Telegram media.
 
+For that, the owner-executed read-only rehearsal of one original object has its own single-page checklist: [DR checklist](dr-checklist.md).
+
 ## Restore procedure
 
 1. Declare the incident and stop the TeleDrive container. Do not start a second writer against the same SQL database or Telegram session.

@@ -19,12 +19,20 @@ from teledrive.db import connect_database
 @pytest.fixture()
 def api(tmp_path, monkeypatch):
     path = tmp_path / "telegram-auth.sqlite"
-    monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
+    connect = lambda: connect_database(str(path))
+    monkeypatch.setattr(webapp, "db_connect", connect)
     webapp.AUTH_FAILURES.clear()
     webapp._create_default_admin()
+    # The first-boot gate refuses every authenticated operation except
+    # the password-change flow while admin/admin verifies; rotate first.
+    from tests import rotate_bootstrap_admin
+    rotate_bootstrap_admin(connect, ADMIN_PASSWORD)
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client, path
     client.close()
+
+
+ADMIN_PASSWORD = "rotated-admin-pass-1"
 
 
 def _session(client, username, password):
@@ -37,7 +45,7 @@ def _session(client, username, password):
 
 def _operator(api):
     client, _ = api
-    admin = _session(client, "admin", "admin")
+    admin = _session(client, "admin", ADMIN_PASSWORD)
     created = client.post("/api/v1/admin/users", headers=admin,
                           json={"username": "op", "password": "operator-pass-1",
                                 "role": "operator"})
@@ -73,7 +81,7 @@ def test_operator_keeps_read_access_to_the_session_listing(api):
 def test_verify_code_attempt_budget_destroys_the_pending_request(api):
     """A 5-digit code must not be brute-forceable."""
     client, path = api
-    admin = _session(client, "admin", "admin")
+    admin = _session(client, "admin", ADMIN_PASSWORD)
     conn = connect_database(str(path))
     token = "probe-token-" + "a" * 20
     try:

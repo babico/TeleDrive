@@ -29,7 +29,7 @@ tailwind.config = {
     <h1 class="text-2xl font-bold">TeleDrive</h1>
     <p class="text-gray-400 text-sm mt-1">Sign in to continue</p>
   </div>
-  <div class="card">
+  <div class="card" x-show="!mustChangePassword">
     <div class="mb-4">
       <label class="text-sm text-gray-400 mb-1 block">Username</label>
       <input x-model="loginUsername" class="input" placeholder="admin" @keyup.enter="login()">
@@ -40,6 +40,29 @@ tailwind.config = {
     </div>
     <button class="btn w-full justify-center" @click="login()">Sign in</button>
     <p x-show="loginError" class="text-red-400 text-sm mt-3 text-center" x-text="loginError"></p>
+  </div>
+  <div class="card" x-show="mustChangePassword" x-cloak>
+    <h2 class="text-lg font-bold text-amber-400 mb-2">Change the default password</h2>
+    <p class="text-gray-400 text-sm mb-4">
+      The administrator account still uses the shipped default password.
+      TeleDrive refuses every other operation until it is replaced with a
+      strong password (at least 8 characters, mixing letters with digits or
+      symbols).
+    </p>
+    <div class="mb-3">
+      <label class="text-sm text-gray-400 mb-1 block">Current password</label>
+      <input x-model="bootstrapCurrent" class="input" type="password" @keyup.enter="changeBootstrapPassword()">
+    </div>
+    <div class="mb-3">
+      <label class="text-sm text-gray-400 mb-1 block">New password</label>
+      <input x-model="bootstrapNew" class="input" type="password" @keyup.enter="changeBootstrapPassword()">
+    </div>
+    <div class="mb-4">
+      <label class="text-sm text-gray-400 mb-1 block">Confirm new password</label>
+      <input x-model="bootstrapConfirm" class="input" type="password" @keyup.enter="changeBootstrapPassword()">
+    </div>
+    <button class="btn w-full justify-center" @click="changeBootstrapPassword()">Set new password</button>
+    <p x-show="bootstrapError" class="text-red-400 text-sm mt-3 text-center" x-text="bootstrapError"></p>
   </div>
 </div>
 

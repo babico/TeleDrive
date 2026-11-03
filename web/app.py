@@ -9,8 +9,12 @@ a ``Basic`` header is treated like no credential.
 The first boot creates a hardcoded ``admin``/``admin`` account if (and
 only if) no user named ``admin`` exists. It is never configurable and an
 existing admin row is never overwritten, so changing that password
-survives restarts. Programmatic clients use API keys, which keep their
-existing per-route scope semantics unchanged. See ``docs/operate/upgrade.md``.
+survives restarts. While the shipped password is still in use, a
+server-side first-boot gate (``_BootstrapGateMiddleware``) refuses every
+authenticated operation except login, current-user info, logout and the
+self-service password change. Programmatic clients use API keys, which
+keep their existing per-route scope semantics unchanged (but are refused
+until the bootstrap rotation completes). See ``docs/operate/upgrade.md``.
 """
 from __future__ import annotations
 
@@ -437,6 +441,132 @@ app = FastAPI(
 _SHARE_TOKEN_PATH = re.compile(
     r"(?P<prefix>/share/|/api/v1/admin/storage/shares/)"
     r"(?P<token>[A-Za-z0-9_-]{16,64})(?P<rest>/?$)")
+
+
+class _BootstrapGateMiddleware:
+    """The first-boot gate, enforced server side.
+
+    While the seeded ``admin`` account still authenticates with the
+    shipped default password, the deployment is still in bootstrap:
+    every AUTHENTICATED operation is refused with a 403 that names the
+    required action, except the exact flow that completes setup --
+    login, current-user info, logout, the self-service password change
+    -- plus the health/static/certificate surfaces a browser needs to
+    reach them. The condition is ACCOUNT STATE (a cached PBKDF2 probe
+    of the stored hash; see ``web.routers.auth._bootstrap_gate_active``),
+    never a trustable browser flag, and it fails closed on probe errors.
+
+    Bearer API keys are refused outright while the gate is up: on a
+    legitimate first boot none can exist yet (minting is itself gated),
+    so any key that still answers was issued under the default-password
+    admin -- exactly the delegated authority this lock exists to contain
+    (see ``docs/start/first-upload.md``). The S3 data plane applies the
+    same rule to SigV4 credentials in ``web.s3``.
+
+    Pure ASGI rather than ``@app.middleware("http")`` so the WebSocket
+    log stream is gated too: a gated session's subscription is closed
+    with 4403 before the handler accepts it. Registered FIRST, which
+    makes it the innermost layer: the host check, the body limiter and
+    the audit logger have already run when the gate decides, so its
+    denials land in the audit trail like any other.
+    """
+
+    # (method, path) pairs the gate lets through while active. HEAD is
+    # normalised to GET before matching; /static/* is prefix-allowed.
+    ALLOWED = frozenset({
+        ("POST", "/api/v1/auth/login"), ("POST", "/api/auth/login"),
+        ("GET", "/api/v1/auth/me"), ("GET", "/api/auth/me"),
+        ("POST", "/api/v1/auth/logout"), ("POST", "/api/auth/logout"),
+        ("POST", "/api/v1/auth/password"), ("POST", "/api/auth/password"),
+        ("GET", "/api/health"), ("GET", "/__health"),
+        # The page that hosts the change form and its assets.
+        ("GET", "/login"),
+        # Public certificates: a client must be able to trust the
+        # deployment's TLS before it can safely complete the flow.
+        ("GET", "/server.cer"), ("GET", "/server.crt"),
+        ("GET", "/api/v1/certificate.cer"), ("GET", "/api/v1/certificate.pem"),
+    })
+
+    DENIED_DETAIL = (
+        "TeleDrive is completing first-boot setup: the seeded administrator "
+        "account still uses the default password. Sign in as admin and "
+        "change it (POST /api/v1/auth/password) before using the API.")
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            await self._http(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            await self._websocket(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+    def _allowed(self, method: str, path: str) -> bool:
+        if method.upper() == "HEAD":
+            method = "GET"
+        return ((method.upper(), path) in self.ALLOWED
+                or path.startswith("/static/"))
+
+    async def _http(self, scope, receive, send):
+        from starlette.requests import Request
+        from web.routers.auth import _bootstrap_gate_active, _get_current_user
+        request = Request(scope, receive=receive)
+        if self._allowed(request.method, request.url.path):
+            await self.app(scope, receive, send)
+            return
+        # No credential: nothing to gate -- the handler's own 401 is the
+        # right answer, and anonymous traffic must not pay the probe.
+        auth = request.headers.get("authorization", "")
+        token = None
+        if auth.lower().startswith("bearer "):
+            if auth[7:].strip().startswith("td_live_"):
+                token = "__api_key__"
+            else:
+                token = auth[7:].strip()
+        elif request.cookies.get("teledrive_session"):
+            token = request.cookies.get("teledrive_session")
+        if token is None:
+            await self.app(scope, receive, send)
+            return
+        if not _bootstrap_gate_active():
+            await self.app(scope, receive, send)
+            return
+        if token != "__api_key__":
+            # A session token only trips the gate when it actually
+            # resolves: a revoked or expired session is unauthenticated
+            # and must keep answering 401, not 403.
+            if _get_current_user(request) is None:
+                await self.app(scope, receive, send)
+                return
+        response = JSONResponse(status_code=403, content={
+            "detail": self.DENIED_DETAIL,
+            "code": "bootstrap_password_change_required"})
+        await response(scope, receive, send)
+
+    async def _websocket(self, scope, receive, send):
+        from starlette.requests import HTTPConnection
+        from web.routers.auth import _bootstrap_gate_active, _get_current_user
+        # HTTPConnection, not Request: it reads headers/cookies from any
+        # scope type, and Request asserts scope["type"] == "http".
+        request = HTTPConnection(scope)
+        token = request.cookies.get("teledrive_session")
+        if (token and _bootstrap_gate_active()
+                and _get_current_user(request) is not None):
+            # Same close code the handler uses for authorization denials;
+            # the REST twin carries the human-readable reason.
+            await send({"type": "websocket.close", "code": 4403})
+            return
+        await self.app(scope, receive, send)
+
+
+# Registered BEFORE the decorator middlewares below: Starlette wraps in
+# reverse registration order, so the first registration is the innermost
+# layer and the gate decides after the host check, body limiter and
+# audit logger have already run.
+app.add_middleware(_BootstrapGateMiddleware)
 
 
 def _redact_log_path(path: str) -> str:

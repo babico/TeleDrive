@@ -230,10 +230,12 @@ def test_must_change_password_flag(authenv):
     r = client.put(f"/api/v1/admin/users/{uid}/password",
                    headers={**viewer, **CSRF}, json={"password": "whatever"})
     assert r.status_code == 403  # only admins may change passwords
-    r = client.put(f"/api/v1/admin/users/{uid}/password",
-                   headers={**admin, **CSRF},
-                   json={"password": "admin-password-2"})
-    assert r.status_code == 200
+    # The rotation goes through the self-service endpoint (the admin
+    # force-change route is itself gated while the default verifies).
+    r = client.post("/api/v1/auth/password", headers={**admin, **CSRF},
+                    json={"current_password": "admin",
+                          "new_password": "admin-password-2"})
+    assert r.status_code == 200, r.text
     # The password change revoked the old session; log in again.
     admin = _bearer(client, "admin", "admin-password-2")
     r = client.get("/api/v1/auth/me", headers=admin)

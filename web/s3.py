@@ -184,6 +184,41 @@ async def _route_encoded_control_keys(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _s3_bootstrap_gate_middleware(request: Request, call_next):
+    """First-boot gate for the S3 data plane (the ``web.s3`` twin of
+    ``web.app._BootstrapGateMiddleware``).
+
+    While the seeded ``admin`` account still uses the shipped default
+    password, no credentialed S3 request is authorized -- decided HERE,
+    before any SigV4 verification runs. On a legitimate first boot no
+    credential can exist (issuing runs through the gated web API), so
+    anything that still signs was issued under the default-password
+    admin: exactly the delegated authority the bootstrap lock contains.
+    Health checks, anonymous preflights and unsigned traffic pass (the
+    gateway's own authorization still refuses the latter).
+
+    Registered last, which makes it the OUTERMOST layer: the CORS
+    middleware short-circuits some paths directly into ``_handle``,
+    bypassing inner layers, so the gate has to wrap it.
+    """
+    signed = (bool(request.headers.get("authorization"))
+              or "X-Amz-Signature" in request.query_params
+              or "Signature" in request.query_params)
+    if signed and request.url.path != "/__health":
+        from web.routers.auth import _bootstrap_gate_active
+        # Probe through THIS module's database binding (tests rebind it;
+        # production points it at the same database as the web app).
+        if _bootstrap_gate_active(db_connect):
+            _log("denied: credentialed S3 request while the default admin "
+                 "password is still in use", "security")
+            return _error(
+                "AccessDenied",
+                "First-boot setup is incomplete: change the default "
+                "administrator password before using the S3 API", 403)
+    return await call_next(request)
+
+
 @app.get("/__health", include_in_schema=False)
 def health():
     # Container-local liveness only; no credentials or Telegram calls.

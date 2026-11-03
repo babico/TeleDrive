@@ -160,6 +160,11 @@ def _create_default_admin() -> None:
                 conn, username="admin",
                 password_hash=app._hash_password("admin"),
                 role="admin", now=now)
+            # The bootstrap gate and the /auth/me nudge key on this
+            # account's stored hash; drop any cached probe result so the
+            # fresh admin/admin row is seen immediately (the hash-keyed
+            # cache would self-heal, this makes the intent explicit).
+            app._invalidate_default_admin_cache()
             app._log("bootstrap admin account 'admin' created with the default "
                      "password — change it immediately", "startup")
     except Exception as exc:

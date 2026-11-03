@@ -122,6 +122,9 @@ EXPECTED_SURFACE = {
     ("GET", "/{page_name}.html", None, False),
     ("POST", "/api/auth/login", 'post:/api/auth/login', False),
     ("POST", "/api/auth/logout", 'post:/api/auth/logout', False),
+    # Self-service password change (the first-boot gate's rotation path);
+    # deliberately added with handoff 06 task B.
+    ("POST", "/api/auth/password", 'post:/api/auth/password', False),
     ("POST", "/api/v1/admin/keys", 'post:/api/v1/admin/keys', True),
     ("POST", "/api/v1/admin/keys/{identifier}/rotate", 'post:/api/v1/admin/keys/{identifier}/rotate', True),
     ("POST", "/api/v1/admin/s3-credentials", 'post:/api/v1/admin/s3-credentials', True),
@@ -150,6 +153,7 @@ EXPECTED_SURFACE = {
     ("POST", "/api/v1/admin/users", 'post:/api/v1/admin/users', True),
     ("POST", "/api/v1/auth/login", 'post:/api/v1/auth/login', False),
     ("POST", "/api/v1/auth/logout", 'post:/api/v1/auth/logout', False),
+    ("POST", "/api/v1/auth/password", 'post:/api/v1/auth/password', False),
     ("POST", "/api/v1/buckets", 'rest:buckets:create', False),
     ("POST", "/share/{token}", None, False),
     ("PUT", "/api/config", 'put:/api/config', True),

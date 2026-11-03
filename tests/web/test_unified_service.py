@@ -50,16 +50,19 @@ def unified(make_app_env, monkeypatch):
         db.close()
     web_client=TestClient(app,base_url="http://localhost:8080")
     s3_client=TestClient(app,base_url="http://localhost:9000")
-    # Create the local users directly (bypass lifespan). The first-boot
-    # admin plus the named admin used by the Basic calls below.
+    # Create the local users directly (bypass lifespan). The bootstrap
+    # admin is seeded with an already-rotated password (the first-boot
+    # gate refuses everything but the password-change flow while
+    # admin/admin verifies) plus the named admin used by the Basic
+    # calls below.
     from tests import seed_local_user as _seed_local_user
-    _seed_local_user(connect, "admin", "admin", "admin")
+    _seed_local_user(connect, "admin", "unified-admin-pass-1", "admin")
     _seed_local_user(connect, "testadmin", "long-secure-test-password", "admin")
     try:
-        # Login with default admin
+        # Login with the (rotated) bootstrap admin
         login_r = web_client.post("/api/auth/login",
             headers={"X-TeleDrive-CSRF":"1"},
-            json={"username":"admin","password":"admin"})
+            json={"username":"admin","password":"unified-admin-pass-1"})
         assert login_r.status_code==200, login_r.text
         admin_token = login_r.json()["token"]
         admin_auth = {"Authorization":"Bearer "+admin_token}

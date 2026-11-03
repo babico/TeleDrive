@@ -74,9 +74,30 @@ def test_first_boot_creates_admin_admin_and_the_login_form_accepts_it(
 
     client = TestClient(web.app, base_url="http://localhost:8080")
     try:
+        # First boot: the login form accepts the shipped credential, but
+        # the server-side bootstrap gate refuses every other operation
+        # with a 403 that names the required action.
         headers = login_headers(client, "admin", "admin")
+        assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+        denied = client.get("/api/v1/admin/users", headers=headers)
+        assert denied.status_code == 403, denied.text
+        assert "first-boot" in denied.json()["detail"]
+        assert denied.json()["code"] == "bootstrap_password_change_required"
+
+        # Completing the rotation through the self-service endpoint
+        # lifts the gate: the same session family works afterwards.
+        rotated = client.post("/api/v1/auth/login", headers=CSRF,
+                              json={"username": "admin",
+                                    "password": "admin"})
+        token = rotated.json()["token"]
+        changed = client.post("/api/v1/auth/password",
+                              headers={**CSRF, "Authorization": "Bearer " + token},
+                              json={"current_password": "admin",
+                                    "new_password": "changed-admin-password"})
+        assert changed.status_code == 200, changed.text
+        fresh = {"Authorization": "Bearer " + changed.json()["token"]}
         assert client.get("/api/v1/admin/users",
-                          headers=headers).status_code == 200
+                          headers=fresh).status_code == 200
     finally:
         client.close()
 

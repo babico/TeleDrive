@@ -23,21 +23,30 @@ from teledrive.db import connect_database
 @pytest.fixture()
 def api(tmp_path, monkeypatch):
     path = tmp_path / "delegation.sqlite"
-    monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
+    connect = lambda: connect_database(str(path))
+    monkeypatch.setattr(webapp, "db_connect", connect)
     webapp.AUTH_FAILURES.clear()
     # The bootstrap administrator is created at startup, which a TestClient
     # without a lifespan does not run.
     webapp._create_default_admin()
+    # The first-boot gate refuses every authenticated operation except the
+    # password-change flow while admin/admin verifies, so complete the
+    # rotation before minting keys (what a real operator does on login).
+    from tests import rotate_bootstrap_admin
+    rotate_bootstrap_admin(connect, ADMIN_PASSWORD)
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client
     client.close()
 
 
+ADMIN_PASSWORD = "rotated-admin-pass-1"
+
+
 def _session(client):
-    """Log in as the hardcoded bootstrap admin and return CSRF headers."""
+    """Log in as the bootstrap administrator and return CSRF headers."""
     reply = client.post("/api/v1/auth/login",
                         headers={"x-teledrive-csrf": "1"},
-                        json={"username": "admin", "password": "admin"})
+                        json={"username": "admin", "password": ADMIN_PASSWORD})
     assert reply.status_code == 200, reply.text
     return {"x-teledrive-csrf": "1"}
 

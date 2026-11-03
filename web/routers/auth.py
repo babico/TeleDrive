@@ -86,35 +86,78 @@ def _session_token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-_DEFAULT_ADMIN_PW_CACHE: dict[str, bool] = {}
+# Keyed by the STORED HASH (None = no such account row), never by username:
+# a password change writes a new hash, which misses the cache and forces a
+# recompute, so no invalidation hook can be forgotten. The PBKDF2 comparison
+# is the expensive part; the row read is deliberately repeated per probe.
+_DEFAULT_ADMIN_PW_CACHE: dict[str | None, bool] = {}
+
+
+def _probe_default_admin(username: str,
+                         db_connect=None) -> tuple[str | None, bool]:
+    """Read the account row and test it against the shipped default.
+
+    Returns ``(stored_hash, default_password_verifies)``. ``db_connect``
+    lets a caller that owns its own database binding (the S3 gateway
+    module) probe through it instead of the web app's.
+    """
+    connect = db_connect or _webapp().db_connect
+    conn = connect()
+    try:
+        record = _user_store.get_by_username(conn, username)
+    finally:
+        conn.close()
+    if record is None:
+        return None, False
+    return record["password_hash"], _verify_password(
+        "admin", record["password_hash"])
+
+
+def _cached_default_admin_probe(username: str, *, fail_closed: bool,
+                                db_connect=None) -> bool:
+    """The shared account-state probe behind the UI nudge and the gate.
+
+    ``fail_closed`` selects the error direction when the probe cannot
+    read the database: the UI nudge treats that as "already changed"
+    (a DB blip must not loop the warning), while the first-boot GATE
+    treats it as "still in bootstrap" -- in that state no request has a
+    trustworthy credential anyway (sessions, API keys and S3 credentials
+    all live in the same database), so a transient read failure must not
+    be the thing that disarms the lock. Failed probes are never cached.
+    """
+    try:
+        stored_hash, in_use = _probe_default_admin(username, db_connect)
+    except Exception as exc:
+        _module_logger.warning(
+            "%s admin password probe failed: %s",
+            "bootstrap gate" if fail_closed else "default-admin", exc)
+        return fail_closed
+    cached = _DEFAULT_ADMIN_PW_CACHE.get(stored_hash)
+    if cached is None:
+        cached = in_use
+        if len(_DEFAULT_ADMIN_PW_CACHE) >= 64:
+            # Unbounded growth would need unbounded distinct hashes; cap
+            # it anyway so a pathological writer cannot balloon memory.
+            _DEFAULT_ADMIN_PW_CACHE.clear()
+        _DEFAULT_ADMIN_PW_CACHE[stored_hash] = cached
+    return cached
 
 
 def _default_admin_password_in_use(username: str = "admin") -> bool:
-    """True while the seeded account still uses the shipped 'admin' password.
+    """True while the seeded account still uses the shipped 'admin' password."""
+    return _cached_default_admin_probe(username, fail_closed=False)
 
-    The PBKDF2 comparison is cached per username; every password change
-    invalidates the cache via _invalidate_default_admin_cache().
+
+def _bootstrap_gate_active(db_connect=None) -> bool:
+    """True while the deployment must finish first-boot setup.
+
+    This is the GATE condition (see ``web.app._BootstrapGateMiddleware``):
+    the seeded ``admin`` account still authenticates with the shipped
+    default password. It is ACCOUNT STATE read from the database, never
+    a trustable browser flag, and it fails closed on probe errors.
     """
-    cached = _DEFAULT_ADMIN_PW_CACHE.get(username)
-    if cached is None:
-        try:
-            conn = _webapp().db_connect()
-            try:
-                record = _user_store.get_by_username(conn, username)
-            finally:
-                conn.close()
-            cached = bool(
-                record is not None
-                and _verify_password("admin", record["password_hash"]))
-        except Exception as exc:
-            # Fail closed: treat the password as already changed so the
-            # nudge disappears rather than loops. Visible, because a DB
-            # blip silently disabling the must-change warning is confusing.
-            _module_logger.warning(
-                "default-admin password probe failed: %s", exc)
-            cached = False
-        _DEFAULT_ADMIN_PW_CACHE[username] = cached
-    return cached
+    return _cached_default_admin_probe("admin", fail_closed=True,
+                                       db_connect=db_connect)
 
 
 def _invalidate_default_admin_cache() -> None:
@@ -221,7 +264,13 @@ def login(payload: dict, request: Request):
         conn.close()
     _webapp()._log(f"login: username={username}", "auth")
     resp = JSONResponse(content={"token": token, "user": {"id": record["id"], "username": record["username"], "role": record["role"]},
-                                  "expires_at": expires})
+                                  "expires_at": expires,
+                                  # Same account-state probe as /auth/me:
+                                  # lets a first-boot client learn it must
+                                  # complete the rotation before anything else.
+                                  "must_change_password": bool(
+                                      username == "admin"
+                                      and _default_admin_password_in_use("admin"))})
     # Behind a TLS-terminating reverse proxy the cookie must still be
     # Secure when the client connection is https (X-Forwarded-Proto).
     forwarded_https = (_webapp().TRUSTED_PROXY and request.headers.get(
@@ -269,6 +318,105 @@ def me(request: Request):
             user["username"] == "admin"
             and _default_admin_password_in_use("admin")),
     }
+
+
+def _validate_new_password(new_pw: str, current_pw: str) -> None:
+    """The self-service rotation minimums (400 on breach).
+
+    The shipped default is public knowledge, so the new password must be
+    a strong secret that is neither the old one nor ``admin`` in any
+    casing. Letters mixed with digits/symbols keeps the rotation from
+    landing on another dictionary word.
+    """
+    if new_pw.casefold() == "admin":
+        raise HTTPException(
+            400, "the new password must differ from the shipped default")
+    if len(new_pw) < 8:
+        raise HTTPException(400, "password must be at least 8 characters")
+    if new_pw == current_pw:
+        raise HTTPException(
+            400, "the new password must differ from the current one")
+    if not (any(c.isalpha() for c in new_pw)
+            and any(not c.isalpha() for c in new_pw)):
+        raise HTTPException(
+            400, "password must mix letters with digits or symbols")
+
+
+@router.post("/api/v1/auth/password", tags=["Authentication"],
+             summary="Change the caller's own password")
+@router.post("/api/auth/password", tags=["Authentication"], include_in_schema=False)
+def change_own_password(request: Request, payload: dict):
+    """Self-service password change for the authenticated account.
+
+    This is one of the few operations the first-boot gate leaves open
+    while the seeded ``admin`` account still uses the shipped default
+    password, so the bootstrap rotation can always complete. Only the
+    caller's OWN account can be changed: the current password must be
+    presented, the new one must clear :func:`_validate_new_password`,
+    and the request is CSRF/same-origin fenced like every state change.
+    On success every session for the account is revoked and one fresh
+    session is issued (rotation), so the browser stays signed in while
+    any older or stolen token dies immediately.
+    """
+    _same_origin(request)
+    # An API key is not the account: letting one rotate (or probe) the
+    # password of the principal that minted it would hand a bearer token
+    # a takeover primitive. Checked before session resolution so a key
+    # gets the specific error, not a generic 401.
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer td_live_"):
+        raise HTTPException(
+            403, "Password changes need an interactive session, not an API key")
+    user = _get_current_user(request)
+    if user is None:
+        raise HTTPException(401, "Not authenticated")
+    request.state.user = user
+    current_pw = str(payload.get("current_password", ""))
+    new_pw = str(payload.get("new_password", ""))
+    _validate_new_password(new_pw, current_pw)
+    conn = _webapp().db_connect()
+    try:
+        # Re-read the row: the session says who calls, the row says what
+        # the password currently is (it may have changed since login).
+        record = _user_store.get_by_username(conn, user["username"])
+        if record is None:
+            raise HTTPException(404, "account not found")
+        if not _verify_password(current_pw, record["password_hash"]):
+            _webapp()._log(f"self password change denied: wrong current "
+                           f"password user={user['username']}", "auth")
+            raise HTTPException(403, "Current password is incorrect")
+        token = "td_sess_" + secrets.token_urlsafe(32)
+        now = int(time.time())
+        expires = now + 7 * 86400  # 7 days
+        # One transaction: the new hash, the revocation of EVERY session
+        # for this account and the replacement session land together
+        # (sessions.create commits once, after all three writes).
+        _user_store.set_password(
+            conn, record["id"], _hash_password(new_pw), now, commit=False)
+        _session_store.delete_for_user(conn, record["id"], commit=False)
+        _session_store.create(
+            conn, token=_session_token_digest(token), user_id=record["id"],
+            created_at=now, expires_at=expires)
+        _invalidate_default_admin_cache()
+        _webapp()._log(f"self password change: user={user['username']}",
+                       "auth")
+        _webapp()._audit(request, "auth.password.self_change",
+                         target=user["username"])
+    finally:
+        conn.close()
+    resp = JSONResponse(content={
+        "ok": True, "token": token,
+        "user": {"id": record["id"], "username": record["username"],
+                 "role": record["role"]},
+        "expires_at": expires})
+    # Same cookie contract as login: Secure behind TLS or a trusted
+    # https proxy, httpOnly, lax, 7 days.
+    forwarded_https = (_webapp().TRUSTED_PROXY and request.headers.get(
+        "x-forwarded-proto", "").lower() == "https")
+    resp.set_cookie(key="teledrive_session", value=token, httponly=True,
+                    max_age=7 * 86400, samesite="lax", path="/",
+                    secure=bool(_webapp().SSL_CERTFILE) or forwarded_https)
+    return resp
 
 
 @router.put("/api/v1/admin/users/{user_id}/password", tags=["Users"],

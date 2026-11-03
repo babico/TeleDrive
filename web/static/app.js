@@ -37,6 +37,10 @@ function app(){
     loginError: '',
 
     mustChangePassword: false,
+    bootstrapCurrent: '',
+    bootstrapNew: '',
+    bootstrapConfirm: '',
+    bootstrapError: '',
 
     // Date/key formatters used by more than one admin fragment: fmtRel() and
     // keyExpired() are called by api-management.html and keyExpired() also by
@@ -67,7 +71,18 @@ function app(){
 
     async init(){
       const path = window.location.pathname.replace(/\/+$/, '') || '/';
-      if(path === '/login') return;
+      if(path === '/login'){
+        // A session that still owes the bootstrap rotation sees the
+        // change form straight away instead of the login box.
+        try {
+          const me = await this.api('/api/v1/auth/me');
+          if(me.must_change_password){
+            this.currentUser = me.user.username;
+            this.mustChangePassword = true;
+          }
+        } catch(e){}
+        return;
+      }
       try {
         const me = await this.api('/api/v1/auth/me');
         this.currentUser = me.user.username;
@@ -77,10 +92,10 @@ function app(){
         window.location.href = '/login';
         return;
       }
-      // While the default admin/admin credential is still in use, every
-      // page forces the change-password screen.
-      if(this.mustChangePassword && path !== '/users'){
-        window.location.replace('/users');
+      // The server refuses every other operation until the default
+      // admin password is rotated; the login page carries the form.
+      if(this.mustChangePassword){
+        window.location.replace('/login');
         return;
       }
       if(path === '/' || path === '/dashboard' || path === '/queue'){
@@ -163,8 +178,30 @@ function app(){
     async login(){
       try {
         await this.api('/api/v1/auth/login',{method:'POST',body:JSON.stringify({username:this.loginUsername,password:this.loginPassword})});
+        const me = await this.api('/api/v1/auth/me');
+        if(me.must_change_password){
+          // First boot: the server gates every operation behind the
+          // password change, so stay here and show the form.
+          this.currentUser = me.user.username;
+          this.mustChangePassword = true;
+          this.bootstrapCurrent = this.loginPassword;
+          this.loginPassword = '';
+          return;
+        }
         window.location.replace('/');
       } catch(e){ this.loginError = e.message; }
+    },
+    async changeBootstrapPassword(){
+      this.bootstrapError = '';
+      if(this.bootstrapNew !== this.bootstrapConfirm){
+        this.bootstrapError = 'The new passwords do not match';
+        return;
+      }
+      try {
+        await this.api('/api/v1/auth/password',{method:'POST',body:JSON.stringify(
+          {current_password:this.bootstrapCurrent,new_password:this.bootstrapNew})});
+        window.location.replace('/');
+      } catch(e){ this.bootstrapError = e.message; }
     },
     async logout(){
       try { await this.api('/api/v1/auth/logout',{method:'POST'}); } catch(e){}

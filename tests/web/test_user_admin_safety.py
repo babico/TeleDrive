@@ -17,12 +17,21 @@ from teledrive.db import connect_database
 @pytest.fixture()
 def api(tmp_path, monkeypatch):
     path = tmp_path / "users.sqlite"
-    monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
+    connect = lambda: connect_database(str(path))
+    monkeypatch.setattr(webapp, "db_connect", connect)
     webapp.AUTH_FAILURES.clear()
     webapp._create_default_admin()
+    # The first-boot gate refuses every authenticated operation except
+    # the password-change flow while admin/admin verifies; complete the
+    # rotation the way a real operator does on first login.
+    from tests import rotate_bootstrap_admin
+    rotate_bootstrap_admin(connect, ADMIN_PASSWORD)
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client, path
     client.close()
+
+
+ADMIN_PASSWORD = "rotated-admin-pass-1"
 
 
 def _login(client, username, password):
@@ -41,7 +50,7 @@ def _login(client, username, password):
 
 
 def _admin(client):
-    return _login(client, "admin", "admin")
+    return _login(client, "admin", ADMIN_PASSWORD)
 
 
 def test_deleted_users_session_never_authenticates_as_a_recreated_user(api):

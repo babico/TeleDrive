@@ -17,15 +17,20 @@ from teledrive.storage import audit
 @pytest.fixture()
 def api(tmp_path, monkeypatch):
     path = tmp_path / "audit.sqlite"
-    monkeypatch.setattr(webapp, "db_connect", lambda: connect_database(str(path)))
+    connect = lambda: connect_database(str(path))
+    monkeypatch.setattr(webapp, "db_connect", connect)
     webapp.AUTH_FAILURES.clear()
     webapp._create_default_admin()
+    # The first-boot gate refuses every authenticated operation except
+    # the password-change flow while admin/admin verifies; rotate first.
+    from tests import rotate_bootstrap_admin
+    rotate_bootstrap_admin(connect, "rotated-admin-pass-1")
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client, path
     client.close()
 
 
-def _login(client, username="admin", password="admin"):
+def _login(client, username="admin", password="rotated-admin-pass-1"):
     reply = client.post("/api/v1/auth/login",
                         headers={"x-teledrive-csrf": "1"},
                         json={"username": username, "password": password})

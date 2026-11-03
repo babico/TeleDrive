@@ -29,6 +29,30 @@ def seed_local_user(connect, username: str, password: str,
         db.close()
 
 
+def rotate_bootstrap_admin(connect, password: str) -> None:
+    """Point the seeded ``admin`` account at a rotated password.
+
+    The first-boot gate (``web.app._BootstrapGateMiddleware``) refuses
+    every authenticated operation except the password-change flow while
+    ``admin``/``admin`` still verifies, so tests that need a working
+    admin session rotate the password first -- exactly what a real
+    operator does on first login. Call after ``_create_default_admin``.
+    """
+    import sqlalchemy
+
+    import web.app as web
+
+    db = connect()
+    try:
+        db.connection.execute(sqlalchemy.text(
+            "UPDATE users SET password_hash = :ph WHERE username = 'admin'"
+        ), {"ph": web._hash_password(password)})
+        db.connection.commit()
+    finally:
+        db.close()
+    web._invalidate_default_admin_cache()
+
+
 def basic_header(username: str, password: str) -> dict:
     """Build an HTTP Basic header for a local user."""
     import base64

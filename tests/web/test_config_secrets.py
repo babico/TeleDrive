@@ -51,12 +51,17 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "_settings_store", lambda: None)
     webapp.AUTH_FAILURES.clear()
     webapp._create_default_admin()
+    # The first-boot gate refuses every authenticated operation except
+    # the password-change flow while admin/admin verifies; rotate first.
+    from tests import rotate_bootstrap_admin
+    rotate_bootstrap_admin(lambda: connect_database(str(db_path)),
+                           "rotated-admin-pass-1")
     client = TestClient(webapp.app, headers={"host": "localhost"})
     yield client, db_path
     client.close()
 
 
-def _login(client, username="admin", password="admin"):
+def _login(client, username="admin", password="rotated-admin-pass-1"):
     reply = client.post("/api/v1/auth/login",
                         headers={"x-teledrive-csrf": "1"},
                         json={"username": username, "password": password})

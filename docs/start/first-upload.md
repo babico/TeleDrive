@@ -14,13 +14,39 @@ Open `http://127.0.0.1:8080` and sign in with:
 - password: `admin`
 
 !!! danger "The first-boot account is public knowledge"
-    Every installation starts with `admin` / `admin`. The UI redirects every
-    page to **Users** until that password is changed, but the API does not.
-    Change it before exposing the port to anything but loopback.
+    Every installation starts with `admin` / `admin`. The server enforces the
+    rotation: until the password is changed, **every** authenticated
+    operation — REST data, S3 (including credential issue and presigning),
+    API keys, user management, even the WebSocket log stream — answers
+    `403` with a `bootstrap_password_change_required` error. Only login,
+    current-user info, logout and the password change itself are allowed.
+    Nothing else can be done with the default credential, by anyone.
 
-The change is on **Users -> the `admin` row -> Password**. The minimum length
-is 8 characters. The `admin` username cannot be renamed, and restarting the
-container never resets an existing password.
+After signing in, the login page itself shows the change-password form.
+Enter the current password (`admin`) and a strong new password:
+
+- at least 8 characters,
+- mixing letters with digits or symbols,
+- different from the shipped default.
+
+The change rotates the session: the browser stays signed in with a fresh
+cookie, and every other session of the account (including the one the
+login created) is revoked. The equivalent API call is
+`POST /api/v1/auth/password` with `{"current_password": "...",
+"new_password": "..."}` plus the `X-TeleDrive-CSRF: 1` header.
+
+The `admin` username cannot be renamed, and restarting the container never
+resets an existing password. If you prefer the Users page, an admin can
+also force-change any account's password there (**Users -> the row ->
+Password**), but the self-service form above is the intended first-boot
+path because the user-management API is itself gated until the rotation
+completes.
+
+API keys and S3 credentials issued while the default password was still
+active are refused until the rotation completes — on a genuine first boot
+none can exist yet (issuing is part of the gated surface), so anything
+that still answers was minted under the public credential. They work
+unchanged once the admin password has been changed.
 
 If the password is lost later, recovery requires filesystem and database
 access; see [Upgrade](../operate/upgrade.md#locked-out-admin).

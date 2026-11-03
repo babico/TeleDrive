@@ -143,8 +143,11 @@ def unlink_current_object(bucket: str, key: str = Query(..., min_length=1, max_l
             # there destroys the only record of the previous version, and
             # nothing in storage_removed_versions or the metadata journal
             # would describe what happened. AWS semantics are a delete
-            # marker, which is exactly what delete_marker() writes.
-            if catalog.versioning_state(bucket) == "Enabled":
+            # marker, which is exactly what delete_marker() writes — for a
+            # Suspended bucket the marker occupies the null-version slot
+            # (same contract as the S3 gateway's DELETE, so REST and S3
+            # agree on what an unlink means).
+            if catalog.versioning_state(bucket) in ("Enabled", "Suspended"):
                 marker = catalog.delete_marker(bucket, key,
                                                expected_generation=generation)
                 _webapp()._log(f"unlink {bucket}/{key}: delete marker {marker}", "storage")

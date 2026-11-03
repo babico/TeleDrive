@@ -29,9 +29,13 @@ from tests.s3.test_s3_gateway import service, signed  # noqa: F401 — fixtures
 
 ALGORITHM = "AES256"
 KEY_HEADER = "x-amz-server-side-encryption-customer-key"
+from teledrive.storage.sse import (
+    SOURCE_CUSTOMER_ALGORITHM, SOURCE_CUSTOMER_KEY,
+    SOURCE_CUSTOMER_KEY_MD5,
+)
 MD5_HEADER = "x-amz-server-side-encryption-customer-key-md5"
 ALG_HEADER = "x-amz-server-side-encryption-customer-algorithm"
-COPY_PREFIX = "x-amz-copy-source-"
+COPY_PREFIX = "x-amz-copy-source-server-side-encryption-customer-"
 
 
 def raw_key(seed: int = 0) -> bytes:
@@ -49,10 +53,19 @@ def fingerprint(raw: bytes) -> str:
 
 
 def ssec_headers(raw: bytes, *, prefix: str = "") -> dict[str, str]:
+    """One SSE-C header family; a truthy prefix selects the AWS-spelled
+    copy-source family (x-amz-copy-source-server-side-encryption-customer-*),
+    matching what the gateway parses for UpdateObjectEncryption."""
+    if prefix:
+        return {
+            SOURCE_CUSTOMER_ALGORITHM: ALGORITHM,
+            SOURCE_CUSTOMER_KEY: base64.b64encode(raw).decode("ascii"),
+            SOURCE_CUSTOMER_KEY_MD5: fingerprint(raw),
+        }
     return {
-        prefix + ALG_HEADER: ALGORITHM,
-        prefix + KEY_HEADER: base64.b64encode(raw).decode("ascii"),
-        prefix + MD5_HEADER: fingerprint(raw),
+        ALG_HEADER: ALGORITHM,
+        KEY_HEADER: base64.b64encode(raw).decode("ascii"),
+        MD5_HEADER: fingerprint(raw),
     }
 
 

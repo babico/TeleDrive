@@ -47,6 +47,7 @@ jobs:
           python -m pytest -q --durations=25 \
             tests/meta/test_ci_workflows.py \
             tests/meta/test_docs.py tests/meta/test_docs_nav.py \
+            tests/meta/test_s3_parameter_ledger.py \
             tests/web/test_api_keys.py \
             tests/web/test_rest_api.py \
             tests/web/test_lifespan.py \
@@ -117,6 +118,7 @@ jobs:
             tests/storage/test_gc_reference_planner.py \
             tests/storage/test_mtproto_multi_credentials.py \
             tests/storage/test_telegram_dr_rehearsal.py \
+            tests/ops/test_rehearse_telegram_dr.py \
             tests/storage/test_legacy_cutover_acceptance.py \
             tests/storage/test_storage_catalog.py \
             tests/storage/test_stores.py \
@@ -162,6 +164,7 @@ jobs:
           python -m pytest -q --durations=25 \
             tests/s3/test_s3_version_reads.py \
             tests/s3/test_s3_bucket_versioning.py \
+            tests/s3/test_s3_versioning_submodes.py \
             tests/s3/test_s3_public_access_block.py \
             tests/s3/test_s3_lifecycle.py \
             tests/s3/test_s3_tagging.py \
@@ -260,6 +263,7 @@ jobs:
             tests/web/test_website_admin.py \
             tests/web/test_auth_rbac.py \
             tests/web/test_auth_single_model.py \
+            tests/web/test_bootstrap_password_gate.py \
             tests/web/test_per_route_permissions.py \
             tests/web/test_s3_governance_ui.py \
             tests/web/test_credentials_ui.py \

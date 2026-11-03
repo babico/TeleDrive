@@ -97,6 +97,7 @@ nav:
       - Encryption: guide/encryption.md
   - Operating:
       - Backup and restore: operate/backup-restore.md
+      - DR checklist: operate/dr-checklist.md
       - Garbage collection: operate/garbage-collection.md
       - Monitoring: operate/monitoring.md
       - Reverse proxy: operate/reverse-proxy.md
@@ -108,6 +109,7 @@ nav:
       - Access model: security/model.md
   - Reference:
       - S3 compatibility: reference/s3-specs.md
+      - S3 parameter ledger: reference/s3-parameters.md
       - Schema steps: reference/schema-steps.md
       - Configuration: reference/configuration.md
       - Module map: reference/module-map.md

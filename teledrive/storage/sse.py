@@ -50,6 +50,19 @@ CUSTOMER_KEY = "x-amz-server-side-encryption-customer-key"
 CUSTOMER_KEY_MD5 = "x-amz-server-side-encryption-customer-key-md5"
 CUSTOMER_HEADERS = (CUSTOMER_ALGORITHM, CUSTOMER_KEY, CUSTOMER_KEY_MD5)
 SOURCE_PREFIX = "x-amz-copy-source-"
+# The old-key family on UpdateObjectEncryption. AWS spells these WITHOUT a
+# second "x-amz-": x-amz-copy-source-server-side-encryption-customer-*. An
+# earlier build concatenated SOURCE_PREFIX + the plain family and parsed a
+# name AWS never sends, silently ignoring the old-key proof a client did
+# send under the correct name.
+SOURCE_CUSTOMER_ALGORITHM = ("x-amz-copy-source-server-side-"
+                             "encryption-customer-algorithm")
+SOURCE_CUSTOMER_KEY = ("x-amz-copy-source-server-side-"
+                       "encryption-customer-key")
+SOURCE_CUSTOMER_KEY_MD5 = ("x-amz-copy-source-server-side-"
+                           "encryption-customer-key-md5")
+SOURCE_CUSTOMER_HEADERS = (SOURCE_CUSTOMER_ALGORITHM, SOURCE_CUSTOMER_KEY,
+                           SOURCE_CUSTOMER_KEY_MD5)
 
 
 class SSECError(ValueError):
@@ -95,12 +108,14 @@ def parse_ssec_headers(headers, signed: set[str],
                        *, prefix: str = "") -> SSECKey | None:
     """Parse one SSE-C header family, or return None when absent.
 
-    ``prefix`` is used for the old-key family on UpdateObjectEncryption
-    (``x-amz-copy-source-``).  A partial family, an unsigned family, a wrong
+    ``prefix`` is used for the old-key family on UpdateObjectEncryption:
+    when set, the AWS-correct source family
+    (``x-amz-copy-source-server-side-encryption-customer-*``) is parsed
+    instead of the plain one.  A partial family, an unsigned family, a wrong
     algorithm or a mismatched key MD5 is a 400.  Key values never appear in
     an error message.
     """
-    names = tuple(prefix + name for name in CUSTOMER_HEADERS)
+    names = (SOURCE_CUSTOMER_HEADERS if prefix else CUSTOMER_HEADERS)
     present = [name for name in names if headers.get(name) is not None]
     if not present:
         return None

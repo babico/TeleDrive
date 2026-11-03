@@ -117,7 +117,7 @@ jobs:
       - name: S3 protocol and compatibility regression tests
         run: |
           python -m pytest -q --durations=25 \
-            tests/s3/test_s3_version_reads.py tests/s3/test_s3_bucket_versioning.py tests/s3/test_s3_public_access_block.py tests/s3/test_s3_lifecycle.py \
+            tests/s3/test_s3_version_reads.py tests/s3/test_s3_bucket_versioning.py tests/s3/test_s3_versioning_submodes.py tests/s3/test_s3_public_access_block.py tests/s3/test_s3_lifecycle.py \
             tests/s3/test_s3_delete_markers.py \
             tests/s3/test_s3_version_listing.py \
             tests/s3/test_s3_version_tagging.py \
@@ -131,6 +131,7 @@ jobs:
             tests/s3/test_s3_admin.py \
             tests/s3/test_s3_multipart.py \
             tests/s3/test_s3_multipart_preconditions.py \
+            tests/s3/test_s3_part_number.py \
             tests/s3/test_s3_recovery.py \
             tests/s3/test_s3_presigned.py \
             tests/s3/test_s3_copy.py \

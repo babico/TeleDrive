@@ -248,7 +248,7 @@ def admin_delete_object(bucket: str, request: Request,
                         403, "Object is under retention and cannot be "
                              "deleted")
         try:
-            if catalog.versioning_state(bucket) == "Enabled":
+            if catalog.versioning_state(bucket) in ("Enabled", "Suspended"):
                 marker = catalog.delete_marker(bucket, key)
                 _webapp()._log(
                     f"delete {bucket}/{key}: delete marker {marker}", "storage")

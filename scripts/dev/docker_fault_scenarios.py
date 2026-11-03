@@ -88,16 +88,53 @@ def _open(request, *, timeout=15):
 
 
 def _login(host: str) -> dict:
-    payload = json.dumps({"username": "admin", "password": "admin"}).encode()
-    request = urllib.request.Request(
-        "http://" + host + ":8080/api/v1/auth/login",
-        data=payload,
-        headers={"Content-Type": "application/json",
-                 "X-TeleDrive-CSRF": "1"},
-    )
-    with _open(request) as response:
-        token = json.load(response)["token"]
-    return {"Authorization": "Bearer " + token}
+    """Session headers, rotating the first-boot admin password if needed.
+
+    First boot seeds admin/admin and the first-boot gate refuses every
+    authenticated operation until that password is rotated (both web nodes
+    share the SQL catalog, so one rotation lifts the gate everywhere and it
+    stays lifted across process restarts). The harness therefore logs in
+    with its rotated password when it already exists, and otherwise logs
+    in as admin/admin and rotates once — tolerating a concurrent harness
+    having rotated first.
+    """
+    rotated_pw = "fault-harness-rotated-7"
+    for password in (rotated_pw, "admin", rotated_pw):
+        payload = json.dumps(
+            {"username": "admin", "password": password}).encode()
+        request = urllib.request.Request(
+            "http://" + host + ":8080/api/v1/auth/login",
+            data=payload,
+            headers={"Content-Type": "application/json",
+                     "X-TeleDrive-CSRF": "1"},
+        )
+        try:
+            with _open(request) as response:
+                token = json.load(response)["token"]
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and password == rotated_pw:
+                continue  # first run: the account still uses admin/admin
+            raise
+        if password == "admin":
+            change = urllib.request.Request(
+                "http://" + host + ":8080/api/v1/auth/password",
+                data=json.dumps({"current_password": "admin",
+                                 "new_password": rotated_pw}).encode(),
+                headers={"Content-Type": "application/json",
+                         "X-TeleDrive-CSRF": "1",
+                         "Authorization": "Bearer " + token},
+            )
+            try:
+                with _open(change) as response:
+                    token = json.load(response)["token"]
+            except urllib.error.HTTPError as exc:
+                if exc.code == 400:
+                    # A concurrent harness rotated first; the account now
+                    # answers to the rotated password.
+                    continue
+                raise
+        return {"Authorization": "Bearer " + token}
+    raise RuntimeError("could not log in as the admin account")
 
 
 def health(host: str, *, authorized=True):

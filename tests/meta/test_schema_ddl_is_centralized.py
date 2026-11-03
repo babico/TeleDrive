@@ -1,6 +1,7 @@
 """DDL is issued by exactly one place.
 
-Invariant #3 of `docs/handoffs/00-baseline.md`: no `create_all` and no
+Invariant #3 of the former refactor baseline (handoff 00): no `create_all`
+and no
 `ALTER TABLE` outside `teledrive/storage/schema.py`. The coordinator exists
 because scattered DDL causes three concrete failures this project has already
 paid for:

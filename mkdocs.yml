@@ -126,9 +126,6 @@ nav:
           - Audit 2026-10-29: project/reviews/audit-2026-10-29.md
       - Plans:
           - Overview: project/plans/index.md
-          - Post-1.0.8 plan: project/plans/post-108.md
-          - S3 full coverage: project/plans/s3-full-coverage.md
-          - Metadata parity: project/plans/metadata-parity.md
           - Local acceptance: project/plans/local-acceptance.md
           - S3 fidelity and recovery (2026-11-02): project/plans/2026-11-02-s3-fidelity.md
       - Releases:

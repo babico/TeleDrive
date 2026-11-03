@@ -6,7 +6,7 @@ whether it is admin-only -- a moved route that loses its `Depends(...)` is an
 unauthenticated route, and only an assertion on the surface catches that.
 
 This file is generated ONCE from the tree before the `web/app.py` split
-(`docs/handoffs/02-split-web-app.md` step 0) and is expected to stay
+(the former handoff 02, step 0) and is expected to stay
 byte-identical through it. When a route is deliberately added, removed or
 re-gated, update this table in the same commit and say so in the message.
 """

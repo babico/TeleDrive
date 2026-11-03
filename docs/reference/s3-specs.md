@@ -202,14 +202,11 @@ The design reason column names the decision that keeps the gap open;
 the enforced-behavior column is the actual contract. The reasons and
 what would unlock each of them:
 
-**Resolution program:** [Metadata-Backed S3 Parity Plan](../project/plans/metadata-parity.md)
-— the stance is that an emulated feature is honest when it has real
-SQL state, enforcement on every violating path and GET observability.
-Phases A–J convert 35 of these 37 partials to Supported with
-metadata-backed work (GC-integrated deletes, versioning states, object
-lock, ACL grants, PAB, notifications, replication surface, CORS
-grammar, website mode, tagging journal); only RequestPayment and
-Accelerate stay by-design (no honest backing exists).
+**Resolution program:** the former metadata-parity plan (phases A–J:
+GC-integrated deletes, versioning states, object lock, ACL grants, PAB,
+notifications, replication surface, CORS grammar, website mode, tagging
+journal) is complete — the inventory stands at 114 supported / 0 partial
+/ 2 unsupported, and the per-operation contract is the table below.
 
 | Design reason | Holds because | To fully support (recommendation) |
 | --- | --- | --- |

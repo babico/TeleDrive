@@ -1,19 +1,34 @@
-"""S3 RestoreObject validation and the real archive-tier restore window.
+"""S3 RestoreObject validation and the archive-tier restore window.
 
 Intelligent-Tiering (``teledrive/s3/tiering.py``) marks an object
 ``ARCHIVE_ACCESS``/``DEEP_ARCHIVE_ACCESS``. That label is a catalog access
-gate: the Telegram chunks never move, but GetObject/HeadObject answer
-``403 InvalidObjectState`` until a restore window is open.
+gate: GetObject/HeadObject answer ``403 InvalidObjectState`` until a
+restore window is open.
 
-* Standard-class object -> RestoreObject is ``403 InvalidObjectState`` (the
-  AWS-conformant answer: the object is already immediately readable).
-* Archived object -> strict RestoreRequest XML is validated, then the handler
-  sets ``storage_objects.restore_until_ns``. A second restore while that
-  window is still open is ``409 RestoreAlreadyInProgress`` (AWS semantics).
-* While the window is open, reads work normally and HEAD reports
-  ``x-amz-restore: ongoing-request="false", expiry-date="..."``.
-* When the window expires the object is gated again; no background job is
-  required for the gate to close.
+Since handoff 08 there are two honest paths, chosen by whether a
+physically verified cold archive exists for the version
+(``teledrive.storage.cold_store``):
+
+* **Archived copy verified** (``storage_archive_versions`` row in state
+  ``ARCHIVED``): RestoreObject queues a REAL retrieval. A worker copies
+  the cold bytes into a bounded staging cache, verifies the whole-object
+  SHA-256, and only then opens ``storage_objects.restore_until_ns`` in
+  the same transaction. While the work is pending, HEAD/GET answer
+  ``403 InvalidObjectState`` with ``x-amz-restore:
+  ongoing-request="true"``; after verification, reads are served from
+  the staged copy and report ``ongoing-request="false"`` with the
+  expiry date. Expiry clears the staged copy, never the archive data.
+* **No archive row** (label only, or the worker has not run yet): the
+  hot Telegram copy is authoritative, so the restore is today's window
+  gate - 202 on acceptance, reads re-open immediately.
+
+* Standard-class object -> RestoreObject is ``403 InvalidObjectState``
+  on both paths (AWS semantics: already immediately readable).
+* A second restore while work is pending or a window is open is ``409
+  RestoreAlreadyInProgress``.
+* Expedited/Standard/Bulk tiers are recorded but do NOT change
+  scheduling (restores run first-in-first-out). No AWS retrieval-speed
+  or pricing SLA is implied.
 """
 from __future__ import annotations
 
@@ -126,3 +141,13 @@ def restore_header(item, *, now_ns: int) -> str | None:
     expiry = formatdate(
         int(int(item.restore_until_ns) / 1_000_000_000), usegmt=True)
     return f'ongoing-request="false", expiry-date="{expiry}"'
+
+
+def ongoing_restore_header() -> str:
+    """The ``x-amz-restore`` value while a real retrieval is in flight.
+
+    AWS reports ``ongoing-request="true"`` on the 403 InvalidObjectState
+    answers for an archived object whose restore has been accepted but
+    has not completed verification yet.
+    """
+    return 'ongoing-request="true"'

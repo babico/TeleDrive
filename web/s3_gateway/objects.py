@@ -34,8 +34,8 @@ from teledrive.s3.object_metadata import (
 )
 from teledrive.s3.restore import (
     MAX_RESTORE_XML_BYTES, RestoreError, is_applicable as _restore_is_applicable,
-    is_restored as _restore_is_restored, parse_restore_request,
-    restore_header as _restore_header,
+    is_restored as _restore_is_restored, ongoing_restore_header,
+    parse_restore_request, restore_header as _restore_header,
 )
 from teledrive.s3.select import (
     MAX_REQUEST_XML_BYTES as MAX_SELECT_XML_BYTES,
@@ -910,10 +910,48 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
             catalog.manifests.resolve_content_id(item.id))
     read_now_ns = time.time_ns()
     read_state = catalog.object_read_state(item.id, now_ns=read_now_ns)
+    # Handoff 08: an archived-class object may carry a physical archive
+    # state machine row. It decides whether a 403 is a real in-flight
+    # cold retrieval (ongoing-request="true") and whether reads are
+    # served from the verified staged copy.
+    archive_row = None
+    if read_state["storage_class"] in ("ARCHIVE_ACCESS",
+                                       "DEEP_ARCHIVE_ACCESS"):
+        try:
+            from teledrive.storage.cold_store import archive_row as _row
+            archive_row = _row(db, item.id)
+        except Exception:
+            # The state-machine probe must never break the read; without
+            # it the object keeps the plain window-gate semantics.
+            _module_logger.warning(
+                "archive state probe failed for %s", item.id, exc_info=True)
+            archive_row = None
     if read_state["archived"]:
-        # AWS behaviour: the bytes may exist, but this storage class is not
-        # immediately readable. The Telegram chunks are untouched; the gate
-        # lives in our catalog and opens only via RestoreObject.
+        if archive_row is not None:
+            if archive_row["state"] == "RESTORING":
+                # A real cold retrieval was accepted and has not finished
+                # whole-SHA256 verification yet.
+                response = _error(
+                    "InvalidObjectState",
+                    "The operation is not valid for the object's storage "
+                    "class; the object is archived and a restore is in "
+                    "progress",
+                    403,
+                )
+                response.headers["x-amz-restore"] = ongoing_restore_header()
+                return response
+            if archive_row["state"] == "RESTORED_TEMP":
+                # The window closed: settle the row and clear the staged
+                # copy (never the archive data).
+                try:
+                    from teledrive.storage.cold_store import (
+                        settle_expired_restore,
+                    )
+                    settle_expired_restore(db, item.id, now_ns=read_now_ns)
+                except Exception:
+                    _module_logger.warning(
+                        "expired restore settlement failed for %s",
+                        item.id, exc_info=True)
         return _error(
             "InvalidObjectState",
             "The operation is not valid for the object's storage class; "
@@ -1007,21 +1045,37 @@ async def _handle_object_read(ctx: _S3RequestContext) -> Response:
             # The validator is stale: ignore Range and serve the full 200.
             range_header = None
         start, end, partial = _range(range_header, item.size)
-    transport = storage_transport(db)
-    scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
-    _secure_mkdir(scratch)
-    engine = TelegramObjectStorage(
-        catalog.manifests, transport,
-        chunk_size=_chunk_size(), scratch_directory=scratch,
-    )
+    # A verified staged restore copy serves the body; the hot Telegram
+    # copy (or any fallback) keeps serving everything else. The staged
+    # reader verifies every chunk digest and GCM-authenticates before
+    # any plaintext is yielded, exactly like the Telegram read path.
+    staged_reader = None
+    if archive_row is not None and archive_row["state"] == "RESTORED_TEMP":
+        staged_reader = _staged_restore_reader(item.id, archive_row)
+    if staged_reader is not None:
+        async def stream():
+            try:
+                async for piece in staged_reader.iter_bytes(
+                        start=start, end=end, sse_key=sse_key):
+                    yield piece
+            finally:
+                db.close()
+    else:
+        transport = storage_transport(db)
+        scratch = Path(_webapp.STORAGE_SCRATCH_DIR)
+        _secure_mkdir(scratch)
+        engine = TelegramObjectStorage(
+            catalog.manifests, transport,
+            chunk_size=_chunk_size(), scratch_directory=scratch,
+        )
 
-    async def stream():
-        try:
-            async for piece in engine.iter_bytes(
-                    item.id, start=start, end=end, sse_key=sse_key):
-                yield piece
-        finally:
-            db.close()
+        async def stream():
+            try:
+                async for piece in engine.iter_bytes(
+                        item.id, start=start, end=end, sse_key=sse_key):
+                    yield piece
+            finally:
+                db.close()
 
     ctx.retain = True
     # AWS does NOT return x-amz-checksum-* on a 206: the checksum covers the
@@ -1208,17 +1262,71 @@ async def _handle_select_object_content(ctx: _S3RequestContext) -> Response:
         stage.unlink(missing_ok=True)
 
 
+def _staged_restore_reader(object_id: str, archive_row: dict):
+    """A verified staged restore reader, or None to serve the hot copy.
+
+    The staged file was whole-SHA256 verified when the restore completed;
+    if it has since vanished (disk loss, eviction), the still-present hot
+    Telegram copy serves the read with its own per-chunk verification
+    rather than failing an otherwise readable object.
+    """
+    from teledrive.storage.cold_store import (
+        ColdBlobStore, StagedReadEngine, default_cold_root,
+    )
+    try:
+        cold = ColdBlobStore(default_cold_root())
+        if not cold.staged_exists(object_id):
+            return None
+        return StagedReadEngine(cold, archive_row)
+    except Exception:
+        _module_logger.warning(
+            "staged restore copy unavailable for %s; serving the hot copy",
+            object_id, exc_info=True)
+        return None
+
+
 async def _perform_restore(ctx: _S3RequestContext, item,
                            restore_request) -> Response:
-    """Open a bounded restore window on an archived catalog object.
+    """Accept a restore request: queue real cold retrieval when a
+    verified archive exists, otherwise open the bounded window on the
+    hot copy (today's gate semantics).
 
-    The Telegram chunks never moved; this only flips the access gate. The
-    window is a stored nanosecond deadline, so expiry needs no scheduler.
+    The Expedited/Standard/Bulk tier is recorded but does not change
+    scheduling; no AWS retrieval-speed or pricing SLA is implied.
     """
     now_ns = time.time_ns()
+    outcome = "legacy"
+    try:
+        from teledrive.storage.cold_store import (
+            ArchiveStore, ColdBlobStore, default_cold_root,
+        )
+        store = ArchiveStore(
+            ctx.catalog, ColdBlobStore(default_cold_root()))
+        outcome = store.request_restore(
+            item.id, days=restore_request.days,
+            tier=restore_request.tier, now_ns=now_ns)
+    except Exception:
+        # Queueing must never break the logical restore; without the
+        # archive queue the object keeps the hot-copy window semantics.
+        _module_logger.warning(
+            "archive restore queue failed for %s; falling back to the "
+            "hot-copy window", item.id, exc_info=True)
+        outcome = "legacy"
+    if outcome == "conflict":
+        # AWS RestoreObject answers 409 RestoreAlreadyInProgress while
+        # a restore is pending or a window is still active.
+        return _error(
+            "RestoreAlreadyInProgress",
+            "The object restore is already in progress",
+            409,
+        )
+    if outcome == "queued":
+        # 202 on acceptance; x-amz-restore: ongoing-request="true" while
+        # the worker copies and verifies the cold bytes.
+        return Response(status_code=202)
+    # Legacy path: no verified archive row, so the hot copy is
+    # authoritative and the window opens immediately.
     if _restore_is_restored(item, now_ns=now_ns):
-        # AWS RestoreObject answers 409 RestoreAlreadyInProgress while a
-        # restore window is still active for the same object.
         return _error(
             "RestoreAlreadyInProgress",
             "The object restore is already in progress",
@@ -1241,8 +1349,9 @@ async def _handle_restore_object(ctx: _S3RequestContext) -> Response:
 
     A STANDARD-class object is already immediately readable, so AWS-conformant
     behaviour is ``403 InvalidObjectState``. An ARCHIVE_ACCESS/
-    DEEP_ARCHIVE_ACCESS object gets a real restore window (202) and reads work
-    again until that window expires.
+    DEEP_ARCHIVE_ACCESS object either gets a real cold retrieval queued
+    (202, ``ongoing-request="true"`` until verified) when a verified
+    archive exists, or today's immediate window on the hot copy.
     """
     request = ctx.request
     bucket = ctx.bucket

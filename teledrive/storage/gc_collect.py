@@ -15,6 +15,9 @@ backlog into reclaimable storage when the owner enables GC:
   deletes the Telegram messages through the transport, journals the
   result and only then drops chunk rows and hides the object from
   version history. Partial failures leave the object retryable.
+  A version with an archive state-machine row additionally requires an
+  independently verified cold copy (handoff 08 phase C): a missing cold
+  backend or a corrupt archive blocks deletion.
 
 The state toggle (storage_gc_state) is a loud, auditable owner
 decision; nothing here ever runs automatically.
@@ -491,6 +494,21 @@ class RetainedMediaGC:
                 lock_state[1]
                 or (lock_state[0] is not None
                     and int(lock_state[0]) > time.time_ns())):
+            return "skipped"
+        # Handoff 08, Phase C: an archived version may only be physically
+        # collected after an INDEPENDENTLY VERIFIED cold copy. A missing
+        # cold backend, an in-flight archive/restore or a corrupt archive
+        # blocks deletion; the candidate stays retryable.
+        from .cold_store import archive_deletion_permitted
+        try:
+            if not archive_deletion_permitted(self.db, object_id):
+                return "skipped"
+        except Exception:
+            # The fence cannot be proven: silently proceeding could delete
+            # media whose only independent copy is unverifiable.
+            _logger.exception(
+                "archive deletion fence failed for object %s; skipping",
+                object_id)
             return "skipped"
         try:
             intents = _send_intents_table()

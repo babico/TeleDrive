@@ -294,8 +294,13 @@ def test_lifecycle_expiration_creates_markers_and_enqueues(admin):
             b"<LifecycleConfiguration><Rule><ID>r1</ID>"
             b"<Status>Enabled</Status><Filter><Prefix>temp/</Prefix></Filter>"
             b"<Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>")
+        # Handoff 08 canonical rule shape (the legacy flat shape stored by
+        # older releases is still accepted by _normalize_rule/apply_due).
         assert rules == [{"id": "r1", "status": "Enabled", "prefix": "temp/",
-                          "days": 7, "action": "expire", "expired_marker": False}]
+                          "abort_days": None,
+                          "expiration": {"days": 7, "expired_marker": False},
+                          "transitions": [], "noncurrent_transitions": [],
+                          "noncurrent_expiration": None}]
         store = BucketLifecycleStore(cat)
         store.replace("lcx", rules)
 

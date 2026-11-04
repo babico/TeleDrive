@@ -24,7 +24,7 @@ Honesty caveat — read this before calling it "Glacier"
 TeleDrive stores every object body as encrypted Telegram chunks. Changing
 ``storage_objects.storage_class`` to ``ARCHIVE_ACCESS`` or
 ``DEEP_ARCHIVE_ACCESS`` does **not** move, copy, compress or delete a single
-Telegram byte, and there is no separate cold-storage backend. It is an
+Telegram byte, and there is no separate Telegram-side medium. It is an
 **access gate in our own SQL catalog** with the same observable read
 behaviour as an AWS archived object:
 
@@ -32,10 +32,20 @@ behaviour as an AWS archived object:
 * RestoreObject opens a bounded window (``restore_until_ns``) during which
   reads work normally; expiry closes the gate again.
 
-The chunks stay on Telegram for the whole lifecycle. This is deliberately
-NOT AWS Glacier and does not claim Glacier durability, retrieval pricing or
-physical media management. It makes the S3 *API* honest: a tier label the
-client can observe has a real consequence.
+Since handoff 08 the label ALSO queues a real, independently verified cold
+copy (``teledrive.storage.cold_store``): every transition to an archived
+class enqueues the version into the ``storage_archive_versions`` state
+machine, and a worker pass streams the stored (Telegram-held) bytes into
+the cold store, seals a manifest and only then marks the row ``ARCHIVED``.
+The Telegram chunks still never move or disappear - the archive is an
+ADDITIONAL verified copy, and reducing the hot footprint stays behind the
+owner's physical-GC gate. An object with no archive row (a label applied
+before handoff 08, or before the worker ran) keeps the plain window-gate
+restore semantics: the hot copy is authoritative.
+
+This is deliberately NOT AWS Glacier and does not claim Glacier durability,
+retrieval pricing or physical media management. It makes the S3 *API*
+honest: a tier label the client can observe has a real consequence.
 
 Scheduler policy
 ----------------
@@ -56,6 +66,7 @@ repeated passes are idempotent.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import weakref
@@ -423,22 +434,73 @@ class TieringStore:
         return conditions
 
     def _transition(self, conditions: list, transition, target: str,
-                    *, limit: int, clear_restore: bool = False) -> int:
+                    *, limit: int, clear_restore: bool = False) -> list[str]:
+        """Conditionally move objects to ``target``; returns changed ids."""
         if limit <= 0:
-            return 0
+            return []
         identifiers = self.db.connection.execute(
             select(objects.c.id)
             .where(*conditions, transition)
             .order_by(objects.c.id).limit(limit)).scalars().all()
         if not identifiers:
-            return 0
+            return []
         values = {"storage_class": target}
         if clear_restore:
             values["restore_until_ns"] = None
         changed = self.db.connection.execute(
-            update(objects).where(objects.c.id.in_(list(identifiers)))
-            .values(**values))
-        return int(changed.rowcount)
+            update(objects).where(
+                objects.c.id.in_(list(identifiers)),
+                # CAS: only move rows still in the state we selected, so
+                # a concurrent pass cannot double-apply or resurrect.
+                objects.c.storage_class.in_(self._source_classes(target)),
+            ).values(**values))
+        if changed.rowcount != len(identifiers):
+            # Some rows moved concurrently; re-read what actually landed.
+            landed = self.db.connection.execute(
+                select(objects.c.id).where(
+                    objects.c.id.in_(list(identifiers)),
+                    objects.c.storage_class == target)).scalars().all()
+            return list(landed)
+        return list(identifiers)
+
+    @staticmethod
+    def _source_classes(target: str) -> tuple[str, ...]:
+        if target == "DEEP_ARCHIVE_ACCESS":
+            return ("STANDARD", "ARCHIVE_ACCESS")
+        if target == "ARCHIVE_ACCESS":
+            return ("STANDARD",)
+        if target == "STANDARD":
+            return tuple(_ARCHIVED_CLASSES)
+        return (target,)
+
+    def _after_transition(self, target: str, identifiers: list[str]) -> None:
+        """Physical side effects of a label change (handoff 08).
+
+        A transition INTO an archived class queues the real cold copy; a
+        reset back to STANDARD settles any in-flight/staged restore so
+        the gate and the staging cache stay consistent. Neither path ever
+        deletes or moves Telegram bytes.
+        """
+        if not identifiers:
+            return
+        try:
+            from teledrive.storage.cold_store import (
+                ArchiveStore, ColdBlobStore, default_cold_root,
+            )
+            store = ArchiveStore(
+                self.catalog, ColdBlobStore(default_cold_root()))
+            if target in _ARCHIVED_CLASSES:
+                store.enqueue_archive(identifiers)
+            else:
+                store.reset_restore(identifiers)
+        except Exception:
+            # Queueing must never break the label transition itself; an
+            # unqueued version simply keeps the window-gate semantics
+            # until the next pass enqueues it.
+            self.db.connection.rollback()
+            logging.getLogger(__name__).warning(
+                "physical archive enqueue failed after tiering "
+                "transition to %s", target, exc_info=True)
 
     def apply_due(self, *, now_ns: int, limit: int = 1000) -> int:
         """Apply enabled tiering configurations; returns changed objects."""
@@ -474,23 +536,29 @@ class TieringStore:
                 remaining = limit - changed
                 # Deepest transition first: an object idle past the deep
                 # threshold goes straight to DEEP_ARCHIVE_ACCESS.
-                changed += self._transition(
+                deep_ids = self._transition(
                     conditions,
                     objects.c.storage_class.in_(("STANDARD", "ARCHIVE_ACCESS"))
                     & (idle_ns >= deep_ns),
                     "DEEP_ARCHIVE_ACCESS", limit=remaining)
-                changed += self._transition(
+                self._after_transition("DEEP_ARCHIVE_ACCESS", deep_ids)
+                changed += len(deep_ids)
+                archive_ids = self._transition(
                     conditions,
                     (objects.c.storage_class == "STANDARD")
                     & (idle_ns >= archive_ns) & (idle_ns < deep_ns),
                     "ARCHIVE_ACCESS", limit=limit - changed)
+                self._after_transition("ARCHIVE_ACCESS", archive_ids)
+                changed += len(archive_ids)
                 # Any access (idle below the archive threshold) resets to
                 # STANDARD and clears the restore window.
-                changed += self._transition(
+                reset_ids = self._transition(
                     conditions,
                     objects.c.storage_class.in_(tuple(_ARCHIVED_CLASSES))
                     & (idle_ns < archive_ns),
                     "STANDARD", limit=limit - changed, clear_restore=True)
+                self._after_transition("STANDARD", reset_ids)
+                changed += len(reset_ids)
             self.db.commit()
             return changed
         except BaseException:

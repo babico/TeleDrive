@@ -128,17 +128,33 @@ async def lifecycle_scheduler_loop() -> None:
 async def tiering_scheduler_loop() -> None:
     """Apply enabled Intelligent-Tiering configurations hourly, bounded.
 
-    The pass only updates this catalog's access gate; Telegram bytes are
-    never moved or deleted. Disabled configurations are ignored.
+    The pass updates this catalog's access gate and queues the physical
+    cold copy for every transition into an archived class; Telegram
+    bytes are never moved or deleted by it. This loop also drains the
+    handoff-08 archive/restore worker queues (tiering, lifecycle
+    transitions and RestoreObject all enqueue into them), so a queued
+    archive or restore progresses without any other process.
     """
     while True:
         app = _app()
         connection = None
         try:
             from teledrive.s3.tiering import TieringStore
+            from teledrive.storage.cold_store import (
+                ArchiveStore, ColdBlobStore, default_cold_root,
+            )
             connection = app.db_connect()
             cat = BucketCatalog(ManifestStore(connection))
             TieringStore(cat).apply_due(now_ns=time.time_ns(), limit=1000)
+            # Bounded physical archive/restore passes. The staging cache
+            # purge closes expired restore windows and clears their
+            # staged copies (never the archive data).
+            archive = ArchiveStore(cat, ColdBlobStore(default_cold_root()))
+            await archive.run_archive_pass(
+                app.storage_transport(connection),
+                scratch_directory=Path(app.STORAGE_SCRATCH_DIR), limit=5)
+            archive.run_restore_pass(limit=10)
+            archive.purge_expired(now_ns=time.time_ns())
         except asyncio.CancelledError:
             raise
         except Exception as exc:

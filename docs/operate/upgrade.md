@@ -62,7 +62,7 @@ automatically on startup; there is no separate migrate command.
 ## Schema migrations
 
 `SCHEMA_VERSION` is the length of the append-only step list in
-`teledrive/storage/schema.py`, currently **27**. Migrations run
+`teledrive/storage/schema.py`, currently **30**. Migrations run
 automatically on startup — there is no separate migrate command and no
 step you must run by hand. The per-step reference, including what each
 step creates and what a rollback would leave behind, is

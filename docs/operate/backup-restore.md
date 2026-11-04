@@ -131,7 +131,7 @@ For that, the owner-executed read-only rehearsal of one original object has its 
 ## Restore procedure
 
 1. Declare the incident and stop the TeleDrive container. Do not start a second writer against the same SQL database or Telegram session.
-2. Provision a clean host or database server with the same TeleDrive release. The release's schema coordinator will apply pending migrations up to schema version 27.
+2. Provision a clean host or database server with the same TeleDrive release. The release's schema coordinator will apply pending migrations up to schema version 30.
 3. Restore the SQL archive into a new, empty database. Do not overwrite a production database as a test.
 4. Restore `config/config.yaml`, the environment file, the S3 master key and every Telegram session file. Set owner-only permissions and verify the master key is a valid 32-byte Fernet value.
 5. Keep upload jobs from starting until validation is complete. Set `TELEDRIVE_JOB_AUTO_RUN=0` or `jobs.auto_run: false` for the first boot.
@@ -160,7 +160,7 @@ Restoring the database file without the master key leaves S3 credentials and the
 
 | Check | Command or endpoint | Pass condition |
 | --- | --- | --- |
-| Schema version | `SELECT MAX(version) FROM schema_migrations;` | `27` for this release |
+| Schema version | `SELECT MAX(version) FROM schema_migrations;` | `30` for this release |
 | Container liveness | `docker compose ps` and `GET /api/health` | Healthy; `{"ok": true}` |
 | Both listeners | `python -m web.container_healthcheck` | Exit status 0; probes `/api/health` and S3 `/__health` |
 | Telegram session | `GET /api/v1/admin/storage/telegram-sessions` | The expected account is present and `authorized` is true |

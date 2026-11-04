@@ -94,7 +94,7 @@ regime, or a database host separate from the container.
 
 All DDL goes through one coordinator in `teledrive/storage/schema.py`:
 
-- `SCHEMA_VERSION` is the number of append-only steps, currently **27**.
+- `SCHEMA_VERSION` is the number of append-only steps, currently **30**.
 - The service records the highest applied version in `schema_migrations`. A
   warm database costs one `SELECT` per process; an up-to-date process performs
   no DDL.
@@ -104,7 +104,7 @@ All DDL goes through one coordinator in `teledrive/storage/schema.py`:
 - Steps are append-only. Adding a step bumps the version; existing steps are
   never edited or removed. An interrupted migration is safe to re-run because
   every step is idempotent.
-- The full catalogue of all 27 steps, their families, locking and undo
+- The full catalogue of all 30 steps, their families, locking and undo
   residue, lives in the [Schema steps](../reference/schema-steps.md)
   reference.
 

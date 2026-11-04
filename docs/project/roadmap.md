@@ -23,7 +23,8 @@ Evidence boundaries are in [Project status](status.md), CI mechanics in
       website hosting, CORS, deferred tags, reports, tiering, SSE-C.
 - [x] Opt-in envelope encryption (SSE-S3 shape) with its capability limits
       reported, not hidden.
-- [x] One serialized schema coordinator (27 steps, real cross-process lock);
+- [x] One serialized schema coordinator (27 steps at the time; schema 30 in
+      v1.0.10, real cross-process lock);
       the bucket-delete orphan-table, MySQL portability and hot-index fixes.
 - [x] Module split: `web/app.py` 6027 → 944 lines (settings runtime and
       scheduler loops extracted to their own modules), `web/s3.py` 5106 →

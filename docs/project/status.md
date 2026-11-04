@@ -13,7 +13,7 @@ approval to operate on production data or to delete Telegram messages.
 | Previous release | `v1.0.8` at `7d2aa773d3839a65899815dd9f3fa2ed2e534324` |
 | Previous release | `v1.0.7` at `747747652cd1ca36878453d49daf627d8c0a60ad` |
 | Package version | `1.0.9` in `pyproject.toml` |
-| Schema version | 27 recorded, append-only steps in `teledrive/storage/schema.py` |
+| Schema version | 30 recorded, append-only steps in `teledrive/storage/schema.py` |
 | S3 inventory | **114 supported / 0 partial / 2 unsupported** of 116 operations |
 
 The tag message and [release notes](releases/v1.0.9.md) state that the six

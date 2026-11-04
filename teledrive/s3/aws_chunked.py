@@ -32,9 +32,19 @@ from .sigv4 import (
     STREAMING_MODES, SigV4Error,
 )
 
+# The chunk-signature chain is seeded by the request's own Authorization
+# signature, so it must be derived from the SAME credential scope that
+# verified the request. The general plane signs with the ``s3`` service;
+# directory-bucket zonal requests sign with ``s3express`` (session
+# credentials). The scope service is parsed out of the already-verified
+# Authorization header and pinned to exactly these two values — anything
+# else can never have passed request-level verification in
+# ``sigv4._signing_service``, so it fails closed here too.
+_AUTH_SERVICES = ("s3", "s3express")
 _AUTH = re.compile(
     r"AWS4-HMAC-SHA256 Credential=([^\s,/]{1,64})/(\d{8})/([a-z0-9-]{1,32})"
-    r"/s3/aws4_request,\s*SignedHeaders=[a-z0-9;\-]+,\s*Signature=([0-9a-f]{64})"
+    rf"/({'|'.join(_AUTH_SERVICES)})/aws4_request,"
+    r"\s*SignedHeaders=[a-z0-9;\-]+,\s*Signature=([0-9a-f]{64})"
 )
 _CHUNK_HEADER = re.compile(
     rb"([0-9a-fA-F]{1,16})(;chunk-signature=([0-9a-f]{64}))?\r\n")
@@ -47,10 +57,19 @@ def _hmac_sha256(key: bytes, data: str) -> bytes:
     return _hmac.new(key, data.encode("utf-8"), hashlib.sha256).digest()
 
 
-def _signing_key(secret: str, date: str, region: str) -> bytes:
+def _signing_key(secret: str, date: str, region: str,
+                 service: str = "s3") -> bytes:
+    """The SigV4 chain key for one credential scope.
+
+    ``service`` is the scope's service name — ``s3`` for the general
+    plane, ``s3express`` for directory-bucket zonal requests (the same
+    scope the request-level signature in ``sigv4.py`` was verified
+    against; the chunk chain must derive from the identical key or every
+    chunk signature fails closed).
+    """
     key = _hmac_sha256(("AWS4" + secret).encode("utf-8"), date)
     key = _hmac_sha256(key, region)
-    key = _hmac_sha256(key, "s3")
+    key = _hmac_sha256(key, service)
     return _hmac_sha256(key, "aws4_request")
 
 
@@ -83,15 +102,15 @@ class AwsChunkedDecoder:
         if match is None:
             raise SigV4Error("AccessDenied",
                              "Streaming signed payload requires Authorization")
-        access_key, date, region, seed = match.groups()
+        access_key, date, region, service, seed = match.groups()
         secret = self.lookup_secret(access_key, self.permission)
         if secret is None:
             raise SigV4Error("AccessDenied",
                              "Streaming signer is not authorized")
-        self._chain_key = _signing_key(secret, date, region)
+        self._chain_key = _signing_key(secret, date, region, service)
         self._previous_signature = seed
         self._amz_date = self.request.headers.get("x-amz-date", "")
-        self._scope = f"{date}/{region}/s3/aws4_request"
+        self._scope = f"{date}/{region}/{service}/aws4_request"
 
     def _verify_chunk_signature(self, chunk_signature: str,
                                 chunk_sha_hex: str) -> None:

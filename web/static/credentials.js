@@ -96,7 +96,8 @@
       perms: [
         's3:GetBucketObjectLockConfiguration', 's3:PutBucketObjectLockConfiguration',
         's3:GetObjectRetention', 's3:PutObjectRetention',
-        's3:GetObjectLegalHold', 's3:PutObjectLegalHold'
+        's3:GetObjectLegalHold', 's3:PutObjectLegalHold',
+        's3:BypassGovernanceRetention'
       ]
     },
     {
@@ -223,6 +224,7 @@
     's3:PutBucketObjectLockConfiguration': 'Object Lock cannot be disabled once enabled, and COMPLIANCE retention can never be shortened. This is irreversible.',
     's3:PutObjectRetention': 'Pins a version as immutable until the retain-until date. COMPLIANCE retention cannot be shortened or removed.',
     's3:PutObjectLegalHold': 'Blocks deletion of the version while the hold is ON.',
+    's3:BypassGovernanceRetention': 'Lets this credential shorten or clear an active GOVERNANCE retention window. That is the early-release switch for WORM protection; COMPLIANCE retention still cannot be shortened by anyone.',
     's3:PutBucketAcl': 'Changes who can read or write the bucket. ACL grants intersect with scopes, so a wrong grant silently hides data.',
     's3:PutObjectAcl': 'Changes who can reach this object. The grant applies to every version of the object.',
     's3:PutObjectEncryption': 'Binds the object to a client-supplied SSE-C key. Lose that key and the payload is unreadable: TeleDrive cannot recover it.',

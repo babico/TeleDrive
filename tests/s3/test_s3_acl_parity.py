@@ -102,7 +102,7 @@ def test_unknown_canned_acl_is_a_malformed_request_not_501(service, value):
 @pytest.mark.parametrize(
     "value",
     ["public-read", "public-read-write", "authenticated-read",
-     "aws-exec-read", "log-delivery-write", "bucket-owner-read"])
+     "aws-exec-read", "log-delivery-write"])
 def test_unhonored_canned_acls_stay_private_only_501(service, value):
     """Valid AWS canned ACLs this private gateway cannot honor answer
     501, never a silent private fallback nor a public grant."""
@@ -113,9 +113,10 @@ def test_unhonored_canned_acls_stay_private_only_501(service, value):
     assert b"NotImplemented" in refused.content
 
 
-def test_private_and_bucket_owner_full_control_are_honored(service):
+def test_private_bucket_owner_read_and_full_control_are_honored(service):
     assert signed(service, "PUT", "/canned-bucket").status_code == 200
-    for value in ("private", "bucket-owner-full-control"):
+    for value in ("private", "bucket-owner-read",
+                  "bucket-owner-full-control"):
         ok = signed(service, "PUT", f"/canned-bucket/{value}.bin", b"x",
                     extra_headers={"x-amz-acl": value})
         assert ok.status_code == 200, ok.text
@@ -269,6 +270,78 @@ def test_canned_acl_replaces_the_body_on_acl_put(service, writer):
     neither = signed(service, "PUT", "/hdr-bucket/canned.bin?acl")
     assert neither.status_code == 400
     assert b"MalformedXML" in neither.content
+
+
+def test_bucket_owner_read_canned_acl_grants_the_bucket_owner_read(
+        service, writer):
+    """AWS canned table: ``bucket-owner-read`` gives the object owner
+    FULL_CONTROL and the bucket owner READ. The grant is recorded
+    through the same store path as bucket-owner-full-control, with the
+    READ permission — in this single-owner deployment the caller IS the
+    bucket owner, so the READ row lands next to the implicit owner
+    FULL_CONTROL row and is satisfied."""
+    bucket = "canned-bucket"
+    assert signed(service, "PUT", f"/{bucket}").status_code == 200
+    _object_writer(service, bucket)
+    assert signed(service, "PUT", f"/{bucket}/owner-read.bin",
+                  b"payload").status_code == 200
+    reply = signed(service, "PUT", f"/{bucket}/owner-read.bin?acl",
+                   extra_headers={"x-amz-acl": "bucket-owner-read"})
+    assert reply.status_code == 200, reply.text
+    read = signed(service, "GET", f"/{bucket}/owner-read.bin?acl")
+    assert read.status_code == 200
+    main = service[1]
+    assert f"<ID>{main.access_key}</ID>".encode() in read.content
+    assert b"<Permission>READ</Permission>" in read.content
+    # The stored ACL restricts the key (ObjectWriter): a cross-tenant
+    # credential with every scope is denied, the bucket owner with the
+    # recorded READ grant reads.
+    denied = signed(service, "GET", f"/{bucket}/owner-read.bin",
+                    **_as(writer))
+    assert denied.status_code == 403, denied.text
+    assert signed(service, "GET", f"/{bucket}/owner-read.bin"
+                  ).content == b"payload"
+    # On a BUCKET route AWS ignores the object-only canned ACL: the
+    # write succeeds and stores nothing beyond the owner baseline.
+    bucket_reply = signed(service, "PUT", f"/{bucket}?acl",
+                          extra_headers={"x-amz-acl": "bucket-owner-read"})
+    assert bucket_reply.status_code == 200, bucket_reply.text
+    bucket_read = signed(service, "GET", f"/{bucket}?acl")
+    assert bucket_read.content.count(b"<Permission>") == 1
+    assert b"FULL_CONTROL" in bucket_read.content
+
+
+def test_bucket_owner_read_upload_under_preferred_records_read(service):
+    """Upload-time mirror of the BucketOwnerPreferred full-control
+    grant: an x-amz-acl: bucket-owner-read upload records the bucket
+    owner READ grant (next to the store's implicit owner FULL_CONTROL
+    row), and the bucket owner can read the uploaded object."""
+    bucket = "preferred-read"
+    main = service[1]
+    uploader = S3CredentialStore(service[3](), service[4]).create(
+        "read-uploader", ["s3:PutObject"])
+    assert signed(service, "PUT", f"/{bucket}").status_code == 200
+    _object_writer(service, bucket)
+    from tests.s3.test_s3_acl import _policy_xml
+    assert signed(service, "PUT", f"/{bucket}?acl", _policy_xml(
+        main.access_key, [(uploader.access_key, "FULL_CONTROL", "")])
+    ).status_code == 200
+    preferred = (f'<OwnershipControls xmlns="{ACL_XMLNS}"><Rule>'
+                 f"<ObjectOwnership>BucketOwnerPreferred</ObjectOwnership>"
+                 f"</Rule></OwnershipControls>").encode()
+    assert signed(service, "PUT", f"/{bucket}?ownershipControls",
+                  preferred).status_code == 200
+    put = signed(service, "PUT", f"/{bucket}/shared-read", b"payload",
+                 extra_headers={"x-amz-acl": "bucket-owner-read"},
+                 access=uploader.access_key, secret=uploader.secret_key)
+    assert put.status_code == 200, put.text
+    acl = signed(service, "GET", f"/{bucket}/shared-read?acl")
+    assert acl.status_code == 200
+    assert f"<ID>{main.access_key}</ID>".encode() in acl.content
+    assert b"<Permission>READ</Permission>" in acl.content
+    # The bucket owner can read the uploaded object through the grant.
+    assert signed(service, "GET", f"/{bucket}/shared-read"
+                  ).content == b"payload"
 
 
 # ---------------------------------------------------------------------------

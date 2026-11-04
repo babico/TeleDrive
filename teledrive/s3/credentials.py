@@ -72,6 +72,15 @@ PERMISSIONS = frozenset({
     # Object Lock configuration (Phase C of the metadata parity plan).
     "s3:PutBucketObjectLockConfiguration", "s3:PutObjectRetention",
     "s3:PutObjectLegalHold",
+    # Governance bypass (AWS S3 User Guide, "Retention modes"): shortening
+    # or removing an active GOVERNANCE retention requires this DEDICATED
+    # permission in addition to s3:PutObjectRetention, plus the explicit
+    # x-amz-bypass-governance-retention:true header on the retention
+    # write. AWS ties it to the permission, never to a role: it is
+    # granted per principal on purpose, because it is exactly the
+    # "break WORM early" switch. COMPLIANCE retention stays immutable
+    # for every principal, bypass or not.
+    "s3:BypassGovernanceRetention",
     # ACL grants (Phase D): write paths for the intersection model.
     "s3:PutBucketAcl", "s3:PutObjectAcl",
     # Bucket policy engine (Phase L).

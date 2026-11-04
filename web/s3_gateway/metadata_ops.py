@@ -151,16 +151,21 @@ def _acl_grants_from_headers(request: Request, *, bucket_level: bool,
                        "Specify a canned ACL or grant headers, not both")
     grants: list[tuple[str, str]] = []
     if canned is not None:
-        # Only private / bucket-owner-full-control reach here. ``private``
-        # is the owner-only baseline (the store adds the implicit owner
-        # FULL_CONTROL row); on an object, the canned
-        # bucket-owner-full-control hands the bucket owner FULL_CONTROL,
-        # mirroring the upload-time Phase L5 grant. On a bucket AWS
+        # Only private / bucket-owner-read / bucket-owner-full-control
+        # reach here. ``private`` is the owner-only baseline (the store
+        # adds the implicit owner FULL_CONTROL row); on an object, the
+        # canned bucket-owner-* values hand the bucket owner the
+        # permission AWS's canned table names — FULL_CONTROL for
+        # bucket-owner-full-control (mirroring the upload-time Phase L5
+        # grant) and READ for bucket-owner-read (AWS: "Object owner gets
+        # FULL_CONTROL. Bucket owner gets READ access"). On a bucket AWS
         # ignores the object-only canned ACLs, which is the same as
         # private here.
-        if canned == "bucket-owner-full-control" and not bucket_level \
-                and bucket_owner:
-            grants.append((bucket_owner, "FULL_CONTROL"))
+        if not bucket_level and bucket_owner:
+            if canned == "bucket-owner-full-control":
+                grants.append((bucket_owner, "FULL_CONTROL"))
+            elif canned == "bucket-owner-read":
+                grants.append((bucket_owner, "READ"))
         return grants
     allowed = BUCKET_ACL_PERMISSIONS if bucket_level \
         else OBJECT_ACL_PERMISSIONS
@@ -417,6 +422,42 @@ async def _handle_object_lock_controls(ctx: _S3RequestContext) -> Response:
         return _xml_ok(root)
 
     if request.method == "PUT":
+        # Governance bypass (AWS S3 User Guide, "Retention modes"):
+        # shortening or removing an active GOVERNANCE retention window
+        # requires the DEDICATED s3:BypassGovernanceRetention permission
+        # AND the explicit x-amz-bypass-governance-retention:true header
+        # on the retention write. The header is admitted on this route
+        # only (the request guard rejects it everywhere else); here it
+        # must be signed, must be exactly true/false (the boolean wire
+        # values botocore serializes) and true demands the scope — a
+        # principal without it is refused 403 before any retention state
+        # is read or changed. COMPLIANCE retention ignores the bypass
+        # entirely: catalog_lock keeps it extend-only and mode-immutable
+        # for every principal, which is the AWS WORM contract.
+        governance_bypass = False
+        bypass_header = request.headers.get(
+            "x-amz-bypass-governance-retention")
+        if bypass_header is not None and selector == "retention":
+            if ("x-amz-bypass-governance-retention"
+                    not in signed_header_names(request)):
+                return _error(
+                    "AccessDenied",
+                    "x-amz-bypass-governance-retention must be signed", 403)
+            if bypass_header == "true":
+                if ctx.store.resolve(
+                        ctx.owner,
+                        "s3:BypassGovernanceRetention") is None:
+                    return _error(
+                        "AccessDenied",
+                        "Shortening or removing GOVERNANCE retention "
+                        "requires the s3:BypassGovernanceRetention "
+                        "permission", 403)
+                governance_bypass = True
+            elif bypass_header != "false":
+                return _error(
+                    "InvalidArgument",
+                    "x-amz-bypass-governance-retention must be true or "
+                    "false", 400)
         payload = bytearray()
         async for block in request.stream():
             payload.extend(block)
@@ -479,12 +520,14 @@ async def _handle_object_lock_controls(ctx: _S3RequestContext) -> Response:
                         raise ObjectLockError("MalformedXML",
                                               "Unexpected retention field")
                 if mode is None:
-                    catalog.clear_retention(item.id)
+                    catalog.clear_retention(item.id,
+                                            governance_bypass=governance_bypass)
                 else:
                     if until is None or until <= time.time_ns():
                         raise ObjectLockError("InvalidArgument",
                                               "Retention must end in the future")
-                    catalog.set_retention(item.id, mode=mode, until_ns=until)
+                    catalog.set_retention(item.id, mode=mode, until_ns=until,
+                                          governance_bypass=governance_bypass)
             else:
                 if root.tag not in {"LegalHold", f"{{{NAMESPACE}}}LegalHold"}:
                     raise ObjectLockError("MalformedXML",

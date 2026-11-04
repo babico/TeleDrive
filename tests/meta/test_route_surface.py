@@ -58,6 +58,7 @@ EXPECTED_SURFACE = {
     ("GET", "/api/v1/admin/s3-governance/{bucket}/public-access-block", 'get:/api/v1/admin/s3-governance/{bucket}/public-access-block', False),
     ("GET", "/api/v1/admin/s3-governance/{bucket}/replication", 'get:/api/v1/admin/s3-governance/{bucket}/replication', False),
     ("GET", "/api/v1/admin/s3-governance/{bucket}/reports", 'get:/api/v1/admin/s3-governance/{bucket}/reports', False),
+    ("POST", "/api/v1/admin/s3-governance/{bucket}/rearchive", 'post:/api/v1/admin/s3-governance/{bucket}/rearchive', False),
     ("GET", "/api/v1/admin/s3-governance/{bucket}/tiering", 'get:/api/v1/admin/s3-governance/{bucket}/tiering', False),
     ("GET", "/api/v1/admin/s3-governance/{bucket}/website", 'get:/api/v1/admin/s3-governance/{bucket}/website', False),
     ("GET", "/api/v1/admin/s3-multipart/stale", 'get:/api/v1/admin/s3-multipart/stale', False),

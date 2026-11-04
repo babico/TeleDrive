@@ -3,6 +3,29 @@
 Supports signed headers and short-lived query presigns. A presigned PUT must
 bind a SHA-256 checksum in its signed headers; anonymous mutable payload
 presigns, AWS chunked streaming and SigV2 are deliberately refused.
+
+Canonical query string
+----------------------
+The AWS SigV4 specification describes the client's job: URI-encode each
+query parameter name and value (unreserved set ``-_.~``), then sort. What
+a verifier must reconstruct from the wire is subtler, because AWS's own
+SDK signs a request URL that already carries its query with the RAW
+as-sent tokens (botocore ``_canonical_query_string_url``: split on ``&``
+and the first ``=``, sort, join verbatim — no re-encoding), while other
+clients decode the wire parameters and re-encode them per the spec. A
+client that sends an unencoded ``/`` in ``response-content-type=text/plain``
+therefore signs the literal ``text/plain``, and a verifier that
+decode-and-re-encodes it to ``text%2Fplain`` rejects a request AWS
+accepts (and would additionally authenticate the percent-encoded wire
+form under a signature made for the raw form — a normalized substitute
+of what was signed).
+
+This module verifies against BOTH candidates (see
+:func:`_query_candidates`): the raw wire tokens and the spec-literal
+UriEncode form. Every candidate is a deterministic function of the exact
+wire bytes, so the signature still binds the request as sent; fully
+percent-encoded queries — the overwhelmingly common case, and every
+presigned URL TeleDrive mints — produce a single candidate.
 """
 from __future__ import annotations
 
@@ -39,6 +62,19 @@ def _hmac(key: bytes, data: str) -> bytes:
     return hmac.new(key, data.encode("utf-8"), hashlib.sha256).digest()
 
 
+def _signing_key(secret: str, date: str, region: str, service: str) -> bytes:
+    """The SigV4 key-derivation chain (AWS4+secret -> date -> region ->
+    service -> aws4_request)."""
+    key = _hmac(b"AWS4" + secret.encode(), date)
+    for word in (region, service, "aws4_request"):
+        key = _hmac(key, word)
+    return key
+
+
+def _signature(key: bytes, string_to_sign: str) -> str:
+    return hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+
 MAX_QUERY_BYTES = 16 * 1024
 MAX_QUERY_FIELDS = 100
 
@@ -60,12 +96,86 @@ def _query_pairs(raw: bytes) -> list[tuple[str, str]]:
         raise SigV4Error("InvalidArgument", "Invalid S3 query string") from exc
 
 
-def _canonical_query(raw: bytes) -> str:
-    pairs = _query_pairs(raw)
+def _raw_query_pairs(raw: bytes) -> list[tuple[str, str]]:
+    """The wire query's name/value tokens EXACTLY as sent, undecoded.
+
+    Tokenization mirrors :func:`_query_pairs` (split on ``&``, partition
+    at the first ``=``, blank tokens dropped) so the two views stay index
+    aligned; the difference is that percent escapes and raw reserved
+    characters are preserved byte-for-byte instead of being decoded.
+    """
+    text = raw.decode("ascii")
+    if not text:
+        return []
+    return [tuple(token.partition("=")[::2])
+            for token in text.split("&") if token != ""]
+
+
+def _encoded_join(pairs) -> str:
+    """Spec-literal canonical form: UriEncode every name and value, sort.
+
+    This is the canonical query string the AWS SigV4 documentation
+    describes ("URI-encode each name and value individually ... the
+    sorting occurs after encoding"): the DECODED parameter values are
+    re-encoded with the unreserved set ``-_.~``.
+    """
     return "&".join(
         f"{quote(key, safe='-_.~')}={quote(value, safe='-_.~')}"
         for key, value in sorted(pairs, key=lambda x: (quote(x[0], safe='-_.~'), quote(x[1], safe='-_.~')))
     )
+
+
+def _wire_join(pairs) -> str:
+    """Wire-bytes canonical form: the raw as-sent tokens, sorted.
+
+    botocore (AWS's own SDK) signs a request URL that already carries
+    its query exactly this way — ``_canonical_query_string_url`` splits
+    the raw query on ``&`` and the first ``=``, sorts the pairs and
+    joins them verbatim, with NO re-encoding. A client therefore signs
+    an unencoded ``/``, ``=`` or ``+`` inside a query value as the raw
+    character, and a verifier must compare against precisely those wire
+    bytes rather than a re-encoded normalization of them.
+    """
+    return "&".join(f"{key}={value}" for key, value in sorted(pairs))
+
+
+def _canonical_query(raw: bytes) -> str:
+    """The spec-literal (UriEncode of the decoded values) candidate."""
+    return _encoded_join(_query_pairs(raw))
+
+
+def _wire_query(raw: bytes) -> str:
+    """The raw as-sent wire candidate, behind the same validation gate.
+
+    The query is still strictly validated (size, field count, decodable
+    percent escapes) before it is authenticated; only the canonical
+    FORM differs from :func:`_canonical_query`.
+    """
+    _query_pairs(raw)
+    return _wire_join(_raw_query_pairs(raw))
+
+
+def _query_candidates(raw: bytes, *, drop: str | None = None) -> set[str]:
+    """Both canonical query strings a compliant client may have signed.
+
+    AWS accepts both spellings of the same wire request:
+
+    * the raw as-sent tokens (botocore's URL-embedded-query mode, and
+      every client that signs the URL string it already built), and
+    * the spec-literal UriEncode form (clients that decode the wire
+      parameters and re-encode each name and value per the SigV4
+      documentation).
+
+    Every candidate is a deterministic function of the exact wire bytes,
+    so accepting either still authenticates the request as sent. When
+    the wire is already fully percent-encoded the two coincide (one
+    candidate). ``drop`` removes one parameter (by decoded AND raw
+    name) for presigned-URL verification, which must exclude
+    ``X-Amz-Signature``.
+    """
+    decoded = [pair for pair in _query_pairs(raw) if pair[0] != drop]
+    wired = [pair for pair in _raw_query_pairs(raw) if pair[0] != drop]
+    return {_encoded_join(decoded), _wire_join(wired)}
 
 
 def _canonical_path(request: Request) -> str:
@@ -264,12 +374,6 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
     signature = values["X-Amz-Signature"]
     if not re.fullmatch(r"[0-9a-f]{64}", signature):
         raise SigV4Error("SignatureDoesNotMatch", "Invalid signature format")
-    canonical_pairs = [(k, v) for k, v in pairs if k != "X-Amz-Signature"]
-    canonical_query = "&".join(
-        f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}"
-        for k, v in sorted(canonical_pairs, key=lambda p:
-                           (quote(p[0], safe='-_.~'), quote(p[1], safe='-_.~')))
-    )
     # botocore's SigV4 canonical request uses the declared payload hash
     # when x-amz-content-sha256 is present, including presigned POST.
     # The signed header above pins the digest, and the multipart handler
@@ -278,23 +382,28 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
         headers["x-amz-content-sha256"]
         if "x-amz-content-sha256" in signed else "UNSIGNED-PAYLOAD"
     )
-    canonical = (
-        f"{request.method}\n{_canonical_path(request)}\n{canonical_query}\n"
-        + "".join(f"{name}:{headers[name]}\n" for name in signed)
-        + f"\n{signed_string}\n{canonical_payload}"
-    )
     scope = f"{date}/{region}/{service}/aws4_request"
-    string_to_sign = (
-        f"AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{_sha(canonical.encode())}"
-    )
+
+    def _to_sign(query: str) -> str:
+        canonical = (
+            f"{request.method}\n{_canonical_path(request)}\n{query}\n"
+            + "".join(f"{name}:{headers[name]}\n" for name in signed)
+            + f"\n{signed_string}\n{canonical_payload}"
+        )
+        return (f"AWS4-HMAC-SHA256\n{stamp}\n{scope}\n"
+                f"{_sha(canonical.encode())}")
+
+    # Built before the credential lookup (fail-closed wire validation),
+    # with the presign signature parameter excluded from every candidate.
+    candidates = _query_candidates(
+        request.scope.get("query_string", b""), drop="X-Amz-Signature")
     secret = lookup_secret(access_key, permission)
     if secret is None:
         raise SigV4Error("AccessDenied", "Unknown, expired, revoked or unauthorized access key")
-    key = _hmac(b"AWS4" + secret.encode(), date)
-    for word in (region, service, "aws4_request"):
-        key = _hmac(key, word)
-    expected = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
+    key = _signing_key(secret, date, region, service)
+    if not any(hmac.compare_digest(
+            _signature(key, _to_sign(query)), signature)
+            for query in candidates):
         raise SigV4Error("SignatureDoesNotMatch", "Presigned signature mismatch")
     return access_key
 
@@ -422,21 +531,31 @@ def verify_header_signature(request: Request, lookup_secret, permission: str, *,
                 "XAmzContentSHA256Mismatch",
                 "Unsigned upload requires a signed Content-MD5 or SHA-256 checksum",
             )
-    canonical = (
-        f"{request.method}\n{_canonical_path(request)}\n"
-        f"{_canonical_query(request.scope.get('query_string', b''))}\n"
-        + "".join(f"{key}:{headers[key]}\n" for key in signed)
-        + f"\n{headers_part}\n{payload}"
-    )
     scope = f"{date}/{region}/{service}/aws4_request"
-    to_sign = f"AWS4-HMAC-SHA256\n{request_date}\n{scope}\n{_sha(canonical.encode())}"
+
+    def _to_sign(query: str) -> str:
+        canonical = (
+            f"{request.method}\n{_canonical_path(request)}\n{query}\n"
+            + "".join(f"{key}:{headers[key]}\n" for key in signed)
+            + f"\n{headers_part}\n{payload}"
+        )
+        return (f"AWS4-HMAC-SHA256\n{request_date}\n{scope}\n"
+                f"{_sha(canonical.encode())}")
+
+    # A compliant client may have canonicalized the query either as the
+    # raw as-sent tokens (botocore URL mode) or as the spec-literal
+    # UriEncode form; both are deterministic functions of the wire
+    # request, so either signature authenticates exactly what was sent.
+    # The candidates (and their strict wire validation) are built BEFORE
+    # the credential lookup: an untrusted query never reaches secrets.
+    candidates = _query_candidates(
+        request.scope.get("query_string", b""))
     secret = lookup_secret(access_key, permission)
     if secret is None:
         raise SigV4Error("AccessDenied", "Unknown, expired, revoked or unauthorized access key")
-    key = _hmac(b"AWS4" + secret.encode(), date)
-    for word in (region, service, "aws4_request"):
-        key = _hmac(key, word)
-    expected = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, actual_signature):
+    key = _signing_key(secret, date, region, service)
+    if not any(hmac.compare_digest(
+            _signature(key, _to_sign(query)), actual_signature)
+            for query in candidates):
         raise SigV4Error("SignatureDoesNotMatch", "Request signature mismatch")
     return access_key

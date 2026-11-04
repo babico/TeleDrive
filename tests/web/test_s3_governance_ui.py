@@ -459,3 +459,82 @@ def test_signing_credentials_never_return_a_secret(web):
     denied = client.get(f"{BASE}/signing-credentials", headers=operator)
     assert denied.status_code == 200  # reads are operator; no secret inside
     assert issued.secret_key not in denied.text
+
+
+def test_rearchive_route_queues_a_repair_only_for_archived_versions(web):
+    """The cold-archive repair path has a real admin surface.
+
+    A version that does not exist is 404; one with no archive row is 409
+    ("nothing to re-seal"); an ARCHIVED row is CASed back to HOT so the
+    worker re-copies and re-verifies, and the action is audit-logged.
+    """
+    client, connection, _ = web
+    _make_bucket(connection)
+    admin = _login(client, *ADMIN)
+
+    # Unknown version -> 404.
+    missing = client.post(
+        f"{BASE}/{BUCKET}/rearchive", headers={**admin, **CSRF},
+        json={"key": "docs/repair.bin", "version_id": "no-such-version"})
+    assert missing.status_code == 404, missing.text
+    assert "NoSuchVersion" in missing.text
+
+    # A live version with no archive row -> 409.
+    from teledrive.storage.catalog_tables import published_versions
+    from teledrive.storage.manifest import objects as objects_table
+    db = connection()
+    try:
+        version_id = "repair-object-1"
+        db.connection.execute(objects_table.insert().values(
+            id=version_id, bucket=BUCKET, object_key="docs/repair.bin",
+            size=4, sha256="0" * 64, status="ready",
+            created_at=int(time.time()),
+            updated_at=int(time.time())))
+        db.connection.execute(published_versions.insert().values(
+            object_id=version_id, bucket=BUCKET,
+            key_hash=BucketCatalog(ManifestStore(db))._keyhash(
+                "docs/repair.bin"),
+            committed_ns=time.time_ns()))
+        db.connection.commit()
+    finally:
+        db.close()
+    unarchived = client.post(
+        f"{BASE}/{BUCKET}/rearchive", headers={**admin, **CSRF},
+        json={"key": "docs/repair.bin", "version_id": version_id})
+    assert unarchived.status_code == 409, unarchived.text
+    assert "ARCHIVED" in unarchived.text
+
+    # Force the row into ARCHIVED, then the repair queues and flips it HOT.
+    from teledrive.storage.cold_store import (
+        ArchiveStore, ColdBlobStore, archive_versions, default_cold_root,
+    )
+    from teledrive.storage.catalog import BucketCatalog as _Catalog
+    from teledrive.storage.manifest import ManifestStore as _Manifests
+    db = connection()
+    try:
+        db.connection.execute(archive_versions.insert().values(
+            object_id=version_id, bucket=BUCKET, object_key="docs/repair.bin",
+            state="ARCHIVED", generation=1,
+            manifest="{}", restore_until_ns=None, error=None,
+            lease_owner=None, lease_until_ns=None,
+            idempotency_key="k",
+            created_ns=time.time_ns(), updated_ns=time.time_ns()))
+        db.connection.commit()
+    finally:
+        db.close()
+    queued = client.post(
+        f"{BASE}/{BUCKET}/rearchive", headers={**admin, **CSRF},
+        json={"key": "docs/repair.bin", "version_id": version_id})
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["queued"] is True
+    db = connection()
+    try:
+        state = db.connection.execute(
+            archive_versions.select().where(
+                archive_versions.c.object_id == version_id)
+        ).mappings().first()["state"]
+    finally:
+        db.close()
+    assert state == "HOT"
+    assert any("[s3-governance]" in entry and "re-seal queued" in entry
+               for entry in webapp.LOG_BUFFER)

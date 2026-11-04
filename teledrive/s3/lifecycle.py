@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
@@ -53,6 +54,14 @@ rules_table = Table("storage_bucket_lifecycle", catalog_metadata,
 # Intelligent-Tiering). Every other AWS storage class is an honest 501.
 _TRANSITION_CLASSES = ("ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS")
 _MAX_NEWER_NONCURRENT = 1000
+# S3 caps a lifecycle filter at 10 Tags; the same bound keeps a stored
+# rule's tag conjunction small and reviewable.
+_MAX_FILTER_TAGS = 10
+_MAX_TAG_KEY_BYTES = 128
+_MAX_TAG_VALUE_BYTES = 256
+# A Date-based rule fires when now >= date; bounds keep the stored epoch
+# seconds honest (no pre-1970 or far-future garbage).
+_MAX_DATE_EPOCH = 4102444800  # 2100-01-01T00:00:00Z
 
 # Rule-level children. Transition and NoncurrentVersionTransitions may
 # REPEAT inside one rule (ascending-day ladders), everything else is
@@ -134,6 +143,112 @@ def _storage_class(value: str) -> str:
     return value
 
 
+def _date(value: str, label: str) -> int:
+    """An ISO-8601 expiration date, as epoch seconds (UTC).
+
+    Accepts a bare calendar date (midnight UTC, the AWS spelling) or a
+    full timestamp with ``Z``/offset. The rule fires when
+    ``now >= date``; anything unparsable is InvalidArgument, never a
+    silent default.
+    """
+    text = value.strip()
+    if not text or len(text) > 35 or not text.isascii():
+        raise LifecycleError("InvalidArgument", f"Invalid {label} date")
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LifecycleError("InvalidArgument", f"Invalid {label} date") from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    epoch = int(moment.timestamp())
+    if not 0 < epoch < _MAX_DATE_EPOCH:
+        raise LifecycleError("InvalidArgument", f"{label} date out of range")
+    return epoch
+
+
+def _parse_tag(node) -> dict:
+    """One ``<Tag>`` block: exactly Key (1..128 bytes) and Value
+    (0..256 bytes)."""
+    tag = fields(node, {"Key", "Value"})
+    if set(tag) != {"Key", "Value"}:
+        raise LifecycleError("InvalidArgument", "Tag needs Key and Value")
+    key, value = scalar(tag["Key"]), scalar(tag["Value"])
+    if not 1 <= len(key.encode("utf-8")) <= _MAX_TAG_KEY_BYTES:
+        raise LifecycleError("InvalidArgument", "Invalid tag key length")
+    if len(value.encode("utf-8")) > _MAX_TAG_VALUE_BYTES:
+        raise LifecycleError("InvalidArgument", "Invalid tag value length")
+    return {"key": key, "value": value}
+
+
+def _check_tag_conjunction(tags) -> None:
+    """Parser-side bounds for a filter's tag conjunction: at most 10
+    tags and no repeated key (a repeated key is an ambiguous
+    conjunction, not a schedule)."""
+    if len(tags) > _MAX_FILTER_TAGS:
+        raise LifecycleError(
+            "InvalidArgument", f"And filter exceeds {_MAX_FILTER_TAGS} tags")
+    if len({tag["key"] for tag in tags}) != len(tags):
+        raise LifecycleError("InvalidArgument", "Duplicate tag key")
+
+
+def _parse_filter(node) -> tuple[str, list[dict]]:
+    """A ``<Filter>`` block: one of Prefix, a single Tag, or an And
+    conjunction of an optional Prefix and 1..10 Tags.
+
+    Unknown filter contents (ObjectSize*, a second condition kind
+    directly under Filter, foreign namespaces) fail closed with 501
+    exactly like the rest of the rule grammar; known-but-invalid
+    combinations are InvalidArgument.
+    """
+    group = children(node, {"Prefix", "Tag", "And"})
+    kinds = [name for name, nodes in group.items() if nodes]
+    if len(kinds) != 1:
+        raise LifecycleError(
+            "InvalidArgument", "Filter accepts one of Prefix, Tag or And")
+    if group["Prefix"]:
+        if group["Prefix"][0].attrib or len(group["Prefix"]) > 1:
+            raise LifecycleError("NotImplemented", "Unsupported lifecycle rule", 501)
+        return scalar(group["Prefix"][0]), []
+    if group["Tag"]:
+        if len(group["Tag"]) > 1:
+            raise LifecycleError(
+                "InvalidArgument",
+                "Multiple Tags require the And filter")
+        return "", [_parse_tag(group["Tag"][0])]
+    inner = children(group["And"][0], {"Prefix", "Tag"})
+    prefix = ""
+    if len(inner["Prefix"]) > 1:
+        raise LifecycleError("NotImplemented", "Duplicate filter prefix", 501)
+    if inner["Prefix"]:
+        prefix = scalar(inner["Prefix"][0])
+    tags = [_parse_tag(node) for node in inner["Tag"]]
+    if not tags:
+        raise LifecycleError(
+            "InvalidArgument", "And filter needs at least one Tag")
+    _check_tag_conjunction(tags)
+    return prefix, tags
+
+
+def _validate_tag_set(tags) -> list[dict]:
+    """Shared validation for the stored tag conjunction: 0..10 unique
+    keys, each a {key, value} dict with bounded byte lengths."""
+    if not isinstance(tags, list) or len(tags) > _MAX_FILTER_TAGS:
+        raise ValueError()
+    seen, result = set(), []
+    for tag in tags:
+        if (not isinstance(tag, dict)
+                or set(tag) != {"key", "value"}
+                or not isinstance(tag["key"], str)
+                or not isinstance(tag["value"], str)
+                or not 1 <= len(tag["key"].encode("utf-8")) <= _MAX_TAG_KEY_BYTES
+                or len(tag["value"].encode("utf-8")) > _MAX_TAG_VALUE_BYTES
+                or tag["key"] in seen):
+            raise ValueError()
+        seen.add(tag["key"])
+        result.append({"key": tag["key"], "value": tag["value"]})
+    return result
+
+
 def parse_lifecycle_xml(body: bytes):
     if len(body) > MAX_XML:
         raise LifecycleError("MalformedXML", "Lifecycle XML exceeds 32 KiB")
@@ -169,18 +284,15 @@ def parse_lifecycle_xml(body: bytes):
         if not 1 <= len(ident.encode("utf-8")) <= 255 or ident in ids:
             raise LifecycleError("InvalidArgument", "Invalid or duplicate rule ID")
         ids.add(ident)
-        prefix = ""
+        prefix, tags = "", []
         if group["Filter"]:
             if len(group["Filter"]) > 1:
                 raise LifecycleError("NotImplemented", "Duplicate Filter", 501)
-            fil = fields(group["Filter"][0], {"Prefix"})
-            if set(fil) != {"Prefix"}:
-                raise LifecycleError("NotImplemented", "Only Prefix filter supported", 501)
-            prefix = scalar(fil["Prefix"])
+            prefix, tags = _parse_filter(group["Filter"][0])
         if len(prefix.encode("utf-8")) > 1024:
             raise LifecycleError("InvalidArgument", "Lifecycle prefix too long")
         rule = {
-            "id": ident, "status": status, "prefix": prefix,
+            "id": ident, "status": status, "prefix": prefix, "tags": tags,
             "abort_days": None, "expiration": None, "transitions": [],
             "noncurrent_transitions": [], "noncurrent_expiration": None,
         }
@@ -198,19 +310,34 @@ def parse_lifecycle_xml(body: bytes):
             if len(group["Expiration"]) > 1:
                 raise LifecycleError("NotImplemented", "Duplicate expiration", 501)
             expiration = fields(group["Expiration"][0],
-                                {"Days", "ExpiredObjectDeleteMarker"})
-            if "Days" not in expiration:
-                raise LifecycleError("InvalidArgument", "Missing expiration age")
-            rule["expiration"] = {
-                "days": _age(scalar(expiration["Days"]), "expiration"),
-                "expired_marker": False,
-            }
+                                {"Days", "Date", "ExpiredObjectDeleteMarker"})
+            if ("Days" in expiration) == ("Date" in expiration):
+                raise LifecycleError(
+                    "InvalidArgument",
+                    "Expiration needs exactly one of Days or Date")
+            marker = False
             if "ExpiredObjectDeleteMarker" in expiration:
                 marker_text = scalar(expiration["ExpiredObjectDeleteMarker"])
                 if marker_text not in {"true", "false"}:
                     raise LifecycleError("InvalidArgument",
                                          "ExpiredObjectDeleteMarker must be boolean")
-                rule["expiration"]["expired_marker"] = marker_text == "true"
+                marker = marker_text == "true"
+                if marker and tags:
+                    # A delete marker carries no tags, so a tag filter can
+                    # never match one: the combination is rejected up front
+                    # (AWS answers InvalidRequest for it) rather than
+                    # silently never firing.
+                    raise LifecycleError(
+                        "InvalidArgument",
+                        "ExpiredObjectDeleteMarker cannot be combined with "
+                        "a tag filter")
+            rule["expiration"] = {
+                "days": (_age(scalar(expiration["Days"]), "expiration")
+                         if "Days" in expiration else None),
+                "date": (_date(scalar(expiration["Date"]), "expiration")
+                         if "Date" in expiration else None),
+                "expired_marker": marker,
+            }
         for node in group["Transition"]:
             transition = fields(node, {"Days", "StorageClass"})
             if set(transition) != {"Days", "StorageClass"}:
@@ -247,12 +374,20 @@ def parse_lifecycle_xml(body: bytes):
                                      "Duplicate NoncurrentVersionExpiration", 501)
             expiration = fields(
                 group["NoncurrentVersionExpiration"][0],
-                {"NoncurrentDays", "NewerNoncurrentVersions"})
-            if "NoncurrentDays" not in expiration:
-                raise LifecycleError("InvalidArgument",
-                                     "Missing NoncurrentDays")
-            entry = {"days": _age(scalar(expiration["NoncurrentDays"]),
-                                  "NoncurrentDays"), "newer": None}
+                {"NoncurrentDays", "NewerNoncurrentVersions", "Date"})
+            if ("NoncurrentDays" in expiration) == ("Date" in expiration):
+                raise LifecycleError(
+                    "InvalidArgument",
+                    "NoncurrentVersionExpiration needs exactly one of "
+                    "NoncurrentDays or Date")
+            entry = {
+                "days": (_age(scalar(expiration["NoncurrentDays"]),
+                              "NoncurrentDays")
+                         if "NoncurrentDays" in expiration else None),
+                "date": (_date(scalar(expiration["Date"]), "NoncurrentDays")
+                         if "Date" in expiration else None),
+                "newer": None,
+            }
             if "NewerNoncurrentVersions" in expiration:
                 entry["newer"] = _newer(
                     scalar(expiration["NewerNoncurrentVersions"]))
@@ -274,8 +409,8 @@ def _normalize_rule(rule):
         raise ValueError()
     legacy_keys = {"id", "status", "prefix", "days", "action",
                    "expired_marker"}
-    canonical_keys = {"id", "status", "prefix", "abort_days", "expiration",
-                      "transitions", "noncurrent_transitions",
+    canonical_keys = {"id", "status", "prefix", "tags", "abort_days",
+                      "expiration", "transitions", "noncurrent_transitions",
                       "noncurrent_expiration"}
     if not {"id", "status", "prefix"} <= set(rule):
         raise ValueError()
@@ -287,6 +422,7 @@ def _normalize_rule(rule):
     if not isinstance(rule["prefix"], str) or len(
             rule["prefix"].encode("utf-8")) > 1024:
         raise ValueError()
+    tags = _validate_tag_set(rule.get("tags") or [])
     if "action" in rule:
         if not set(rule) <= legacy_keys or rule["action"] not in {
                 "abort", "expire"}:
@@ -295,10 +431,10 @@ def _normalize_rule(rule):
             raise ValueError()
         return {
             "id": rule["id"], "status": rule["status"],
-            "prefix": rule["prefix"],
+            "prefix": rule["prefix"], "tags": [],
             "abort_days": rule["days"] if rule["action"] == "abort" else None,
             "expiration": (None if rule["action"] != "expire" else {
-                "days": rule["days"],
+                "days": rule["days"], "date": None,
                 "expired_marker": bool(rule.get("expired_marker", False)),
             }),
             "transitions": [], "noncurrent_transitions": [],
@@ -308,6 +444,7 @@ def _normalize_rule(rule):
         raise ValueError()
     normalized = {
         "id": rule["id"], "status": rule["status"], "prefix": rule["prefix"],
+        "tags": tags,
         "abort_days": rule.get("abort_days"),
         "expiration": rule.get("expiration"),
         "transitions": list(rule.get("transitions") or []),
@@ -321,10 +458,19 @@ def _normalize_rule(rule):
             raise ValueError()
     expiration = normalized["expiration"]
     if expiration is not None:
+        days, date = (expiration.get("days"), expiration.get("date"))
         if (not isinstance(expiration, dict)
-                or type(expiration.get("days")) is not int
-                or not 1 <= expiration["days"] <= 3650
-                or type(expiration.get("expired_marker")) is not bool):
+                or type(expiration.get("expired_marker")) is not bool
+                # Exactly one of Days or Date drives the schedule.
+                or (days is None) == (date is None)):
+            raise ValueError()
+        if days is not None and (type(days) is not int
+                                 or not 1 <= days <= 3650):
+            raise ValueError()
+        if date is not None and (type(date) is not int
+                                 or not 0 < date < _MAX_DATE_EPOCH):
+            raise ValueError()
+        if expiration.get("expired_marker") and tags:
             raise ValueError()
     for transition in normalized["transitions"]:
         if (not isinstance(transition, dict)
@@ -347,14 +493,24 @@ def _normalize_rule(rule):
     expiration = normalized["noncurrent_expiration"]
     if expiration is not None:
         newer = expiration.get("newer")
+        days, date = (expiration.get("days"), expiration.get("date"))
         if (not isinstance(expiration, dict)
-                or type(expiration.get("days")) is not int
-                or not 1 <= expiration["days"] <= 3650
+                or (days is None) == (date is None)
+                or (days is not None and (type(days) is not int
+                                          or not 1 <= days <= 3650))
+                or (date is not None and (type(date) is not int
+                                          or not 0 < date < _MAX_DATE_EPOCH))
                 or (newer is not None
                     and (type(newer) is not int or not 0 <= newer <=
                          _MAX_NEWER_NONCURRENT))):
             raise ValueError()
     return normalized
+
+
+def _date_xml(epoch: int) -> str:
+    """The ISO-8601 UTC spelling of a stored expiration date."""
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
 
 
 def lifecycle_xml(rules):
@@ -365,15 +521,34 @@ def lifecycle_xml(rules):
         ET.SubElement(el, "ID").text = rule["id"]
         ET.SubElement(el, "Status").text = rule["status"]
         fil = ET.SubElement(el, "Filter")
-        ET.SubElement(fil, "Prefix").text = rule["prefix"]
+        if rule["tags"]:
+            # Filter accepts ONE of Prefix, Tag or And, so: a lone Tag
+            # sits directly under Filter; a prefix, or more than one
+            # tag, requires the And conjunction.
+            if len(rule["tags"]) == 1 and not rule["prefix"]:
+                parent = fil
+            else:
+                parent = ET.SubElement(fil, "And")
+                if rule["prefix"]:
+                    ET.SubElement(parent, "Prefix").text = rule["prefix"]
+            for tag in rule["tags"]:
+                node = ET.SubElement(parent, "Tag")
+                ET.SubElement(node, "Key").text = tag["key"]
+                ET.SubElement(node, "Value").text = tag["value"]
+        else:
+            ET.SubElement(fil, "Prefix").text = rule["prefix"]
         if rule["abort_days"] is not None:
             abort = ET.SubElement(el, "AbortIncompleteMultipartUpload")
             ET.SubElement(abort, "DaysAfterInitiation").text = \
                 str(rule["abort_days"])
         if rule["expiration"] is not None:
             expiration = ET.SubElement(el, "Expiration")
-            ET.SubElement(expiration, "Days").text = \
-                str(rule["expiration"]["days"])
+            if rule["expiration"]["days"] is not None:
+                ET.SubElement(expiration, "Days").text = \
+                    str(rule["expiration"]["days"])
+            else:
+                ET.SubElement(expiration, "Date").text = _date_xml(
+                    rule["expiration"]["date"])
             ET.SubElement(expiration, "ExpiredObjectDeleteMarker").text = \
                 ("true" if rule["expiration"]["expired_marker"] else "false")
         for transition in rule["transitions"]:
@@ -391,8 +566,12 @@ def lifecycle_xml(rules):
                     str(transition["newer"])
         if rule["noncurrent_expiration"] is not None:
             node = ET.SubElement(el, "NoncurrentVersionExpiration")
-            ET.SubElement(node, "NoncurrentDays").text = \
-                str(rule["noncurrent_expiration"]["days"])
+            if rule["noncurrent_expiration"]["days"] is not None:
+                ET.SubElement(node, "NoncurrentDays").text = \
+                    str(rule["noncurrent_expiration"]["days"])
+            else:
+                ET.SubElement(node, "Date").text = _date_xml(
+                    rule["noncurrent_expiration"]["date"])
             if rule["noncurrent_expiration"].get("newer") is not None:
                 ET.SubElement(node, "NewerNoncurrentVersions").text = \
                     str(rule["noncurrent_expiration"]["newer"])
@@ -440,6 +619,22 @@ class BucketLifecycleStore:
             raise
 
     # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _matches_tags(db, object_id: str, tags) -> bool:
+        """True when the version's tag set satisfies the rule's tag
+        conjunction (every rule tag present with an equal value).
+
+        A version with no tags at all fails every non-empty conjunction,
+        which is the AWS filter semantics.
+        """
+        if not tags:
+            return True
+        from teledrive.s3.tagging import object_tags
+        present = dict(db.connection.execute(select(
+            object_tags.c.tag_key, object_tags.c.tag_value).where(
+            object_tags.c.object_id == object_id)).all())
+        return all(present.get(tag["key"]) == tag["value"] for tag in tags)
 
     def _archive_queue(self):
         """The physical archive queue, or None when unavailable.
@@ -524,7 +719,8 @@ class BucketLifecycleStore:
 
     # -- actions ------------------------------------------------------------
 
-    def _transition_due_objects(self, bucket, transition, *, now, limit):
+    def _transition_due_objects(self, bucket, transition, *, prefix, tags,
+                                now, limit):
         """Current heads past the transition age move to the archive class
         and are queued for a verified cold copy (an additional copy;
         nothing is moved or deleted)."""
@@ -539,15 +735,17 @@ class BucketLifecycleStore:
             objects.c.id.in_(select(heads_table.c.object_id).where(
                 heads_table.c.bucket == bucket)),
         ]
-        if transition.get("prefix"):
+        if prefix:
             conditions.append(objects.c.object_key.startswith(
-                transition["prefix"], autoescape=True))
+                prefix, autoescape=True))
         rows = self.db.connection.execute(
             select(objects.c.id, objects.c.object_key)
             .where(*conditions)
             .order_by(objects.c.updated_at).limit(limit)).all()
         changed = []
         for object_id, key in rows:
+            if tags and not self._matches_tags(self.db, object_id, tags):
+                continue
             # Head race: a newer version may have been published since the
             # selection; only the CURRENT head may transition.
             try:
@@ -566,7 +764,8 @@ class BucketLifecycleStore:
         self._enqueue_archive(changed)
         return len(changed)
 
-    def _transition_noncurrent(self, bucket, spec, *, prefix, now, limit):
+    def _transition_noncurrent(self, bucket, spec, *, prefix, tags, now,
+                               limit):
         """Noncurrent versions past NoncurrentDays (minus the newest
         NewerNoncurrentVersions per key) move to the archive class."""
         if limit <= 0:
@@ -578,6 +777,8 @@ class BucketLifecycleStore:
         changed = []
         for object_id, key, _key_hash, updated_at, _committed in rows:
             if object_id in exempt or int(updated_at) > cutoff:
+                continue
+            if tags and not self._matches_tags(self.db, object_id, tags):
                 continue
             row = self.db.connection.execute(select(
                 objects.c.storage_class).where(
@@ -604,20 +805,33 @@ class BucketLifecycleStore:
         self._enqueue_archive(changed)
         return len(changed)
 
-    def _expire_noncurrent_versions(self, bucket, spec, *, prefix, now,
-                                    limit):
+    def _expire_noncurrent_versions(self, bucket, spec, *, prefix, tags,
+                                    now, limit):
         """Revoke due noncurrent versions from version history.
 
         Logical only while GC is off: the media stays retained. Locked or
-        legal-held versions and dedup alias sources are fenced off."""
+        legal-held versions and dedup alias sources are fenced off.
+        A Date-based schedule fires for every matching noncurrent
+        version once ``now >= date``; NoncurrentDays keeps its age
+        cutoff."""
         if limit <= 0:
             return []
+        days, date = spec.get("days"), spec.get("date")
+        if date is not None:
+            if now < date:
+                return []
+            cutoff = None  # every matching noncurrent version is due
+        else:
+            cutoff = now - days * 86400
         rows = self._noncurrent_versions(bucket, prefix=prefix)
         exempt = self._newer_exempt(rows, spec.get("newer"))
-        cutoff = now - spec["days"] * 86400
         revoked = []
         for object_id, key, _key_hash, updated_at, _committed in rows:
-            if object_id in exempt or int(updated_at) > cutoff:
+            if object_id in exempt:
+                continue
+            if cutoff is not None and int(updated_at) > cutoff:
+                continue
+            if tags and not self._matches_tags(self.db, object_id, tags):
                 continue
             if len(revoked) >= limit:
                 break
@@ -736,13 +950,15 @@ class BucketLifecycleStore:
                         self.db.commit()
                         return count
                     prefix = rule["prefix"]
+                    tags = rule.get("tags") or []
                     if rule["expiration"] is not None:
                         # Expire due CURRENT objects: a logical delete
                         # marker now, physical media via the GC queue
                         # (grace-fenced) when GC is enabled.
                         expired = self._expire_due_objects(
-                            bucket, days=rule["expiration"]["days"],
-                            prefix=prefix, now=now, limit=remaining)
+                            bucket, expiration=rule["expiration"],
+                            prefix=prefix, tags=tags, now=now,
+                            limit=remaining)
                         for object_id in expired:
                             if gc_enabled and gcx is not None:
                                 gcx.enqueue([object_id],
@@ -754,16 +970,16 @@ class BucketLifecycleStore:
                                 limit=max(0, limit - count))
                     for transition in rule["transitions"]:
                         count += self._transition_due_objects(
-                            bucket, {"prefix": prefix, **transition},
+                            bucket, transition, prefix=prefix, tags=tags,
                             now=now, limit=max(0, limit - count))
                     for spec in rule["noncurrent_transitions"]:
                         count += self._transition_noncurrent(
-                            bucket, spec, prefix=prefix, now=now,
+                            bucket, spec, prefix=prefix, tags=tags, now=now,
                             limit=max(0, limit - count))
                     if rule["noncurrent_expiration"] is not None:
                         revoked = self._expire_noncurrent_versions(
                             bucket, rule["noncurrent_expiration"],
-                            prefix=prefix, now=now,
+                            prefix=prefix, tags=tags, now=now,
                             limit=max(0, limit - count))
                         for object_id in revoked:
                             if gc_enabled and gcx is not None:
@@ -797,31 +1013,42 @@ class BucketLifecycleStore:
             self.db.connection.rollback()
             raise
 
-    def _expire_due_objects(self, bucket, *, days: int, prefix: str,
-                            now: int, limit: int):
+    def _expire_due_objects(self, bucket, *, expiration, prefix: str,
+                            tags, now: int, limit: int):
         """Create delete markers for due current objects; returns the
-        previously-current object ids whose media is now reclaimable."""
+        previously-current object ids whose media is now reclaimable.
+
+        A Days schedule expires heads older than the age; a Date
+        schedule fires for every matching head once ``now >= date``."""
+        days, date = expiration.get("days"), expiration.get("date")
+        if date is not None and now < date:
+            return []
+        conditions = [
+            objects.c.bucket == bucket,
+            objects.c.status == "ready",
+            # Object lock: retained or legal-held objects never expire.
+            or_(objects.c.retention_until_ns.is_(None),
+                objects.c.retention_until_ns <= time.time_ns()),
+            objects.c.legal_hold.is_(False),
+            # Only CURRENT heads: the head join picks live keys.
+            objects.c.id.in_(
+                select(heads_table.c.object_id).where(
+                    heads_table.c.bucket == bucket)),
+        ]
+        if days is not None:
+            conditions.append(objects.c.updated_at <= now - days * 86400)
         rows = self.db.connection.execute(
             select(objects.c.id, objects.c.object_key, objects.c.updated_at)
-            .where(
-                objects.c.bucket == bucket,
-                objects.c.status == "ready",
-                objects.c.updated_at <= now - days * 86400,
-                # Object lock: retained or legal-held objects never expire.
-                or_(objects.c.retention_until_ns.is_(None),
-                    objects.c.retention_until_ns <= time.time_ns()),
-                objects.c.legal_hold.is_(False),
-                # Only CURRENT heads: the head join picks live keys.
-                objects.c.id.in_(
-                    select(heads_table.c.object_id).where(
-                        heads_table.c.bucket == bucket)),
-            ).order_by(objects.c.updated_at).limit(limit)
+            .where(*conditions)
+            .order_by(objects.c.updated_at).limit(limit)
         ).all()
         if prefix:
             rows = [row for row in rows
                     if row[1].startswith(prefix)]
         expired = []
         for object_id, key, _updated in rows:
+            if tags and not self._matches_tags(self.db, object_id, tags):
+                continue
             try:
                 current = self.catalog.get(bucket, key)
                 if current.item.id != object_id:

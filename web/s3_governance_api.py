@@ -1286,5 +1286,54 @@ def delete_report(bucket: str, kind: str, config_id: str, request: Request,
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Cold archive repair
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v1/admin/s3-governance/{bucket}/rearchive")
+def rearchive_object(bucket: str, request: Request,
+                     payload: dict = Body(...)):
+    """Re-seal a suspect or corrupt cold archive for one object version.
+
+    The cold store CASes ARCHIVED -> HOT so the next worker pass re-copies
+    and re-verifies from the (still present) hot Telegram source; the
+    sealed receipt stays until the new pass replaces it, so a failed
+    repair never leaves the row less verified than before. Admin-only,
+    audited, and refused for a version that is not currently ARCHIVED.
+    """
+    actor = _actor(request, write=True)
+    _bucket_exists(bucket)
+    key = payload.get("key")
+    version_id = payload.get("version_id")
+    if not isinstance(key, str) or not key:
+        raise HTTPException(400, "InvalidArgument: an object key is required")
+    if not isinstance(version_id, str) or not version_id:
+        raise HTTPException(
+            400, "InvalidArgument: a version_id is required (archive rows "
+                 "exist per immutable version)")
+    from teledrive.storage.catalog import BucketCatalog
+    from teledrive.storage.cold_store import ArchiveStore, ColdBlobStore, default_cold_root
+    from teledrive.storage.manifest import ManifestStore
+    import web.app as webapp
+    conn = webapp.db_connect()
+    try:
+        catalog = BucketCatalog(ManifestStore(conn))
+        if not catalog.is_visible_version(bucket, key, version_id):
+            raise HTTPException(
+                404, "NoSuchVersion: the version does not exist in this bucket")
+        store = ArchiveStore(catalog, ColdBlobStore(default_cold_root()))
+        queued = store.request_rearchive(version_id)
+    finally:
+        conn.close()
+    if not queued:
+        raise HTTPException(
+            409, "InvalidObjectState: the version is not in the ARCHIVED "
+                 "state, so there is nothing to re-seal")
+    _audit(request, actor,
+           f"archive re-seal queued: bucket={bucket} version={version_id}")
+    return {"ok": True, "queued": True, "bucket": bucket,
+            "version_id": version_id, "key": key}
+
+
 __all__ = ["router", "sign_request", "canonical_query", "s3_origin",
            "TRANSPORT"]

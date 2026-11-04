@@ -9,5 +9,9 @@ pytest>=9,<10
 pytest-xdist>=3.6,<4
 httpx>=0.28,<1
 boto3>=1.35,<2
+# Real minio-py SDK for the client-matrix tests (tests/s3/test_s3_client_minio.py).
+# Independent SigV4 wire implementation; must stay pinned in lockstep with
+# .github/workflows/quality-security.yml and PINNED_MINIO_VERSION in the test.
+minio==7.2.20
 bandit>=1.9,<2
 pip-audit>=2.7,<3

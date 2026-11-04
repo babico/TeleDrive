@@ -48,6 +48,7 @@ jobs:
             tests/meta/test_ci_workflows.py \
             tests/meta/test_docs.py tests/meta/test_docs_nav.py \
             tests/meta/test_s3_parameter_ledger.py \
+            tests/meta/test_s3_evidence_matrix.py \
             tests/web/test_api_keys.py \
             tests/web/test_rest_api.py \
             tests/web/test_lifespan.py \
@@ -158,8 +159,12 @@ jobs:
       - name: Install
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3
+          python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3 "minio==7.2.20"
       - name: S3 regression tests
+        env:
+          # Fail closed if the pinned minio-py SDK is missing: the client
+          # matrix test must never silently skip in CI.
+          TELEDRIVE_REQUIRE_CLI_CLIENTS: "1"
         run: |
           python -m pytest -q --durations=25 \
             tests/s3/test_s3_version_reads.py \
@@ -173,12 +178,16 @@ jobs:
             tests/s3/test_s3_unsupported_sweep.py \
             tests/s3/test_s3_aws_chunked.py \
             tests/s3/test_s3_rclone_compat.py \
+            tests/s3/test_s3_client_minio.py \
             tests/s3/test_s3_compat_reads.py \
             tests/s3/test_s3_policy_status.py \
             tests/s3/test_s3_multipart_preconditions.py \
             tests/s3/test_s3_gap_closures.py \
             tests/s3/test_s3_object_lock.py \
             tests/s3/test_s3_acl.py \
+            tests/s3/test_s3_acl_parity.py \
+            tests/s3/test_s3_policy_operators.py \
+            tests/s3/test_s3_lock_fences.py \
             tests/s3/test_s3_replication.py \
             tests/s3/test_s3_notifications.py \
             tests/s3/test_s3_tagging_journal.py \
@@ -196,9 +205,16 @@ jobs:
             tests/s3/test_s3_rename.py \
             tests/s3/test_s3_select.py \
             tests/s3/test_s3_restore.py \
+            tests/s3/test_s3_archive_restore.py \
+            tests/s3/test_s3_lifecycle_noncurrent.py \
             tests/s3/test_s3_tiering.py \
             tests/s3/test_s3_metadata_journal.py \
-            tests/s3/test_s3_sse_c.py
+            tests/s3/test_s3_sse_c.py \
+            tests/s3/test_s3_evidence_reports.py \
+            tests/s3/test_s3_evidence_metadata_config.py \
+            tests/s3/test_s3_evidence_notifications.py \
+            tests/s3/test_s3_evidence_tagging.py \
+            tests/s3/test_s3_evidence_website.py
       - name: Publish CI run summary
         if: always()
         shell: bash

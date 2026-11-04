@@ -38,8 +38,8 @@ A machine test keeps this ledger honest: `tests/meta/test_s3_parameter_ledger.py
 | ListBuckets `prefix` | SUPPORTED | Bucket-name prefix filter. | tests/s3/test_s3_bucket_listing.py |
 | ListBuckets `bucket-region` | SUPPORTED | Only `us-east-1` accepted; other regions are `InvalidArgument` 400. | tests/s3/test_s3_bucket_listing.py |
 | ListBuckets `continuation-token` | SUPPORTED | HMAC-scoped cursor bound to the prefix and credential. | tests/s3/test_s3_bucket_listing.py |
-| ListDirectoryBuckets `continuation-token` | SUPPORTED | 1–1024 chars; the listing itself is always empty (no S3 Express buckets). | tests/s3/test_s3_directory_buckets.py |
-| ListDirectoryBuckets `max-directory-buckets` | SUPPORTED | Decimal 1–1000 validation; empty result. | tests/s3/test_s3_directory_buckets.py |
+| ListDirectoryBuckets `continuation-token` | SUPPORTED | 1–1024 chars; HMAC-scoped, expires after 15 minutes; stale/foreign tokens 400. | tests/s3/test_s3_directory_buckets.py |
+| ListDirectoryBuckets `max-directory-buckets` | SUPPORTED | Decimal 1–1000 validation; real keyset pages. | tests/s3/test_s3_directory_buckets.py |
 
 ## Bucket listings
 
@@ -84,11 +84,12 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `encryption` | SUPPORTED | Bucket default-encryption configuration CRUD (AES256 default rule). | tests/s3/test_s3_sse_c.py |
 | `object-lock` | SUPPORTED | One-way enable with default mode/days. | tests/s3/test_s3_object_lock.py |
 | `publicAccessBlock` | SUPPORTED | Four persisted flags, all-true default. | tests/s3/test_s3_public_access_block.py |
-| `lifecycle` | SUPPORTED | AbortIncompleteMultipartUpload rules; other rule kinds fail closed. | tests/s3/test_s3_lifecycle.py |
+| `lifecycle` | SUPPORTED | AbortIncompleteMultipartUpload, Expiration (incl. ExpiredObjectDeleteMarker), Transition, NoncurrentVersionTransitions and NoncurrentVersionExpiration rules; archive classes only (others 501). | tests/s3/test_s3_lifecycle.py |
 | `requestPayment` | SUPPORTED | BucketOwner accepted and reported; Requester is an honest 501. | tests/s3/test_s3_request_payment_accelerate.py |
 | `accelerate` | SUPPORTED | Suspended accepted and reported; Enabled is an honest 501. | tests/s3/test_s3_request_payment_accelerate.py |
-| `session` | SUPPORTED | S3 Express CreateSession shape with signed session modes; no real sessions. | tests/s3/test_s3_directory_buckets.py |
-| `x-amz-create-session-mode` | SUPPORTED | Signed CreateSession mode validation (the only supported S3 Express session shape). | tests/s3/test_s3_directory_buckets.py |
+| `session` | SUPPORTED | S3 Express CreateSession: issues real short-lived zonal credentials for an existing directory bucket (control plane, long-lived signer). | tests/s3/test_s3_directory_buckets.py |
+| `x-amz-create-session-mode` | SUPPORTED | Signed CreateSession mode validation; `ReadOnly`/`ReadWrite` (default `ReadWrite`), malformed modes 400. | tests/s3/test_s3_directory_buckets.py |
+| `x-amz-s3session-token` | SUPPORTED | Required and signed on every zonal (object data-plane) directory-bucket request; matched exactly against the stored SHA-256 hash of the issued session token. Missing, unsigned, wrong or replayed-after-revocation tokens are 403 without ever echoing the token. | tests/s3/test_s3_directory_buckets.py |
 | `intelligent-tiering` (+ `id`) | SUPPORTED | Tiering configuration CRUD and scheduler. | tests/s3/test_s3_tiering.py |
 | `analytics` / `inventory` / `metrics` (+ `id`) | SUPPORTED | Storage-report configuration CRUD; CSV/JSON lines outputs. | tests/s3/test_s3_report_configs.py |
 | `metadataConfiguration` / `metadataTable` / `metadataJournalTable` / `metadataInventoryTable` / `metadataAnnotationTable` | SUPPORTED | S3 Metadata table configuration CRUD (V1/V2 shapes). | tests/s3/test_s3_metadata_journal.py |
@@ -113,7 +114,7 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `x-amz-tagging` (PUT) | SUPPORTED | Signed inline tags (≤8 KiB, ≤10 tags) applied atomically at publish; requires PutObjectTagging scope. | tests/s3/test_s3_tagging.py |
 | `x-amz-meta-*` (PUT/copy REPLACE) | SUPPORTED | Signed custom metadata persisted per version, ≤2 KiB serialized. | tests/s3/test_s3_metadata.py |
 | `Content-Type` / `Cache-Control` / `Content-Disposition` / `Content-Encoding` / `Content-Language` / `Expires` (PUT) | SUPPORTED | Signed HTTP metadata persisted per version and replayed on reads. | tests/s3/test_s3_metadata.py |
-| `x-amz-acl` | SUPPORTED | Only `private` and `bucket-owner-full-control` accepted (signed); other canned ACLs 501. | tests/s3/test_s3_fail_closed.py |
+| `x-amz-acl` | SUPPORTED | Only `private` and `bucket-owner-full-control` accepted (signed); other canned ACLs 501, unknown values 400 `InvalidArgument`; on PUT `?acl` a canned value may replace the XML body. | tests/s3/test_s3_acl_parity.py |
 | `x-amz-storage-class` | SUPPORTED | Only `STANDARD` accepted (signed); other tiers 501. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-server-side-encryption: AES256` (PUT) | SUPPORTED | Real SSE-S3 envelope when `storage.encryption: envelope`; otherwise a precise 501 naming the setting. | tests/s3/test_s3_sse_c.py |
 | `x-amz-server-side-encryption: aws:kms` / `aws:kms:dsse` | REJECTED | 501: no AWS KMS backend exists. | tests/s3/test_s3_fail_closed.py |
@@ -121,7 +122,7 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | SSE-C: `x-amz-server-side-encryption-customer-algorithm`, `x-amz-server-side-encryption-customer-key`, `x-amz-server-side-encryption-customer-key-md5` | SUPPORTED | Full family required and signed; per-object AES-256-GCM; wrong key is `BadDigest`/403 without plaintext. | tests/s3/test_s3_sse_c.py |
 | `x-amz-trailer` + `x-amz-decoded-content-length` (aws-chunked) | SUPPORTED | Accepted only on genuine streaming uploads; the decoder enforces the declared trailer and length. | tests/s3/test_s3_aws_chunked.py |
 | `Content-Encoding: aws-chunked` | SUPPORTED | Decoded and verified when streaming mode is genuine; otherwise rejected. | tests/s3/test_s3_aws_chunked.py |
-| `x-amz-grant-read` / `x-amz-grant-write` / `x-amz-grant-full-control` / `x-amz-grant-read-acp` / `x-amz-grant-write-acp` | REJECTED | 501: header-grant ACLs are not implemented. | tests/s3/test_s3_fail_closed.py |
+| `x-amz-grant-read` / `x-amz-grant-write` / `x-amz-grant-full-control` / `x-amz-grant-read-acp` / `x-amz-grant-write-acp` | SUPPORTED | On PUT `?acl` only (signed): `id="…"` CanonicalUser grantees apply like XML grants; `emailAddress`/`uri` grantees and the ACP pair 501; malformed grammar 400; every other route 501. | tests/s3/test_s3_acl_parity.py |
 | `x-amz-website-redirect-location` | REJECTED | 501: no website redirect. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-object-lock-mode` / `x-amz-object-lock-retain-until-date` / `x-amz-object-lock-legal-hold` (PUT) | REJECTED | 501: retention is set via the retention control, never acknowledged silently on upload. | tests/s3/test_s3_object_lock.py |
 | `x-amz-bypass-governance-retention` | REJECTED | 501: governance bypass does not exist. | tests/s3/test_s3_fail_closed.py |
@@ -137,7 +138,7 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `acl` (object) | SUPPORTED | Per-key object ACL grants; versioned ACL selectors unsupported. | tests/s3/test_s3_acl.py |
 | `retention` (+ `versionId`) | SUPPORTED | GOVERNANCE/COMPLIANCE retention windows per version; locked versions refuse deletes. | tests/s3/test_s3_object_lock.py |
 | `legal-hold` (+ `versionId`) | SUPPORTED | Per-version legal hold with delete fencing. | tests/s3/test_s3_object_lock.py |
-| `restore` (+ `versionId`) | SUPPORTED | Opens a bounded restore window for archived objects; Days/Type validated. | tests/s3/test_s3_restore.py |
+| `restore` (+ `versionId`) | SUPPORTED | Queues a real cold retrieval for verified archives (202, `ongoing-request="true"` until whole-SHA256 verification opens the window) or opens the hot-copy window when no archive exists; STANDARD objects answer `InvalidObjectState`; Days/Tier validated. | tests/s3/test_s3_restore.py |
 | `select` + `select-type` | SUPPORTED | `select-type=2` is required; bounded SQL subset over real bytes; unsupported expressions are rejected, never ignored. | tests/s3/test_s3_select.py |
 | `rename` / `renameObject` | SUPPORTED | TeleDrive superset of the directory-bucket rename; destination must not exist (409). | tests/s3/test_s3_rename.py |
 | `x-amz-rename-source` | SUPPORTED | Signed local `bucket/key` source; same-bucket only. | tests/s3/test_s3_rename.py |

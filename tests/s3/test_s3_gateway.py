@@ -124,12 +124,12 @@ def _teledrive_table_names():
     """
     from teledrive import api_keys, db, settings_store
     from teledrive.s3 import (annotations, bucket_encryption, cors, credentials,
-                              lifecycle, metadata_journal, multipart,
-                              notifications, object_metadata, policy,
-                              replication, report_configs, tagging, tiering,
-                              website)
-    from teledrive.storage import (catalog, gc_collect, jobs, manifest,
-                                   mtproto_rate_guard, user_mode)
+                              directory_buckets, lifecycle, metadata_journal,
+                              multipart, notifications, object_metadata,
+                              policy, replication, report_configs, tagging,
+                              tiering, website)
+    from teledrive.storage import (catalog, cold_store, gc_collect, jobs,
+                                   manifest, mtproto_rate_guard, user_mode)
     _ = (annotations, bucket_encryption, cors, lifecycle, object_metadata,
          policy, replication, tagging, website, gc_collect)
     names = {"schema_migrations", "object_content_fts"}
@@ -139,7 +139,9 @@ def _teledrive_table_names():
                      tiering.tiering_metadata, report_configs.report_metadata,
                      multipart._meta, credentials._meta, jobs._meta,
                      mtproto_rate_guard._meta, user_mode._meta,
-                     api_keys._metadata, settings_store._metadata):
+                     api_keys._metadata, settings_store._metadata,
+                     directory_buckets.sessions_metadata,
+                     cold_store.cold_metadata):
         names.update(metadata.tables)
     return names
 

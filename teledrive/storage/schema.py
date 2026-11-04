@@ -504,6 +504,53 @@ def _step_unique_telegram_identities(ctx: SchemaContext) -> None:
                          "uq_telegram_channels_channel_id")
 
 
+def _step_directory_bucket_type(ctx: SchemaContext) -> None:
+    """The bucket class column (append-only migration, handoff 07).
+
+    ``storage_buckets.bucket_type`` is ``general`` (every historical row)
+    or ``directory`` (an S3 Express-shaped ``base--zone-id--x-s3`` name).
+    The directory namespace shares the table so object heads, manifests
+    and GC keep working unchanged; only listings and routing read the
+    type. VARCHAR with a server default: MySQL rejects defaults on TEXT,
+    and pre-existing rows must read as ``general``.
+    """
+    _add_columns(ctx.engine, "storage_buckets", [
+        ("bucket_type", "VARCHAR(16) NOT NULL DEFAULT 'general'"),
+    ])
+
+
+def _step_s3_express_sessions(ctx: SchemaContext) -> None:
+    """S3 Express CreateSession credentials (append-only migration).
+
+    ``storage_s3_sessions`` holds the short-lived zonal sessions: a unique
+    access key, the SHA-256 hash of the session token (the token itself is
+    never stored), the Fernet-encrypted secret, and the binding to one
+    directory bucket, mode, signer and logical zone. Revocation is a row
+    flag, so it is durable and immediately visible to every worker.
+    """
+    from teledrive.s3 import directory_buckets
+
+    directory_buckets.sessions_metadata.create_all(ctx.engine)
+
+
+def _step_archive_manifests(ctx: SchemaContext) -> None:
+    """Cold-archive state machine (append-only migration, handoff 08).
+
+    ``storage_archive_versions`` is one row per archived immutable object
+    version: the resumable HOT -> ARCHIVING -> ARCHIVED -> RESTORING ->
+    RESTORED_TEMP state machine, the idempotency key, the generation
+    fence, the durable worker lease columns and the sealed-manifest
+    mirror (whole SHA-256, stored bytes, target URI, manifest JSON,
+    timestamps, last error). The physical blobs and sealed manifests
+    live in the cold store on disk; this table is their catalog side.
+    """
+    from teledrive.storage import cold_store
+
+    cold_store.cold_metadata.create_all(ctx.engine)
+    for index in cold_store.archive_versions.indexes:
+        index.create(ctx.engine, checkfirst=True)
+
+
 _STEPS: list[tuple[str, Step]] = [
     ("core", _step_core),
     ("verification_attempts", _step_verification_attempts),
@@ -532,6 +579,9 @@ _STEPS: list[tuple[str, Step]] = [
     ("security_audit", _step_security_audit),
     ("envelope_encryption", _step_envelope_encryption),
     ("unique_telegram_identities", _step_unique_telegram_identities),
+    ("directory_bucket_type", _step_directory_bucket_type),
+    ("s3_express_sessions", _step_s3_express_sessions),
+    ("archive_manifests", _step_archive_manifests),
 ]
 
 # Bump by appending a step; never reorder or remove one.

@@ -15,8 +15,8 @@ from collections.abc import Mapping
 _ROOT_BUCKET_LIST = frozenset({"max-buckets", "prefix", "bucket-region", "continuation-token"})
 # ListDirectoryBuckets (S3 Express One Zone) is ALSO GET / with only
 # continuation-token and max-directory-buckets (botocore requestUri "/").
-# TeleDrive has no directory buckets, so the only honest answer is a
-# permanent empty list; the accepted query surface is still AWS's exact one.
+# Directory buckets are real rows now (handoff 07); the query surface is
+# still AWS's exact one and general buckets never leak into the listing.
 _ROOT_DIRECTORY_LIST = frozenset({"continuation-token", "max-directory-buckets"})
 _DIRECTORY_LIST_HINT = "ListDirectoryBuckets"
 MAX_DIRECTORY_BUCKETS = 1000

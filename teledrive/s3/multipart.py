@@ -902,12 +902,28 @@ class MultipartStore:
         )).scalar_one_or_none()
         if tag is None:
             return None
-        match = re.fullmatch(r"[0-9a-f]{32}-([0-9]+)", tag)
-        if match is None:
-            raise MultipartError("InvalidObjectState", "Invalid multipart ETag record", 409)
-        count = int(match.group(1))
-        if count < 1 or count > MAX_PARTS:
-            raise MultipartError("InvalidObjectState", "Invalid multipart part count", 409)
+        # SSE-C completions store the full ciphertext SHA-256 (64 hex, no
+        # -N suffix: completion has no customer key and must not claim an
+        # MD5 of plaintext it cannot compute). The part count then comes
+        # from the layout rows themselves; every other invariant (sum,
+        # ordering, per-part digests) is checked below either way.
+        content_probe = self.manifests.resolve_content_id(object_id)
+        encrypted = self.db.connection.execute(
+            select(object_encryption.c.object_id).where(
+                object_encryption.c.object_id.in_(
+                    (object_id, content_probe)))
+        ).first() is not None
+        if encrypted:
+            if not re.fullmatch(r"[0-9a-f]{64}", tag):
+                raise MultipartError("InvalidObjectState", "Invalid multipart ETag record", 409)
+            count = None
+        else:
+            match = re.fullmatch(r"[0-9a-f]{32}-([0-9]+)", tag)
+            if match is None:
+                raise MultipartError("InvalidObjectState", "Invalid multipart ETag record", 409)
+            count = int(match.group(1))
+            if count < 1 or count > MAX_PARTS:
+                raise MultipartError("InvalidObjectState", "Invalid multipart part count", 409)
 
         content_id = self.manifests.resolve_content_id(object_id)
         content = self.manifests.get(content_id)
@@ -957,13 +973,16 @@ class MultipartStore:
                 raise MultipartError("InvalidObjectState", "Legacy multipart ETag mismatch", 409)
             layout = [(int(r[0]), int(r[1]), str(r[2]), str(r[3])) for r in rows]
 
-        if len(layout) != count or sum(p[1] for p in layout) != object_size:
+        if ((count is not None and len(layout) != count)
+                or not layout or sum(p[1] for p in layout) != object_size):
             raise MultipartError("InvalidObjectState", "Multipart snapshot is incomplete", 409)
         previous = 0
         for number, size, digest, etag in layout:
+            # Part ETags: 32-hex MD5 for plaintext parts, 64-hex ciphertext
+            # SHA-256 for SSE-C parts (see the ETag note above).
             if (number <= previous or number > MAX_PARTS or size < 0
                     or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                    or not re.fullmatch(r"[0-9a-f]{32}", etag)):
+                    or not re.fullmatch(r"[0-9a-f]{32,64}", etag)):
                 raise MultipartError("InvalidObjectState", "Invalid immutable multipart part", 409)
             previous = number
         return layout

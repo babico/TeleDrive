@@ -1,6 +1,6 @@
 # Schema migration steps
 
-TeleDrive has exactly one place that issues DDL: the migration coordinator in `teledrive/storage/schema.py`. Every store constructor calls `ensure_schema()`, which either proves the schema is current with one cheap `SELECT` or takes a real cross-process lock and applies every pending step. This page documents all 27 steps: what each one creates, which subsystem owns it, what data it touches, and what a code rollback would leave behind. It is the reference for operators checking an upgrade and for developers appending step 28.
+TeleDrive has exactly one place that issues DDL: the migration coordinator in `teledrive/storage/schema.py`. Every store constructor calls `ensure_schema()`, which either proves the schema is current with one cheap `SELECT` or takes a real cross-process lock and applies every pending step. This page documents all 30 steps: what each one creates, which subsystem owns it, what data it touches, and what a code rollback would leave behind. It is the reference for operators checking an upgrade and for developers appending step 31.
 
 The step list is append-only. `SCHEMA_VERSION` is simply the length of the `_STEPS` list, so adding a step bumps the version; steps are never reordered, edited after shipping, or removed. The source of truth is [`teledrive/storage/schema.py`](https://github.com/babico/TeleDrive/blob/main/teledrive/storage/schema.py); if this page and the code disagree, the code wins and this page needs a fix.
 
@@ -65,6 +65,9 @@ Correctness over cleverness: when several steps were added at once, the whole li
 | 25 | `security_audit` | Search and audit | The durable, append-only security-event trail. |
 | 26 | `envelope_encryption` | Credentials and encryption | Envelope (SSE-S3) columns on the object encryption marker. |
 | 27 | `unique_telegram_identities` | Core platform | One row per Telegram account and per channel: dedupe, then unique indexes. |
+| 28 | `directory_bucket_type` | Manifest and catalog | The `bucket_type` column separating general-purpose and S3 Express directory rows in the shared bucket table. |
+| 29 | `s3_express_sessions` | Credentials and encryption | Short-lived CreateSession credentials for directory-bucket zonal requests (hashed token, encrypted secret, bucket/mode/zone/owner binding, revocation flag). |
+| 30 | `archive_manifests` | Cold archive | The per-version physical archive state machine (`storage_archive_versions`): resumable HOT → ARCHIVING → ARCHIVED → RESTORING → RESTORED_TEMP transitions, idempotency key, generation fence, durable worker lease, sealed-manifest mirror (whole SHA-256, stored bytes, target URI, manifest JSON, timestamps, last error). |
 
 The sections below follow this family grouping; step numbers inside each family are the recorded `schema_migrations.version` values.
 
@@ -126,6 +129,10 @@ Every column either is nullable or carries a default, so older code inserting wi
 ### Step 24 - `share_object_id`
 
 Adds `share_links.object_id VARCHAR(36)`, nullable. A link used to be bound to a key, so it silently re-targeted replaced content and revived after an unlink plus re-upload; an unauthenticated capability then served bytes it was never issued for. New links serve exactly the pinned version; legacy rows stay NULL and key-bound. A downgrade returns to key-bound semantics for links created after the upgrade, which is precisely the vulnerability the step closed.
+
+### Step 28 - `directory_bucket_type`
+
+Adds `storage_buckets.bucket_type VARCHAR(16) NOT NULL DEFAULT 'general'` (handoff 07). The S3 Express directory namespace shares the bucket table so object heads, manifests and GC keep working unchanged; only listings and routing read the type. Every pre-existing row reads as `general` through the server default, and `ListBuckets` filters to `general` while `ListDirectoryBuckets` reads `directory` rows — neither namespace ever leaks the other. A directory bucket's name is immutable (`base--zone-id--x-s3`, where the zone is a deployment-configured *logical compatibility zone*, never an AWS Availability Zone claim). A downgrade leaves the column in place; older code ignores it and simply sees every bucket as general-purpose again.
 
 ## S3 configuration
 
@@ -205,6 +212,27 @@ Creates `storage_s3_credentials` (id, name, unique access key, Fernet-encrypted 
 
 Adds three columns to `storage_object_encryption`: `wrapped_key` (the per-object AES-256-GCM data key, wrapped by the KEK derived from the deployment master key), `key_wrap` (`VARCHAR(16) DEFAULT 'none'`) and `envelope_aad` (the identity the wrapped key is bound to: the object id for a single PUT, the upload id for a completed multipart). All are envelope-mode (SSE-S3) fields; NULL means SSE-C or plaintext, and the SSE-C key is never persisted in any form. A downgrade leaves the columns ignored.
 
+### Step 29 - `s3_express_sessions`
+
+Creates `storage_s3_sessions` (handoff 07): the short-lived credentials issued by S3 Express `CreateSession` for directory-bucket zonal requests. Each row carries a unique session access key, the SHA-256 **hash** of the session token (the token itself is never stored), the session secret Fernet-encrypted with the S3 master key, and the binding to exactly one directory bucket, one mode (`ReadOnly`/`ReadWrite`), the signing long-lived access key and the bucket's logical zone, plus created/expires timestamps and a revocation flag. Revocation — on bucket deletion or owner-credential revocation — is durable row state, so it is immediately visible to every worker and connection; there is no in-process session cache. The default lifetime is five minutes, like AWS. A downgrade leaves the table unread; leftover sessions expire on their own and can neither authenticate (the older binary has no resolver for them) nor outlive their timestamps.
+
+## Cold archive
+
+Owned by `teledrive/storage/cold_store.py` (handoff 08). The physical blobs and sealed manifests live on the cold volume (a local-filesystem provider; `TELEDRIVE_COLD_ARCHIVE_DIR` selects the root, default `<TELEDRIVE_DATA_DIR>/cold-archive`); this table is the catalog side. See the phase notes in the module docstring for the honesty contract: the archive is an ADDDITIONAL verified copy, deletion of the Telegram source stays behind the owner's GC gate, and no credentials or KEKs ever reach the archive.
+
+### Step 30 - `archive_manifests`
+
+Creates `storage_archive_versions` plus `ix_storage_archive_state`. One row per archived immutable object version, primary key the version id:
+
+- `state`: the resumable machine `HOT -> ARCHIVING -> ARCHIVED -> RESTORING -> RESTORED_TEMP -> ARCHIVED`. A restore that fails verification (missing or corrupt cold bytes) settles back to `ARCHIVED` with the reason in `error`, so no object is left permanently unreadable and the failed verification also blocks GC deletion.
+- `generation`: a monotonic transition fence. Every claim/transition increments it and every completion is a compare-and-set on the generation the worker read, so a worker whose lease expired mid-work can never complete a stale transition.
+- `idempotency_key`: `sha256("<version id>:<content sha256>:<size>")`. Replaying the same enqueue is a no-op; a different key means the "immutable" version's content identity drifted and the existing row is never silently re-targeted.
+- `lease_owner` / `lease_until_ns`: the durable worker lease (the `gc_collect` pattern). A crashed worker's lease expires and the next pass resumes the object idempotently — the physical writes (atomic temp file + fsync + rename + hash-verified readback) are safe to re-run.
+- `whole_sha256`, `stored_bytes`, `target_uri`, `manifest`: the sealed-manifest mirror. The manifest JSON carries the source object/version, the chunk lineage (ordinals, offsets, stored sizes and digests), the encryption MODE and key fingerprint (never keys, wrapped keys or KEKs), the verified receipt and the timestamps.
+- `restore_days` / `restore_tier` / `restore_until_ns` / `requested_ns` / `restored_ns`: the restore request and its bounded window. The Expedited/Standard/Bulk tier is recorded but does not change scheduling (FIFO); no AWS retrieval-speed or pricing SLA is implied. `storage_objects.restore_until_ns` remains the authoritative read gate; it opens in the same transaction as the `RESTORED_TEMP` transition, so a GET can only succeed after whole-SHA256 verification of the staged copy.
+
+A downgrade leaves the table unread. The cold blobs on disk keep their sealed manifests, so a re-upgrade re-adopts them; an older binary simply keeps the window-gate restore semantics (objects with no archive row fall back to the hot copy).
+
 ## Search and audit
 
 ### Step 21 - `content_search`
@@ -225,11 +253,11 @@ Creates `security_audit_events`, the durable security-event trail (credential is
 
 There is no down-migration, ever. The upgrade procedure is therefore: back up the database, upgrade, and if you must return to the previous code, restore the pre-upgrade backup. See [Upgrade](../operate/upgrade.md) for the sequence. What a code rollback leaves behind, mechanically:
 
-- The recorded `schema_migrations.version` stays at 27. An older binary with a smaller `SCHEMA_VERSION` sees the database as current and performs no DDL, so the rollback itself never migrates anything down.
+- The recorded `schema_migrations.version` stays at 30. An older binary with a smaller `SCHEMA_VERSION` sees the database as current and performs no DDL, so the rollback itself never migrates anything down.
 - Orphan tables (`security_audit_events`, `storage_report_configs`, and so on) and orphan columns (`wrapped_key`, `object_id`, ...) remain. Older code ignores them; every defensive column is nullable or carries a server default, so older inserts still succeed.
 - Step 27 is the exception that matters: it deleted duplicate rows, and that deletion is not reversible by rolling back code. Restoring the backup is the only way back.
 - The reverse direction is not safe: newer code on an older schema re-runs the full idempotent step list, which is correct, but the version probe means a partially applied migration completes rather than rolls back. Back up before every major version jump.
 
-## Adding step 28
+## Adding step 31
 
 For developers: append a `(name, function)` pair to `_STEPS` and nothing else. The version bump is automatic (`SCHEMA_VERSION = len(_STEPS)`). Never edit or reorder a shipped step - an already-migrated database will never run it again, which is exactly why steps 2, 3 and the index steps exist as separate versions. Keep the step idempotent: `checkfirst` for tables and indexes, column probes before ALTERs, and temporary-table materialisation for any dedupe. See the module docstring in [`teledrive/storage/schema.py`](https://github.com/babico/TeleDrive/blob/main/teledrive/storage/schema.py) for the design constraints, and [Databases](../guide/databases.md) for the supported backends.

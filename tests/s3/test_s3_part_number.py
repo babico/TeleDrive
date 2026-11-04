@@ -562,15 +562,12 @@ def test_part_number_sse_c_single_put_and_mpu(service):
                       extra_headers=wrong)
     assert rejected.status_code == 400
 
-    # An SSE-C multipart object: the immutable layout snapshot cannot be
-    # verified (the multipart ETag record for SSE-C uploads is the full
-    # ciphertext SHA-256 without a part-count suffix, which
-    # object_parts_for_version rejects). This is a PRE-EXISTING
-    # limitation shared with GetObjectAttributes(ObjectParts) on the same
-    # objects -- teledrive/s3/multipart.py is outside this task's file
-    # ownership -- and the honest answer is to fail closed (409) rather
-    # than serve parts from an unverifiable layout. The full-body read
-    # keeps working.
+    # An SSE-C multipart object: the multipart ETag record is the full
+    # ciphertext SHA-256 without a part-count suffix, and per-part ETags
+    # are 64-hex ciphertext digests. object_parts_for_version accepts
+    # exactly those shapes for encrypted completions (the part count then
+    # comes from the layout rows), so part reads serve real decrypted
+    # bytes instead of failing closed.
     upload_id = begin(service, "mpu-secret.bin", headers=ssec)
     first = os.urandom(5 * MIB)
     last = b"secret-tail" * 31
@@ -582,15 +579,19 @@ def test_part_number_sse_c_single_put_and_mpu(service):
     finished = complete(service, upload_id, sorted(etags.items()),
                         key="mpu-secret.bin", headers=ssec)
     assert finished.status_code == 200, finished.text
-    before = service[2].downloads
-    denied = signed(service, "GET", f"/{BUCKET}/mpu-secret.bin?partNumber=1",
-                    extra_headers=ssec)
-    assert denied.status_code == 409
-    assert error_code(denied) == "InvalidObjectState"
+    part_read = signed(service, "GET", f"/{BUCKET}/mpu-secret.bin?partNumber=1",
+                       extra_headers=ssec)
+    assert part_read.status_code == 206, part_read.text
+    assert part_read.content == first
+    assert part_read.headers["content-range"] == (
+        f"bytes 0-{len(first) - 1}/{len(first) + len(last)}")
+    assert part_read.headers.get("x-amz-mp-parts-count") == "2"
+    tail = signed(service, "GET", f"/{BUCKET}/mpu-secret.bin?partNumber=2",
+                  extra_headers=ssec)
+    assert tail.status_code == 206 and tail.content == last
     full = signed(service, "GET", f"/{BUCKET}/mpu-secret.bin",
                   extra_headers=ssec)
     assert full.status_code == 200 and full.content == first + last
-    assert service[2].downloads > before
 
 
 def test_part_number_envelope_object_part_one(service, monkeypatch):

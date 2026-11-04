@@ -155,11 +155,11 @@ def _telemetry():
     """
     from teledrive import api_keys, db, settings_store
     from teledrive.s3 import (annotations, bucket_encryption, cors, credentials,
-                              lifecycle, metadata_journal, multipart,
-                              notifications, object_metadata, policy,
-                              replication, report_configs, tagging, tiering,
-                              website)
-    from teledrive.storage import catalog, gc_collect, jobs, manifest
+                              directory_buckets, lifecycle, metadata_journal,
+                              multipart, notifications, object_metadata,
+                              policy, replication, report_configs, tagging,
+                              tiering, website)
+    from teledrive.storage import catalog, cold_store, gc_collect, jobs, manifest
     from teledrive.storage import mtproto_rate_guard, user_mode
 
     _ = (annotations, bucket_encryption, cors, lifecycle, object_metadata,
@@ -171,6 +171,7 @@ def _telemetry():
         report_configs.report_metadata, multipart._meta, credentials._meta,
         jobs._meta, mtproto_rate_guard._meta, user_mode._meta,
         api_keys._metadata, settings_store._metadata,
+        directory_buckets.sessions_metadata, cold_store.cold_metadata,
     ]
 
 

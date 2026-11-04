@@ -164,10 +164,16 @@ class BucketAdminMixin:
     def delete_bucket(self, name: str) -> None:
         """Refuse buckets with any current or historical manifests."""
         existing = self.db.connection.execute(
-            select(buckets.c.name).where(buckets.c.name == name)
+            select(buckets.c.name, buckets.c.created_at).where(
+                buckets.c.name == name)
         ).first()
         if existing is None:
             raise FileNotFoundError("Bucket does not exist")
+        # Pin the exact row this delete validated. A concurrent create of
+        # the same name must never be removed by this call's stale
+        # conclusion: the final DELETE below matches created_at too, so a
+        # re-created bucket survives and this delete observes it is gone.
+        created_at = int(existing[1])
         history = self.db.connection.execute(
             select(objects.c.id).where(objects.c.bucket == name).limit(1)
         ).first()
@@ -183,6 +189,24 @@ class BucketAdminMixin:
                 raise ValueError("Bucket has multipart history; safe GC required")
         if history is not None:
             raise ValueError("Bucket has object history; safe physical GC required")
+        # Remove the bucket row FIRST, inside the same transaction as the
+        # purge below, and guard the DELETE with created_at: a bucket
+        # re-created between the checks above and this statement must not
+        # be removed by a stale conclusion, and the name-keyed
+        # configuration is only ever swept once the bucket itself is gone.
+        # Residual, documented window: a configuration write whose
+        # existence check ran in an earlier transaction can still commit a
+        # row afterwards (a foreign key with ON DELETE CASCADE is the
+        # complete fix; it needs a schema migration across fourteen
+        # tables). Everything else converges.
+        removed = self.db.connection.execute(delete(buckets).where(
+            buckets.c.name == name, buckets.c.created_at == created_at))
+        if not removed.rowcount:
+            # The bucket changed identity underneath us (deleted and
+            # re-created): this delete validated a row that no longer
+            # exists, so refuse rather than touch the new bucket.
+            self.db.connection.rollback()
+            raise FileNotFoundError("Bucket does not exist")
         # A physically empty bucket can be deleted even if its tag set is
         # nonempty; do not leave dangling metadata across SQL backends.
         if inspect(self.db.engine).has_table("storage_bucket_tags"):
@@ -270,7 +294,16 @@ class BucketAdminMixin:
             self.db.connection.execute(text(
                 "DELETE FROM storage_object_acl_grants WHERE bucket = :bucket"
             ), {"bucket": name})
-        self.db.connection.execute(delete(buckets).where(buckets.c.name == name))
+        # Remove the bucket row FIRST (guarded by created_at), then sweep
+        # the name-keyed configuration in the same transaction: with the
+        # row gone, a concurrent config write that already passed its own
+        # existence check can no longer observe a live bucket, and the
+        # sweep below runs after the deletion rather than before it. The
+        # guard means a bucket re-created between the checks above and
+        # this statement is left untouched instead of being deleted by a
+        # stale conclusion.
+        # The bucket row itself was deleted before the purge above (one
+        # transaction); commit the whole effect together.
         self.db.commit()
         # The bulk pass above already clears shares atomically with the
         # bucket.  Also run the canonical store helper so the purge contract

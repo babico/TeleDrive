@@ -480,21 +480,39 @@ class BucketVersionMixin:
         if key_marker:
             self._keyhash(key_marker)
             if version_marker:
+                marker_source = published_versions.join(
+                    objects, published_versions.c.object_id == objects.c.id
+                ).outerjoin(
+                    removed_versions,
+                    removed_versions.c.object_id == published_versions.c.object_id,
+                )
+                marker_columns = (
+                    published_versions.c.bucket == bucket,
+                    objects.c.object_key == key_marker,
+                    published_versions.c.object_id == version_marker,
+                    objects.c.status.in_(("ready", "delete-marker")),
+                )
                 selected = self.db.connection.execute(
                     select(published_versions.c.committed_ns)
-                    .select_from(published_versions.join(
-                        objects, published_versions.c.object_id == objects.c.id
-                    ).outerjoin(
-                        removed_versions,
-                        removed_versions.c.object_id == published_versions.c.object_id,
-                    )).where(
-                        removed_versions.c.object_id.is_(None),
-                        published_versions.c.bucket == bucket,
-                        objects.c.object_key == key_marker,
-                        published_versions.c.object_id == version_marker,
-                        objects.c.status.in_(("ready", "delete-marker")),
-                    )
+                    .select_from(marker_source)
+                    .where(removed_versions.c.object_id.is_(None),
+                           *marker_columns)
                 ).scalar_one_or_none()
+                if selected is None:
+                    # The page that issued this marker may have been
+                    # followed by a concurrent delete of the marker version
+                    # (a client paginating while another writer mutates the
+                    # same prefix). The published_versions row survives
+                    # removal, so resume at the exact keyset position
+                    # instead of erroring: monotonic pagination must skip or
+                    # include, never fail. A marker that never named a
+                    # published version of this bucket/key still fails
+                    # closed below.
+                    selected = self.db.connection.execute(
+                        select(published_versions.c.committed_ns)
+                        .select_from(marker_source)
+                        .where(*marker_columns)
+                    ).scalar_one_or_none()
                 if selected is None:
                     raise ValueError("Unknown version-id marker")
                 where.append(or_(
@@ -787,6 +805,15 @@ class BucketVersionMixin:
                 detail={"source_key": source_key})
             self.db.commit()
             return ObjectHead(self.manifests.get(source_id), generation + 1)
+        except IntegrityError as exc:
+            # Two concurrent renames can both pass the destination-occupied
+            # check and then move their head onto the same destination key.
+            # The head table keys on (bucket, key_hash), so the loser's
+            # UPDATE violates that constraint: report the designed
+            # FileExistsError (HTTP 409 OperationAborted), never a raw
+            # IntegrityError (a 500 the client would retry blindly).
+            self.db.connection.rollback()
+            raise FileExistsError("Destination object already exists") from exc
         except BaseException:
             self.db.connection.rollback()
             raise

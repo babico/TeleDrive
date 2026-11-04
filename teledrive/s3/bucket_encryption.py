@@ -180,21 +180,23 @@ class BucketEncryptionStore:
                 raise BucketEncryptionError(
                     "InternalError", "Unsupported encryption rules", 500)
         now = int(time.time())
-        existing = self.db.connection.execute(select(
-            bucket_encryption.c.bucket).where(
-                bucket_encryption.c.bucket == bucket)).scalar_one_or_none()
         payload = json.dumps(rules, sort_keys=True, separators=(",", ":"))
-        if existing is None:
+        # UPDATE first, INSERT if it matched nothing: the portable upsert
+        # shape. A SELECT-then-INSERT/UPDATE here could surface a raw
+        # IntegrityError as a 500 when two concurrent first writes on an
+        # absent row race (found by the evidence-matrix race audit); the
+        # UPDATE takes the write lock first, so on every backend exactly
+        # one writer inserts and the other converges onto the row.
+        from sqlalchemy import update
+        changed = self.db.connection.execute(update(bucket_encryption).where(
+            bucket_encryption.c.bucket == bucket).values(
+                rules=payload, updated_at=now,
+                updated_by=(actor or "-")[:64]))
+        if not changed.rowcount:
             self.db.connection.execute(insert(bucket_encryption).values(
                 bucket=bucket, rules=payload, updated_at=now,
                 updated_by=(actor or "-")[:64],
             ))
-        else:
-            from sqlalchemy import update
-            self.db.connection.execute(update(bucket_encryption).where(
-                bucket_encryption.c.bucket == bucket).values(
-                    rules=payload, updated_at=now,
-                    updated_by=(actor or "-")[:64]))
         self.db.commit()
 
     def delete(self, bucket: str) -> None:

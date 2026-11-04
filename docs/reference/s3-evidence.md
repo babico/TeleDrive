@@ -57,250 +57,250 @@ and website hosting.
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| CreateBucket | tests/s3/test_s3_gateway.py | | — | — | | | tests/s3/test_s3_bucket_listing.py |
-| HeadBucket | tests/s3/test_s3_route_guard.py | | — | — | — | — | |
-| DeleteBucket | tests/s3/test_s3_gateway.py | | — | — | | | |
+| CreateBucket | tests/s3/test_s3_gateway.py | tests/s3/test_s3_evidence_authfail.py | — | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_bucket_listing.py |
+| HeadBucket | tests/s3/test_s3_route_guard.py | tests/s3/test_s3_evidence_authfail.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| DeleteBucket | tests/s3/test_s3_gateway.py | tests/s3/test_s3_evidence_authfail.py | — | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_control.py |
 | ListBuckets | tests/s3/test_s3_bucket_listing.py | tests/s3/test_s3_permissions.py | tests/s3/test_s3_bucket_listing.py | — | — | — | tests/s3/test_s3_bucket_listing.py |
-| GetBucketLocation | tests/s3/test_s3_bucket_location.py | tests/s3/test_s3_bucket_location.py | — | — | — | — | |
-| ListDirectoryBuckets | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | — | — | — | |
-| CreateSession | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | — | — | tests/s3/test_s3_directory_buckets.py | |
+| GetBucketLocation | tests/s3/test_s3_bucket_location.py | tests/s3/test_s3_bucket_location.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| ListDirectoryBuckets | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | — | — | — | tests/s3/test_s3_evidence_race_listings.py |
+| CreateSession | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_directory_buckets.py | — | — | tests/s3/test_s3_directory_buckets.py | tests/s3/test_s3_evidence_race_control.py |
 
 ## Object listing
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| ListObjects | tests/s3/test_s3_listing_v1.py | | tests/s3/test_s3_listing_v1.py | — | — | — | |
-| ListObjectsV2 | tests/s3/test_s3_gateway.py | tests/s3/test_s3_permissions.py | tests/s3/test_s3_gateway.py | — | — | — | |
-| ListObjectVersions | tests/s3/test_s3_version_listing.py | tests/s3/test_s3_version_listing.py | tests/s3/test_s3_version_listing.py | — | — | — | |
+| ListObjects | tests/s3/test_s3_listing_v1.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_listing_v1.py | — | — | — | tests/s3/test_s3_evidence_race_listings.py |
+| ListObjectsV2 | tests/s3/test_s3_gateway.py | tests/s3/test_s3_permissions.py | tests/s3/test_s3_gateway.py | — | — | — | tests/s3/test_s3_evidence_race_listings.py |
+| ListObjectVersions | tests/s3/test_s3_version_listing.py | tests/s3/test_s3_version_listing.py | tests/s3/test_s3_version_listing.py | — | — | — | tests/s3/test_s3_evidence_race_listings.py |
 
 ## Object data plane
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
 | PutObject | tests/s3/test_s3_gateway.py | tests/s3/test_s3_permissions.py | tests/s3/test_s3_metadata.py | tests/s3/test_s3_quota_gateway.py | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_retry_race_matrix.py |
-| GetObject | tests/s3/test_s3_gateway.py | tests/s3/test_s3_permissions.py | — | — | — | — | |
-| HeadObject | tests/s3/test_s3_gateway.py | | — | — | — | — | |
+| GetObject | tests/s3/test_s3_gateway.py | tests/s3/test_s3_permissions.py | — | — | — | — | tests/s3/test_s3_evidence_race_objects.py |
+| HeadObject | tests/s3/test_s3_gateway.py | tests/s3/test_s3_evidence_authfail.py | — | — | — | — | tests/s3/test_s3_evidence_race_objects.py |
 | DeleteObject | tests/s3/test_s3_gateway.py | tests/s3/test_s3_permissions.py | — | — | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_retry_race_matrix.py |
-| DeleteObjects | tests/s3/test_s3_batch_delete.py | tests/s3/test_s3_batch_delete.py | tests/s3/test_s3_batch_delete.py | | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | |
-| CopyObject | tests/s3/test_s3_copy.py | tests/s3/test_s3_copy.py | | — | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | |
-| GetObjectAttributes | tests/s3/test_s3_object_attributes.py | tests/s3/test_s3_object_attributes.py | tests/s3/test_s3_object_attributes.py | — | — | — | |
-| RenameObject | tests/s3/test_s3_rename.py | tests/s3/test_s3_rename.py | tests/s3/test_s3_rename.py | — | | tests/s3/test_s3_restart_matrix.py | |
-| SelectObjectContent | tests/s3/test_s3_select.py | tests/s3/test_s3_select.py | tests/s3/test_s3_select.py | tests/s3/test_s3_select.py | — | — | |
-| UpdateObjectEncryption | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_sse_c.py | — | | | |
+| DeleteObjects | tests/s3/test_s3_batch_delete.py | tests/s3/test_s3_batch_delete.py | tests/s3/test_s3_batch_delete.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_objects.py |
+| CopyObject | tests/s3/test_s3_copy.py | tests/s3/test_s3_copy.py | tests/s3/test_s3_evidence_limits.py | — | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_objects.py |
+| GetObjectAttributes | tests/s3/test_s3_object_attributes.py | tests/s3/test_s3_object_attributes.py | tests/s3/test_s3_object_attributes.py | — | — | — | tests/s3/test_s3_evidence_race_objects.py |
+| RenameObject | tests/s3/test_s3_rename.py | tests/s3/test_s3_rename.py | tests/s3/test_s3_rename.py | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_objects.py |
+| SelectObjectContent | tests/s3/test_s3_select.py | tests/s3/test_s3_select.py | tests/s3/test_s3_select.py | tests/s3/test_s3_select.py | — | — | tests/s3/test_s3_evidence_race_objects.py |
+| UpdateObjectEncryption | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_sse_c.py | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_objects.py |
 
 ## Multipart
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| CreateMultipartUpload | tests/s3/test_s3_multipart.py | | | — | | | |
-| UploadPart | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | | | tests/s3/test_s3_restart_matrix.py | |
-| UploadPartCopy | tests/s3/test_s3_gateway.py | | | — | | | |
-| ListParts | tests/s3/test_s3_multipart.py | | | — | — | — | |
-| ListMultipartUploads | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | — | — | — | |
-| CompleteMultipartUpload | tests/s3/test_s3_multipart.py | | tests/s3/test_s3_multipart.py | | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_retry_race_matrix.py |
-| AbortMultipartUpload | tests/s3/test_s3_multipart.py | | — | — | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | |
+| CreateMultipartUpload | tests/s3/test_s3_multipart.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_evidence_limits.py | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_objects.py |
+| UploadPart | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_objects.py |
+| UploadPartCopy | tests/s3/test_s3_gateway.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_evidence_limits.py | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_objects.py |
+| ListParts | tests/s3/test_s3_multipart.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_evidence_limits.py | — | — | — | tests/s3/test_s3_evidence_race_listings.py |
+| ListMultipartUploads | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | tests/s3/test_s3_multipart.py | — | — | — | tests/s3/test_s3_evidence_race_listings.py |
+| CompleteMultipartUpload | tests/s3/test_s3_multipart.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_multipart.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_retry_race_matrix.py |
+| AbortMultipartUpload | tests/s3/test_s3_multipart.py | tests/s3/test_s3_evidence_authfail.py | — | — | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_objects.py |
 
 ## Bucket tagging
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | — | — | |
+| GetBucketTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 | PutBucketTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | tests/s3/test_s3_evidence_tagging.py | tests/s3/test_s3_evidence_tagging.py | tests/s3/test_s3_evidence_tagging.py |
-| DeleteBucketTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | tests/s3/test_s3_evidence_tagging.py | | |
+| DeleteBucketTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | tests/s3/test_s3_evidence_tagging.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Object tagging
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetObjectTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | — | — | |
+| GetObjectTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 | PutObjectTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | tests/s3/test_s3_evidence_tagging.py | tests/s3/test_s3_evidence_tagging.py | tests/s3/test_s3_evidence_tagging.py |
-| DeleteObjectTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | tests/s3/test_s3_evidence_tagging.py | | |
+| DeleteObjectTagging | tests/s3/test_s3_tagging.py | tests/s3/test_s3_tagging.py | — | — | tests/s3/test_s3_evidence_tagging.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## CORS
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketCors | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | — | — | — | — | |
-| PutBucketCors | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | | | |
-| DeleteBucketCors | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | — | — | | | |
+| GetBucketCors | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketCors | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteBucketCors | tests/s3/test_s3_cors.py | tests/s3/test_s3_cors.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Versioning
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketVersioning | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_bucket_versioning.py | — | — | — | — | |
-| PutBucketVersioning | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_bucket_versioning.py | | tests/s3/test_s3_bucket_versioning.py | | |
+| GetBucketVersioning | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_bucket_versioning.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketVersioning | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_bucket_versioning.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Website hosting
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketWebsite | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | — | — | — | — | |
+| GetBucketWebsite | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 | PutBucketWebsite | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | tests/s3/test_s3_evidence_website.py | tests/s3/test_s3_evidence_website.py | tests/s3/test_s3_evidence_website.py |
-| DeleteBucketWebsite | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | — | — | tests/s3/test_s3_evidence_website.py | | |
+| DeleteBucketWebsite | tests/s3/test_s3_website.py | tests/s3/test_s3_website.py | — | — | tests/s3/test_s3_evidence_website.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Notifications and logging
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketNotification | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | — | — | — | — | |
-| GetBucketNotificationConfiguration | tests/s3/test_s3_notifications.py | tests/s3/test_s3_evidence_notifications.py | — | — | — | — | |
+| GetBucketNotification | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| GetBucketNotificationConfiguration | tests/s3/test_s3_notifications.py | tests/s3/test_s3_evidence_notifications.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
 | PutBucketNotification | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py |
-| PutBucketNotificationConfiguration | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py |
-| GetBucketLogging | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | — | — | — | — | |
+| PutBucketNotificationConfiguration | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py |
+| GetBucketLogging | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
 | PutBucketLogging | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | tests/s3/test_s3_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py | tests/s3/test_s3_evidence_notifications.py |
 
 ## Replication
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketReplication | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | — | — | — | — | |
-| PutBucketReplication | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | | | | |
-| DeleteBucketReplication | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | — | — | | | |
+| GetBucketReplication | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketReplication | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteBucketReplication | tests/s3/test_s3_replication.py | tests/s3/test_s3_replication.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Storage reports — analytics
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketAnalyticsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | — | — | — | — | |
+| GetBucketAnalyticsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 | PutBucketAnalyticsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_evidence_reports.py |
-| DeleteBucketAnalyticsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | tests/s3/test_s3_report_configs.py | | |
-| ListBucketAnalyticsConfigurations | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | — | — | |
+| DeleteBucketAnalyticsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| ListBucketAnalyticsConfigurations | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 
 ## Storage reports — inventory
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketInventoryConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | — | — | — | — | |
+| GetBucketInventoryConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 | PutBucketInventoryConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_evidence_reports.py |
-| DeleteBucketInventoryConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | tests/s3/test_s3_report_configs.py | | |
-| ListBucketInventoryConfigurations | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | — | — | |
+| DeleteBucketInventoryConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| ListBucketInventoryConfigurations | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 
 ## Storage reports — metrics
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketMetricsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | — | — | — | — | |
+| GetBucketMetricsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 | PutBucketMetricsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_evidence_reports.py |
-| DeleteBucketMetricsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | tests/s3/test_s3_report_configs.py | | |
-| ListBucketMetricsConfigurations | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | — | — | |
+| DeleteBucketMetricsConfiguration | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| ListBucketMetricsConfigurations | tests/s3/test_s3_report_configs.py | tests/s3/test_s3_evidence_reports.py | tests/s3/test_s3_report_configs.py | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 
 ## Intelligent tiering
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketIntelligentTieringConfiguration | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | — | — | — | — | |
-| PutBucketIntelligentTieringConfiguration | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | | | |
-| DeleteBucketIntelligentTieringConfiguration | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | — | — | | | |
-| ListBucketIntelligentTieringConfigurations | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | — | — | — | |
+| GetBucketIntelligentTieringConfiguration | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketIntelligentTieringConfiguration | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteBucketIntelligentTieringConfiguration | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| ListBucketIntelligentTieringConfigurations | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | tests/s3/test_s3_tiering.py | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 
 ## Metadata configuration
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| CreateBucketMetadataConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | | |
-| CreateBucketMetadataTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | | | tests/s3/test_s3_evidence_metadata_config.py | | |
-| GetBucketMetadataConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | — | — | — | — | |
-| GetBucketMetadataTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | — | — | — | — | |
-| DeleteBucketMetadataConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | | — | tests/s3/test_s3_evidence_metadata_config.py | | |
-| DeleteBucketMetadataTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_metadata_journal.py | — | | | |
-| UpdateBucketMetadataJournalTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | | | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_metadata_config.py |
-| UpdateBucketMetadataInventoryTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | | | | | |
-| UpdateBucketMetadataAnnotationTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | | | | | |
+| CreateBucketMetadataConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| CreateBucketMetadataTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| GetBucketMetadataConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| GetBucketMetadataTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| DeleteBucketMetadataConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_limits.py | — | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| DeleteBucketMetadataTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_metadata_journal.py | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| UpdateBucketMetadataJournalTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_metadata_config.py |
+| UpdateBucketMetadataInventoryTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| UpdateBucketMetadataAnnotationTableConfiguration | tests/s3/test_s3_metadata_journal.py | tests/s3/test_s3_evidence_metadata_config.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
 
 ## Object annotations
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetObjectAnnotation | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | — | — | — | — | |
-| PutObjectAnnotation | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | | |
-| DeleteObjectAnnotation | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | — | — | | | |
-| ListObjectAnnotations | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | — | — | — | |
+| GetObjectAnnotation | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutObjectAnnotation | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteObjectAnnotation | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | — | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_config.py |
+| ListObjectAnnotations | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | tests/s3/test_s3_annotations.py | — | — | — | tests/s3/test_s3_evidence_race_config.py |
 
 ## ABAC
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketAbac | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | — | — | — | — | |
-| PutBucketAbac | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | | | |
+| GetBucketAbac | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketAbac | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## ACL
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | — | — | — | — | |
-| PutBucketAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | | | | |
-| GetObjectAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | — | — | — | — | |
-| PutObjectAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | | | | |
+| GetBucketAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| GetObjectAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutObjectAcl | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | tests/s3/test_s3_acl.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Ownership controls
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketOwnershipControls | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | — | — | — | — | |
-| PutBucketOwnershipControls | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | | | | |
-| DeleteBucketOwnershipControls | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | — | — | | | |
+| GetBucketOwnershipControls | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketOwnershipControls | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteBucketOwnershipControls | tests/s3/test_s3_ownership_abac.py | tests/s3/test_s3_ownership_abac.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Public access block
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetPublicAccessBlock | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | — | — | — | — | |
-| PutPublicAccessBlock | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | | | | |
-| DeletePublicAccessBlock | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | — | — | | | |
+| GetPublicAccessBlock | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutPublicAccessBlock | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeletePublicAccessBlock | tests/s3/test_s3_public_access_block.py | tests/s3/test_s3_public_access_block.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Bucket policy
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketPolicy | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | — | — | — | — | |
-| PutBucketPolicy | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_retry_race_matrix.py | | |
-| DeleteBucketPolicy | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | — | — | | | |
-| GetBucketPolicyStatus | tests/s3/test_s3_policy_status.py | tests/s3/test_s3_policy_status.py | — | — | — | — | |
+| GetBucketPolicy | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketPolicy | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_retry_race_matrix.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| DeleteBucketPolicy | tests/s3/test_s3_policy_engine.py | tests/s3/test_s3_policy_engine.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| GetBucketPolicyStatus | tests/s3/test_s3_policy_status.py | tests/s3/test_s3_policy_status.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
 
 ## Bucket encryption
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketEncryption | tests/s3/test_s3_sse_c.py | | — | — | — | — | |
-| PutBucketEncryption | tests/s3/test_s3_sse_c.py | | tests/s3/test_s3_sse_c.py | | | | |
-| DeleteBucketEncryption | tests/s3/test_s3_sse_c.py | | — | — | | | |
+| GetBucketEncryption | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_evidence_authfail.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketEncryption | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteBucketEncryption | tests/s3/test_s3_sse_c.py | tests/s3/test_s3_evidence_authfail.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Object lock and retention
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetObjectLockConfiguration | tests/s3/test_s3_object_lock.py | | — | — | — | — | |
-| PutObjectLockConfiguration | tests/s3/test_s3_object_lock.py | | tests/s3/test_s3_object_lock.py | | | tests/s3/test_s3_restart_matrix.py | |
-| GetObjectRetention | tests/s3/test_s3_object_lock.py | | — | — | — | — | |
-| PutObjectRetention | tests/s3/test_s3_object_lock.py | | | | | | |
-| GetObjectLegalHold | tests/s3/test_s3_object_lock.py | | — | — | — | — | |
-| PutObjectLegalHold | tests/s3/test_s3_object_lock.py | | | | | | |
+| GetObjectLockConfiguration | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_authfail.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| PutObjectLockConfiguration | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_control.py |
+| GetObjectRetention | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_authfail.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| PutObjectRetention | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_control.py |
+| GetObjectLegalHold | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_authfail.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| PutObjectLegalHold | tests/s3/test_s3_object_lock.py | tests/s3/test_s3_evidence_authfail.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_limits.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_objects.py | tests/s3/test_s3_evidence_race_control.py |
 
 ## Lifecycle
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketLifecycle | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | — | — | — | — | |
-| PutBucketLifecycle | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | | | |
-| GetBucketLifecycleConfiguration | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | — | — | — | — | |
-| PutBucketLifecycleConfiguration | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | | | |
-| DeleteBucketLifecycle | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | — | — | | | |
+| GetBucketLifecycle | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketLifecycle | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| GetBucketLifecycleConfiguration | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | — | — | — | — | tests/s3/test_s3_evidence_race_config.py |
+| PutBucketLifecycleConfiguration | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
+| DeleteBucketLifecycle | tests/s3/test_s3_lifecycle.py | tests/s3/test_s3_lifecycle.py | — | — | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_config.py |
 
 ## Restore
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| RestoreObject | tests/s3/test_s3_tiering.py | tests/s3/test_s3_restore.py | tests/s3/test_s3_restore.py | — | | tests/s3/test_s3_restart_matrix.py | |
+| RestoreObject | tests/s3/test_s3_tiering.py | tests/s3/test_s3_restore.py | tests/s3/test_s3_restore.py | — | tests/s3/test_s3_evidence_retry_objects.py | tests/s3/test_s3_restart_matrix.py | tests/s3/test_s3_evidence_race_objects.py |
 
 ## Request payment and accelerate
 
 | Operation | normal | auth-failure | malformed | over-limit | retry | crash-restart | race |
 |---|---|---|---|---|---|---|---|
-| GetBucketRequestPayment | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | — | — | — | — | |
-| PutBucketRequestPayment | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | | | |
-| GetBucketAccelerateConfiguration | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | — | — | — | — | |
-| PutBucketAccelerateConfiguration | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | | | |
+| GetBucketRequestPayment | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| PutBucketRequestPayment | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
+| GetBucketAccelerateConfiguration | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | — | — | — | — | tests/s3/test_s3_evidence_race_control.py |
+| PutBucketAccelerateConfiguration | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_request_payment_accelerate.py | tests/s3/test_s3_evidence_retry_config.py | tests/s3/test_s3_evidence_restart_config.py | tests/s3/test_s3_evidence_race_control.py |
 
 ## Summary
 
@@ -308,73 +308,48 @@ and website hosting.
 `tests/s3/test_s3_evidence_*.py` files landed (the honest baseline), and
 after (the current state):
 
-| Column | filled (before) | filled (now) | n/a | open |
-|---|---|---|---|---|
-| normal | 113 | 114 | 0 | 0 |
-| auth-failure | 74 | 95 | 0 | 19 |
-| malformed | 51 | 51 | 51 | 12 |
-| over-limit | 18 | 21 | 76 | 17 |
-| retry | 12 | 28 | 50 | 36 |
-| crash-restart | 11 | 21 | 49 | 44 |
-| race | 5 | 15 | 0 | 99 |
+| Column | filled (before) | filled (now) | n/a | open | coverage of applicable |
+|---|---|---|---|---|---|
+| normal | 113 | 114 | 0 | 0 | 100% |
+| auth-failure | 74 | 114 | 0 | 0 | 100% |
+| malformed | 51 | 63 | 51 | 0 | 100% |
+| over-limit | 18 | 38 | 76 | 0 | 100% |
+| retry | 12 | 64 | 50 | 0 | 100% |
+| crash-restart | 11 | 65 | 49 | 0 | 100% |
+| race | 5 | 114 | 0 | 0 | 100% |
 
 A cell is *open* when it is applicable but empty; `n/a` cells are
 structurally impossible (bodyless requests for malformed/over-limit,
-side-effect-free reads for retry/crash-restart). Coverage of applicable
-cells after the evidence files: normal 114/114, auth-failure 95/114,
-malformed 51/63, over-limit 21/38, retry 28/64, crash-restart 21/65,
-race 15/114.
+side-effect-free reads for retry/crash-restart). All seven columns are
+now complete for every applicable cell.
 
-The ten largest remaining gaps:
+The remaining gaps:
 
-1. **race, everything but the publish state machines — 99 open cells.**
-   The retry/race matrix covers the write state machines and the
-   evidence files cover the report/tagging/website/notification/metadata
-   PUT races; read-side behavior under concurrent mutation is proven
-   only for `ListBuckets`, and the delete paths of every config family
-   have no concurrent delete-vs-put test.
-2. **crash-restart, single-transaction config writes — 44 open cells.**
-   CORS, versioning, replication, intelligent tiering, ACL, ownership,
-   PAB, policy get/delete, encryption, lifecycle, restore and the
-   report-delete rows: each commits its whole effect in one SQL
-   transaction, so the restart matrix deliberately excludes them, and no
-   dedicated per-operation restart test exists yet.
-3. **retry, the remaining write families — 36 open cells.** The
-   multipart creates/parts/copies, and the config families not covered
-   by the evidence files (CORS, versioning, replication, tiering, ACL,
-   ownership, PAB, policy get/delete, encryption, lifecycle, restore,
-   accelerate/request payment, annotation delete).
-4. **auth-failure, the lock family — 6 open cells.**
-   `PutObjectLockConfiguration`, `PutObjectRetention`,
-   `PutObjectLegalHold` and the lock reads have no signed-but-
-   unauthorized denial test; the unsigned sweep is their only floor.
-5. **auth-failure, service and multipart basics — 13 open cells.**
-   `CreateBucket`, `HeadBucket`, `DeleteBucket`, `HeadObject`,
-   `CreateMultipartUpload`, `UploadPartCopy`, `ListParts`,
-   `CompleteMultipartUpload`, `AbortMultipartUpload`,
-   `CreateBucketMetadataTableConfiguration`-adjacent V1 rows and the
-   bucket-encryption trio have no scoped-credential denial naming them.
-6. **over-limit, the sweep-only bodies — 17 open cells.**
-   `PutBucketReplication` is covered only by the global sweep;
-   `PutBucketVersioning`, `PutBucketAcl`, `PutObjectAcl`,
-   `PutBucketEncryption`, the V1 metadata create and the object-lock
-   bodies have no per-operation bound test.
-7. **malformed, the V1 metadata and copy surfaces — 12 open cells.**
-   `CreateBucketMetadataTableConfiguration`,
-   `DeleteBucketMetadataConfiguration`, `CopyObject`,
-   `CreateMultipartUpload`, `UploadPartCopy` and the lock retention and
-   legal-hold bodies rely on the global malformed sweep alone.
-8. **object lock, the whole auth-failure column** — see gap 4; the
-   family's filled-cell count (8 of 39 applicable) is the lowest of any
-   family because its writes also lack retry/race/restart depth.
-9. **read-side listing races** — `ListObjects`, `ListObjectsV2`,
-   `ListObjectVersions`, `ListParts`, `ListMultipartUploads` and the
-   report/tag list operations have no test pinning pagination
-   consistency while a writer mutates the same prefix (only
-   `ListBuckets` cursor stability under concurrent create is proven).
-10. **report and tagging delete restart depth** — the delete rows of the
-    report and tagging families prove replay idempotency but not
-    delete-then-restart durability; the PUT paths do.
+1. **None in the matrix.** The final race audit filled the data plane
+   (GetObject/HeadObject/GetObjectAttributes/Select, CopyObject,
+   RenameObject, DeleteObjects, `UpdateObjectEncryption`, the multipart
+   create/part/part-copy/abort paths and `RestoreObject`) and the
+   lock/service control plane (bucket head/delete/location,
+   `CreateSession`, the object-lock family, request-payment/accelerate,
+   the metadata-config family, the notification/logging reads and the
+   policy surfaces). Each row pins a barrier-synchronized read-vs-write
+   or write-vs-write contract: one complete version / one complete row,
+   or exactly one winner and a designed conflict. The rename race also
+   hardened `BucketCatalog.rename_object`: a loser that loses the
+   destination head insert now surfaces the designed 409
+   `OperationAborted` instead of a raw `IntegrityError` on backends with
+   row-level locking (SQLite serializes writers, so its single-writer
+   lock masks that window; the branch is defensive there). The listing
+   surfaces and every config family's put/delete paths were already
+   proven (including the bug an earlier audit found: `ListObjectVersions`
+   returned 400 when the marker version was deleted between pages —
+   fixed, and the fix is pinned).
+2. **A reported, not-yet-reproduced dialect risk outside the matrix:**
+   `BucketEncryptionStore.replace` was a SELECT-then-INSERT/UPDATE upsert
+   that could surface an `IntegrityError` as a 500 on PostgreSQL/MySQL
+   when two concurrent *first* writes raced. It now uses the
+   UPDATE-first shape (the shared pattern), proven convergent on SQLite;
+   the PostgreSQL/MySQL variant should join the external-backend matrix.
 
 ### How this page is enforced
 

@@ -110,6 +110,7 @@ nav:
   - Reference:
       - S3 compatibility: reference/s3-specs.md
       - S3 parameter ledger: reference/s3-parameters.md
+      - S3 evidence matrix: reference/s3-evidence.md
       - Schema steps: reference/schema-steps.md
       - Configuration: reference/configuration.md
       - Module map: reference/module-map.md

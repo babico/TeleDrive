@@ -8,7 +8,7 @@ Entries describe the behaviour change and why it mattered. A version is
 listed only after its commits exist; a release tag is cut separately after
 the mandatory checks pass on the exact SHA.
 
-## [1.0.10] - 2026-11-04
+## [1.0.10] - 2026-11-05
 
 The fidelity release. The S3 fidelity program landed in full: real
 directory buckets with short-lived session credentials, a physical cold

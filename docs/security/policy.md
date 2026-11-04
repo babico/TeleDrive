@@ -31,7 +31,8 @@ timeline with the reporter. There is no bug bounty.
 
 | Version | State | Security fixes |
 | --- | --- | --- |
-| `v1.0.9` | Current release line | Yes |
+| `v1.0.10` | Current release line | Yes |
+| `v1.0.9` (tag `69a503a`) | Previous release | Yes |
 | `v1.0.8` (tag `7d2aa77`) | Previous release | Yes |
 | `v1.0.7` | Previous release | Critical fixes only, when practical |
 | `main` after the current tag | Development | No support guarantee; it is not a release |

@@ -132,11 +132,17 @@ class BucketAdminMixin:
         return list(self.db.connection.execute(select(buckets.c.name).order_by(buckets.c.name)).scalars())
 
     def list_bucket_records(self, *, prefix: str = "", after: str = "",
-                            limit: int = 10000) -> tuple[list[tuple[str, int]], bool]:
+                            limit: int = 10000,
+                            bucket_type: str = "general",
+                            ) -> tuple[list[tuple[str, int]], bool]:
         """SQL-only keyset page; return creation dates and a has-next marker.
 
         LIKE patterns are escaped to preserve literal S3 prefixes. SQL never
         materializes all matching buckets to serve a single bounded page.
+        ``bucket_type`` separates the two namespaces that share this table:
+        ListBuckets reads ``general`` rows only, ListDirectoryBuckets reads
+        ``directory`` rows through its own store
+        (teledrive.s3.directory_buckets), and neither ever leaks the other.
         """
         if not 1 <= limit <= 10000:
             raise ValueError("Invalid bucket page limit")
@@ -144,7 +150,8 @@ class BucketAdminMixin:
         # case-insensitively, so uppercase prefixes can never match.
         if prefix != prefix.lower():
             return [], False
-        statement = select(buckets.c.name, buckets.c.created_at)
+        statement = select(buckets.c.name, buckets.c.created_at).where(
+            buckets.c.bucket_type == bucket_type)
         if prefix:
             statement = statement.where(buckets.c.name.startswith(prefix, autoescape=True))
         if after:

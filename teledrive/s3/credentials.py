@@ -33,9 +33,10 @@ credentials = Table(
 )
 PERMISSIONS = frozenset({
     "s3:ListAllMyBuckets", "s3:CreateBucket", "s3:DeleteBucket",
-    # S3 Express One Zone surfaces. TeleDrive has no directory buckets, so
-    # ListDirectoryBuckets is a real always-empty listing and CreateSession
-    # always answers NoSuchBucket, but both still authenticate and authorize.
+    # S3 Express One Zone surfaces: ListDirectoryBuckets enumerates the
+    # real directory rows and CreateSession issues short-lived zonal
+    # sessions (teledrive/s3/directory_buckets.py). Both authenticate with
+    # long-lived credentials under the s3express signing scope.
     "s3:ListDirectoryBuckets", "s3:CreateSession",
     "s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketLocation", "s3:GetObject", "s3:GetObjectAttributes", "s3:PutObject", "s3:DeleteObject",
     "s3:GetObjectTagging", "s3:PutObjectTagging", "s3:DeleteObjectTagging",
@@ -173,6 +174,10 @@ class S3CredentialStore:
                  ensure: bool = True):
         self.db = database
         self.cipher = Fernet(master_key)
+        # Kept for the revocation path: killing a long-lived credential
+        # also revokes the S3 Express sessions it signed, and the session
+        # store needs the same master key to decrypt their secrets.
+        self._master_key = master_key
         # ``ensure=False`` is for the pre-authentication path: the S3 gateway
         # must not run schema DDL for an unauthenticated request, or anyone
         # who can reach the port can trigger a migration. Signature
@@ -377,8 +382,27 @@ class S3CredentialStore:
 
     def revoke(self, identifier: str) -> bool:
         resolved = self._resolve(identifier)
+        owner_key = self.db.connection.execute(select(
+            credentials.c.access_key).where(
+            credentials.c.id == resolved)).scalar_one_or_none()
         changed = self.db.connection.execute(update(credentials).where(
             credentials.c.id == resolved, credentials.c.revoked.is_(False)
         ).values(revoked=True))
         self.db.commit()
+        # Revoking a long-lived credential must also kill every S3 Express
+        # session it signed: a session outliving its issuer would keep
+        # zonal access to the directory bucket for up to the session
+        # lifetime. The flag is durable SQL state, so the revocation is
+        # immediately visible to every worker and connection.
+        if changed.rowcount == 1 and owner_key:
+            try:
+                from teledrive.s3.directory_buckets import (
+                    S3ExpressSessionStore)
+                S3ExpressSessionStore(self.db, self._master_key).revoke_for_owner(
+                    owner_key)
+            except Exception:  # pragma: no cover - defensive boundary
+                # Session revocation must never break the credential
+                # revocation that triggered it; sessions expire in at most
+                # their configured lifetime regardless.
+                pass
         return changed.rowcount == 1

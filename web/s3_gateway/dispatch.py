@@ -18,7 +18,13 @@ from teledrive.s3.bucket_flags import BucketFlagError
 from teledrive.s3.bucket_listing import BucketListingError, list_buckets_xml
 from teledrive.s3.credentials import S3CredentialStore
 from teledrive.s3.cors import CORSError
-from teledrive.s3.directory_buckets import list_directory_buckets_xml
+from teledrive.s3.directory_buckets import (
+    MAX_DIRECTORY_BUCKETS, SESSION_TOKEN_HEADER, DirectoryBucketError,
+    S3ExpressSessionStore, SessionCredentialView,
+    classify_directory_operation, decode_directory_token,
+    encode_directory_token, is_directory_bucket_name,
+    list_directory_bucket_records, list_directory_buckets_xml,
+)
 from teledrive.s3.lifecycle import LifecycleError
 from teledrive.s3.metadata_journal import MetadataConfigurationError
 from teledrive.s3.multipart import MultipartError
@@ -33,6 +39,7 @@ from teledrive.s3.restore import RestoreError
 from teledrive.s3.route_guard import (
     S3QueryError, is_directory_bucket_listing, validate_s3_query)
 from teledrive.s3.select import SelectError
+from teledrive.s3.object_metadata import signed_header_names
 from teledrive.s3.sigv4 import (
     SigV4Error, signing_service_hint, verify_header_signature)
 from teledrive.s3.tagging import TaggingError
@@ -633,6 +640,22 @@ async def _handle(request: Request):
                 "NotImplemented",
                 "SSE-C customer keys are not accepted on this operation", 501)
 
+        # Directory buckets (S3 Express name shape) are a separate
+        # namespace with their own route semantics. classify_directory_
+        # operation decides which credential class may serve the request
+        # (zonal session vs long-lived control plane) and rejects every
+        # general-purpose-only operation on a directory name — and vice
+        # versa — before any database, Telegram or signature work.
+        directory_target = is_directory_bucket_name(bucket)
+        directory_class = None
+        if directory_target:
+            directory_class = classify_directory_operation(
+                request.method, bool(separator), request.query_params,
+                action, form_upload=form_upload, multi_delete=multi_delete,
+                copy_source=request.headers.get("x-amz-copy-source")
+                is not None,
+            )
+
         master = load_master_key()
         db = db_connect()
         # No schema work before the signature is verified: the constructor's
@@ -672,7 +695,42 @@ async def _handle(request: Request):
         )
         if form_upload:
             return await _handle_form_upload(ctx)
-        owner = verify_header_signature(request, store.resolve, action)
+        # Zonal (object data plane) requests on a directory bucket are the
+        # ONLY requests authenticated with S3 Express session credentials:
+        # s3express scope, the exact x-amz-s3session-token header (itself
+        # signed), and a session bound to this bucket and mode. Everything
+        # else — including every control-plane directory operation — keeps
+        # the long-lived credential path.
+        session_auth = directory_class == "zonal"
+        if session_auth:
+            if signing_service != "s3express":
+                raise SigV4Error(
+                    "AccessDenied",
+                    "Zonal directory-bucket operations require SigV4 "
+                    "s3express session credentials",
+                )
+            session_token = request.headers.get(SESSION_TOKEN_HEADER, "")
+            if not session_token or (
+                    SESSION_TOKEN_HEADER
+                    not in signed_header_names(request)):
+                raise SigV4Error(
+                    "AccessDenied",
+                    "A signed " + SESSION_TOKEN_HEADER + " header is "
+                    "required for zonal directory-bucket operations",
+                )
+            sessions = S3ExpressSessionStore(db, master)
+            session_resolver = SessionCredentialView(
+                sessions, bucket, session_token)
+            owner = verify_header_signature(
+                request, session_resolver.resolve, action,
+                allow_s3express_zonal=True)
+            # The zonal data plane sees the session-scoped credential
+            # store: aws-chunked decoders and multipart helpers resolve
+            # chunk-signature secrets through it, and a long-lived key
+            # keeps failing closed on this plane.
+            ctx.store = session_resolver
+        else:
+            owner = verify_header_signature(request, store.resolve, action)
         ctx.owner = owner
         # Every signed S3 method must reject unsupported retention, SSE,
         # requester-payer and governance semantics, including GET/HEAD/DELETE.
@@ -718,7 +776,11 @@ async def _handle(request: Request):
         # explicit Allow bypasses the ACL layer, otherwise the Phase D
         # ownership-aware ACL intersection gate applies. The SigV4 scope
         # check above already authenticated the credential's own scopes.
-        if bucket:
+        # S3 Express sessions are exempt (like AWS): the session IS the
+        # authorization, already scoped to one bucket and mode at issue
+        # time, and directory buckets reject every policy/ACL write so no
+        # second layer could even exist for them.
+        if bucket and not session_auth:
             allowed, reason = _authorize_resource(
                 catalog, store, owner, action, bucket,
                 key if separator else None, request)
@@ -727,10 +789,23 @@ async def _handle(request: Request):
 
         if not bucket:
             if directory_buckets:
-                # True empty listing: TeleDrive has no S3 Express directory
-                # buckets, so there is never a bucket or a next token.
-                return Response(list_directory_buckets_xml(),
-                                media_type="application/xml")
+                # The REAL directory listing: SQL rows with bucket_type
+                # 'directory', keyset pagination and an opaque, HMAC-
+                # scoped continuation token. General-purpose buckets are
+                # structurally invisible to this query.
+                token = request.query_params.get("continuation-token")
+                after = (decode_directory_token(master, token)
+                         if token is not None else "")
+                raw_limit = request.query_params.get("max-directory-buckets")
+                limit = (int(raw_limit) if raw_limit is not None
+                         else MAX_DIRECTORY_BUCKETS)
+                page, more = list_directory_bucket_records(
+                    db, after=after, limit=limit)
+                next_token = (encode_directory_token(master, page[-1][0])
+                              if more and page else None)
+                return Response(
+                    list_directory_buckets_xml(page, next_token),
+                    media_type="application/xml")
             return Response(
                 list_buckets_xml(catalog, request.query_params, master, owner),
                 media_type="application/xml",
@@ -746,6 +821,13 @@ async def _handle(request: Request):
             return _error("NoSuchBucket", "The specified bucket does not exist", 404)
         if not key:
             return _error("InvalidObjectName", "Object key is empty", 400)
+        if directory_target and request.method == "PUT" and key.endswith("/"):
+            # Directory buckets have no zero-byte directory placeholder
+            # objects: a key ending with the delimiter names a directory,
+            # which is implicit, never an object (AWS rule).
+            return _error(
+                "InvalidRequest",
+                "Directory bucket object keys must not end with /", 400)
 
         if ("retention" in request.query_params
                 or "legal-hold" in request.query_params):
@@ -802,6 +884,8 @@ async def _handle(request: Request):
     except BatchDeleteError as exc:
         return _error(exc.code, str(exc), exc.status)
     except S3QueryError as exc:
+        return _error(exc.code, str(exc), exc.status)
+    except DirectoryBucketError as exc:
         return _error(exc.code, str(exc), exc.status)
     except BucketListingError as exc:
         return _error(exc.code, str(exc), exc.status)

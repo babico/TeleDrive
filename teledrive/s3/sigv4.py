@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -82,10 +83,28 @@ def _canonical_path(request: Request) -> str:
 
 
 # S3 Express One Zone operations are signed with the ``s3express`` service
-# name. TeleDrive answers exactly two of them (see directory_buckets.py), so
-# only those permissions may authenticate with that scope.
+# name. Two groups may authenticate with that scope: the control-plane
+# operations (ListDirectoryBuckets, CreateSession) and — only when the
+# request targets an EXISTING directory bucket's zonal data plane — the
+# object actions listed in teledrive.s3.directory_buckets.ZONAL_ACTIONS.
+# The gateway passes ``zonal=True`` for exactly those requests; every
+# other s3express-signed request fails closed here.
+from teledrive.s3.directory_buckets import ZONAL_ACTIONS as _EXPRESS_ZONAL_PERMISSIONS
+
 _EXPRESS_PERMISSIONS = frozenset({"s3:ListDirectoryBuckets", "s3:CreateSession"})
 _SIGNING_SERVICES = frozenset({"s3", "s3express"})
+
+
+def _express_signing_region() -> str:
+    """The single region this deployment presents (``us-east-1`` default).
+
+    S3 Express scopes must be signed for the deployment's own region; a
+    scope minted for another region is a wrong-zone request and fails
+    closed. Read at call time so configuration and tests apply without a
+    re-import.
+    """
+    region = os.environ.get("TELEDRIVE_S3_REGION", "").strip()
+    return region or "us-east-1"
 
 
 _AUTH_SERVICE_RE = re.compile(
@@ -114,12 +133,17 @@ def signing_service_hint(request: Request) -> str:
     return match.group(2).lower() if match is not None else "s3"
 
 
-def _signing_service(permission: str, service: str) -> str:
+def _signing_service(permission: str, service: str, *,
+                     zonal: bool = False) -> str:
     if service not in _SIGNING_SERVICES:
         raise SigV4Error("AccessDenied", "Unsupported SigV4 service")
-    if service == "s3express" and permission not in _EXPRESS_PERMISSIONS:
-        raise SigV4Error(
-            "AccessDenied", "S3 Express signing is only valid for directory-bucket operations")
+    if service == "s3express":
+        allowed = _EXPRESS_PERMISSIONS
+        if zonal:
+            allowed = allowed | _EXPRESS_ZONAL_PERMISSIONS
+        if permission not in allowed:
+            raise SigV4Error(
+                "AccessDenied", "S3 Express signing is only valid for directory-bucket operations")
     return service
 
 
@@ -153,6 +177,10 @@ def _presigned_signature(request: Request, lookup_secret, permission: str,
         raise SigV4Error("AccessDenied", "Invalid presigned credential scope")
     access_key, date, region, service = credential.groups()
     service = _signing_service(permission, service)
+    if service == "s3express" and region != _express_signing_region():
+        raise SigV4Error(
+            "AccessDenied",
+            "S3 Express signing region does not match this deployment")
     signed_string = values["X-Amz-SignedHeaders"]
     signed = signed_string.split(";")
     if (not signed or signed != sorted(set(signed)) or "host" not in signed
@@ -323,11 +351,16 @@ def presign_get_url(endpoint: str, bucket: str, key: str, access_key: str,
 
 
 def verify_header_signature(request: Request, lookup_secret, permission: str, *,
-                            now: datetime | None = None) -> str:
+                            now: datetime | None = None,
+                            allow_s3express_zonal: bool = False) -> str:
     """Return authenticated access-key ID; never reveal the secret on failure.
 
     lookup_secret(access_key, permission) must atomically honor revocation and
     scope. The body digest is separately checked by the upload handler.
+    ``allow_s3express_zonal`` admits the directory-bucket zonal actions under
+    the ``s3express`` scope; the gateway sets it only for requests that
+    target an existing directory bucket's object data plane, where the
+    lookup_secret closure is an S3 Express session resolver.
     """
     if "X-Amz-Algorithm" in request.query_params or "X-Amz-Signature" in request.query_params:
         return _presigned_signature(request, lookup_secret, permission, now)
@@ -341,7 +374,12 @@ def verify_header_signature(request: Request, lookup_secret, permission: str, *,
     if match is None:
         raise SigV4Error("AccessDenied", "AWS Signature V4 Authorization required")
     access_key, date, region, service, headers_part, actual_signature = match.groups()
-    service = _signing_service(permission, service)
+    service = _signing_service(permission, service,
+                               zonal=allow_s3express_zonal)
+    if service == "s3express" and region != _express_signing_region():
+        raise SigV4Error(
+            "AccessDenied",
+            "S3 Express signing region does not match this deployment")
     signed = headers_part.split(";")
     if signed != sorted(set(signed)) or "host" not in signed or "x-amz-date" not in signed:
         raise SigV4Error("SignatureDoesNotMatch", "Invalid SignedHeaders")

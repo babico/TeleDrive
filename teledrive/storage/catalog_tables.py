@@ -48,6 +48,12 @@ buckets = Table(
     # stored website configuration.
     Column("public_read", Boolean, nullable=False,
            server_default=false()),
+    # S3 Express directory buckets (handoff 07): the same table stores
+    # both classes; the name shape (base--zone-id--x-s3) is immutable, so
+    # the type only ever distinguishes rows. VARCHAR with a server
+    # default so MySQL accepts it and older inserts keep working.
+    Column("bucket_type", String(16), nullable=False,
+           server_default="general"),
 )
 object_acl_grants = Table(
     "storage_object_acl_grants", catalog_metadata,

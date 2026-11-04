@@ -16,6 +16,8 @@ from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
 from fastapi.responses import Response
 from sqlalchemy import text
 
@@ -36,7 +38,11 @@ from teledrive.s3.checksums import crc64nvme
 from teledrive.s3.cors import (
     MAX_CORS_XML_BYTES, BucketCORSStore, CORSError, cors_xml, parse_cors_xml,
 )
-from teledrive.s3.directory_buckets import create_session_error
+from teledrive.s3.directory_buckets import (
+    DirectoryBucketError, S3ExpressSessionStore, bucket_type_of,
+    create_directory_bucket, create_session_error, create_session_xml,
+    is_directory_bucket_name,
+)
 from teledrive.s3.lifecycle import (
     MAX_XML as MAX_LIFECYCLE_XML, BucketLifecycleStore, LifecycleError,
     lifecycle_xml, parse_lifecycle_xml,
@@ -1196,18 +1202,25 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
     bucket = ctx.bucket
     catalog = ctx.catalog
     if request.method == "GET" and "session" in request.query_params:
-        # CreateSession issues S3 Express One Zone credentials for a
-        # DIRECTORY bucket. TeleDrive implements no directory buckets, so no
-        # session can ever be issued. The error distinguishes a malformed
-        # name, an existing general-purpose bucket (InvalidRequest) and a
-        # name that simply does not exist here (NoSuchBucket) — see
-        # teledrive/s3/directory_buckets.py for the full justification.
+        # CreateSession (S3 Express One Zone) issues short-lived zonal
+        # credentials for a DIRECTORY bucket. The request is control-plane:
+        # long-lived credentials, s3express scope, s3:CreateSession
+        # permission (all verified before this handler). The failure
+        # taxonomy stays truthful for the other cases: malformed name,
+        # an existing general-purpose bucket, or no bucket at all.
+        bucket_class = bucket_type_of(ctx.db, bucket)
         error = create_session_error(
             bucket,
-            bucket_exists=bucket in catalog.list_buckets(),
+            bucket_class=bucket_class,
             session_mode=request.headers.get("x-amz-create-session-mode"),
         )
-        return _error(error.code, str(error), error.status)
+        if error is not None:
+            return _error(error.code, str(error), error.status)
+        mode = request.headers.get("x-amz-create-session-mode") or "ReadWrite"
+        session = S3ExpressSessionStore(ctx.db, ctx.master).issue(
+            bucket, mode, ctx.owner)
+        return Response(create_session_xml(session),
+                        media_type="application/xml")
     if ctx.multi_delete:
         return await _handle_batch_delete(ctx)
     controls = await _handle_bucket_controls(ctx)
@@ -1240,6 +1253,50 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
         parse_accelerate_xml(bytes(payload))
         return Response(status_code=200)
     if request.method == "PUT":
+        if is_directory_bucket_name(bucket):
+            # Typed CreateBucket: the directory name shape routes to the
+            # directory namespace. The zone embedded in the immutable name
+            # must equal the configured logical zone, and an optional
+            # CreateBucketConfiguration/Location must agree with it; a
+            # directory name is never accepted into the general class.
+            location_name = None
+            payload = bytearray()
+            async for block in request.stream():
+                payload.extend(block)
+                if len(payload) > MAX_BUCKET_FLAG_XML:
+                    raise DirectoryBucketError(
+                        "MalformedXML",
+                        "CreateBucketConfiguration exceeds 16 KiB")
+            body = bytes(payload)
+            if body:
+                _verify_bucket_control_payload(request, body)
+                try:
+                    parsed = SafeET.fromstring(body)
+                except (ET.ParseError, DefusedXmlException) as exc:
+                    raise DirectoryBucketError(
+                        "MalformedXML",
+                        "CreateBucketConfiguration is not valid XML") from exc
+                if parsed.tag != f"{{{NAMESPACE}}}CreateBucketConfiguration":
+                    raise DirectoryBucketError(
+                        "MalformedXML",
+                        "Directory bucket creation requires a "
+                        "CreateBucketConfiguration")
+                location = parsed.find(f"{{{NAMESPACE}}}Location")
+                if location is not None:
+                    location_type = location.find(f"{{{NAMESPACE}}}Type")
+                    if (location_type is None
+                            or location_type.text != "AvailabilityZone"):
+                        raise DirectoryBucketError(
+                            "InvalidLocationConstraint",
+                            "Only AvailabilityZone locations are supported "
+                            "for directory buckets (a logical compatibility "
+                            "zone here, never an AWS AZ)")
+                    name_element = location.find(f"{{{NAMESPACE}}}Name")
+                    location_name = (name_element.text
+                                     if name_element is not None else None)
+            create_directory_bucket(ctx.db, bucket, int(time.time()),
+                                    location_name=location_name)
+            return Response(status_code=200)
         try:
             catalog.create_bucket(bucket, int(time.time()))
         except ValueError:
@@ -1255,6 +1312,12 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
             catalog.delete_bucket(bucket)
         except ValueError as exc:
             raise MultipartError("BucketNotEmpty", str(exc), 409) from exc
+        if is_directory_bucket_name(bucket):
+            # Deleting a directory bucket kills every session bound to
+            # it immediately: the revoke is durable SQL state, so the
+            # next request on any worker or connection fails closed.
+            S3ExpressSessionStore(ctx.db, ctx.master).revoke_for_bucket(
+                bucket)
         return Response(status_code=204)
     if bucket not in catalog.list_buckets():
         return _error("NoSuchBucket", "The specified bucket does not exist", 404)

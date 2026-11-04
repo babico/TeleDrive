@@ -44,41 +44,75 @@ Evidence boundaries are in [Project status](status.md), CI mechanics in
 - [x] One `make_app_env` test factory; every stateful root relocatable
       through `paths.data_dir` / `TELEDRIVE_DATA_DIR`; one shared JS fetch
       layer (`apiFetch`/`api`/`govCall`) with pinning tests.
+- [x] **v1.0.10 (schema 30):** directory buckets with session credentials,
+      a physical cold archive with a truthful RestoreObject, AWS-exact
+      null-version/ACL/policy/lock semantics, GetObject part reads, the
+      enforced bootstrap rotation, and the complete per-operation evidence
+      program (114 operations x 7 classes).
 
-## 2. Queued implementation track — S3 fidelity (planned, not delivered)
+## 2. S3 fidelity — delivered in v1.0.10
 
 The [S3 fidelity and recovery execution
-plan](plans/2026-11-02-s3-fidelity.md) and [handoffs 06–10](handoffs/)
-describe the next implementation queue:
+plan](plans/2026-11-02-s3-fidelity.md) and handoffs 06–09 are fully
+implemented and shipped in v1.0.10:
 
-- GetObject `partNumber` and server-enforced first-boot admin password
-  rotation ([handoff 06](handoffs/06-get-part-and-bootstrap.md)).
-- True directory bucket and CreateSession / S3 Express credential
-  behavior ([handoff 07](handoffs/07-directory-buckets-sessions.md)).
-- Real archive bytes, RestoreObject and lifecycle cold-tier
-  ([handoff 08](handoffs/08-physical-archive-restore.md)).
-- S3 submode parity with IAM/STS and KMS boundaries
-  ([handoff 09](handoffs/09-s3-submodes-and-identity.md)).
-- Owner-run original-media DR and physically independent payload backup
-  ([handoff 10](handoffs/10-owner-media-backup-and-dr.md)).
+- [x] **GetObject `?partNumber=N`** from the immutable MPU layout, with
+      sparse-safe offsets, `206`/`Content-Range`/`x-amz-mp-parts-count`,
+      `416 InvalidPartNumber` and `Range`+`partNumber` refused.
+- [x] **Server-enforced first-boot password rotation**: every
+      authenticated operation is refused until the seeded `admin/admin`
+      is rotated, through gates that run before authorization; the
+      self-service change endpoint is the only write the flow allows.
+- [x] **Directory buckets and CreateSession**: `bucket_type`, immutable
+      `base--zone-id--x-s3` names with a logical zone label, real
+      paginated listing, short-lived session credentials (token hashed,
+      secret encrypted, durable revocation), `s3express` zonal signing and
+      zonal aws-chunked uploads.
+- [x] **Physical cold archive and RestoreObject**: sealed blobs with
+      fsync and hash-verified readback, a resumable state machine with
+      leases and generation fences, real restores that open the read
+      window only after verification, and a GC fence that permits hot
+      deletion only when the cold blob readbacks with the exact digest.
+- [x] **Lifecycle parity**: `Transition`, `NoncurrentVersionTransitions`,
+      `NoncurrentVersionExpiration`, `ExpiredObjectDeleteMarker`,
+      `Tag`/`And` filters and `Date` schedules.
+- [x] **Submode parity**: AWS-exact suspended null-version slot, canned
+      ACLs and header grants, the common policy condition operators with
+      temporal date comparison, per-version lock fences on every mutation
+      path, and a real `s3:BypassGovernanceRetention` scope gated to the
+      retention route.
 
-## 3. Protocol evidence still open
+Handoff 10 (owner-run original-media DR and independent payload backup)
+remains owner-executed; its tooling is complete (see §5).
+
+## 3. Protocol evidence
 
 The operation list and current status are **not duplicated here**; use the
-[compatibility matrix](../reference/s3-specs.md) and
-`teledrive/s3/operation_manifest.json` as the authority.
+[compatibility matrix](../reference/s3-specs.md),
+`teledrive/s3/operation_manifest.json` and the
+[per-operation evidence matrix](../reference/s3-evidence.md) as the
+authority.
 
-- [ ] **Complete the per-operation evidence matrix.** For every supported
-      operation, fill the normal / auth-failure / malformed / over-limit /
-      retry / crash-restart / race columns the spec leaves open. The
-      table-driven sweeps already cover unsigned, malformed, over-limit,
-      restart and retry-race globally; this item is the per-operation rows
-      that remain. Acceptance: a new operation cannot be added without its
-      row, enforced by the existing meta-tests.
-- [ ] **Extend the client matrix beyond boto3, AWS CLI and rclone v1.66.0.**
-      Cyberduck and one S3-compatible SDK other than botocore are the named
-      gaps. Acceptance: a pinned version and a live flow, or an explicit
-      statement that the client is untested — never an implied "works".
+- [x] **Complete the per-operation evidence matrix.** All 114 supported
+      operations now carry a named proving test in every applicable
+      class — normal, auth-failure, malformed, over-limit, retry,
+      crash-restart and race are each at 100% of applicable cells,
+      enforced by `tests/meta/test_s3_evidence_matrix.py`, so a new
+      operation cannot be added without its row. The audit itself found
+      and fixed four real defects: `ListObjectVersions` 400 when the
+      marker version was deleted between pages, a rename race escaping
+      as a 500, `BucketEncryptionStore` surfacing an integrity error as a
+      500 on PostgreSQL/MySQL, and `DeleteBucket` removing a same-name
+      recreation by a stale conclusion.
+- [x] **Extend the client matrix beyond boto3, AWS CLI and rclone.** A
+      fourth independent wire implementation (minio-py 7.2.20, its own
+      SigV4 signer, botocore-free) runs a live flow in CI, and Cyberduck
+      is documented as explicitly untested with its reason — no implied
+      "works".
+- [x] **The parameter-level compatibility ledger**
+      (`docs/reference/s3-parameters.md`) states SUPPORTED / REJECTED /
+      UNVERIFIED per parameter, re-derived from the gateway source on
+      every test run.
 
 ## 4. Code health (conditional)
 
@@ -95,6 +129,14 @@ physical GC. The admin can enable GC with the existing typed confirmation,
 and the collector must still protect live/retained/referenced chunks. No
 mandatory signed acceptance bundle or two-person GC approval should be
 introduced.
+
+The tooling for them is complete and offline-testable: the DR rehearsal
+script verifies full bytes plus first/middle/cross-boundary/last ranges,
+unwraps envelope keys, cross-checks independent attestations and writes a
+redacted evidence record, with `--self-test` proving the whole path
+without network or Telegram; the [DR checklist](../operate/dr-checklist.md)
+is the owner's single page. What remains below needs owner hardware,
+owner credentials and the owner's own data.
 
 - [ ] **Independent payload backup and isolated restore.** On separate
       hardware or a verified remote export, make encrypted media plus SQL

@@ -18,13 +18,18 @@ Precedence (implemented by :func:`evaluate`, highest first):
 
 Deny wins regardless of statement order, and conditions are evaluated
 per statement (multiple operators/keys are ANDed; multiple values for a
-positive operator are ORed; ``StringNotEquals``/``NotIpAddress`` require
-that none of the values match).
+positive operator are ORed; ``StringNotEquals``/``StringNotLike``/
+``NotIpAddress`` require that none of the values match). Date
+conditions compare temporally (ISO 8601 on both sides), never lexically.
+Policy compile failures of stored documents are logged with a reason
+and always fail closed — never a fallback to allow.
 """
 from __future__ import annotations
 
+import datetime
 import ipaddress
 import json
+import logging
 import re
 import threading
 import time
@@ -40,17 +45,28 @@ from sqlalchemy import (
 from teledrive.s3.credentials import PERMISSIONS
 from teledrive.storage.catalog import BucketCatalog, buckets, catalog_metadata
 
+_logger = logging.getLogger(__name__)
+
 MAX_POLICY_BYTES = 20 * 1024
 MAX_ABAC_BYTES = 20 * 1024
 MAX_STATEMENTS = 50
 MAX_SID = 128
 MAX_JSON_DEPTH = 10
 POLICY_VERSION = "2012-10-17"
+# The common AWS condition-operator set this engine evaluates. AWS's
+# full IAM list is far larger (set operators, ArnNotEquals, …); those
+# stay rejected at write time rather than accepted-and-ignored, which
+# would widen authorization. ArnLike/ArnEquals are deliberately absent:
+# TeleDrive principals are access keys, not ARNs, and no context key
+# carries an ARN, so an ARN condition could never be evaluated
+# honestly.
 CONDITION_OPERATORS = frozenset({
-    "StringEquals", "StringLike", "StringNotEquals",
+    "StringEquals", "StringLike", "StringNotEquals", "StringNotLike",
     "IpAddress", "NotIpAddress", "Bool",
     "NumericLessThan", "NumericLessThanEquals",
     "NumericGreaterThan", "NumericGreaterThanEquals",
+    "DateGreaterThan", "DateGreaterThanEquals",
+    "DateLessThan", "DateLessThanEquals",
 })
 # Only context keys the gateway actually populates.  A condition on an
 # unknown key would be unevaluable; accepting it would either deny every
@@ -59,6 +75,14 @@ _TAG_PREFIXES = ("s3:ExistingObjectTag/", "aws:PrincipalTag/")
 CONDITION_KEYS = frozenset({
     "s3:prefix", "s3:max-keys", "s3:delimiter",
     "aws:SourceIp", "s3:x-amz-acl",
+    # Time keys for the Date*/epoch conditions. aws:CurrentTime is the
+    # request time as ISO 8601 UTC; aws:EpochTime is the same instant
+    # in whole seconds.
+    "aws:CurrentTime", "aws:EpochTime",
+})
+_DATE_OPERATORS = frozenset({
+    "DateGreaterThan", "DateGreaterThanEquals",
+    "DateLessThan", "DateLessThanEquals",
 })
 ABAC_TAG_PREFIXES = _TAG_PREFIXES
 
@@ -233,6 +257,30 @@ def _condition_key(key: str) -> None:
         f"Unsupported condition key {key[:64]}", 400)
 
 
+def _parse_datetime(raw: str):
+    """ISO 8601 timestamp or date (AWS date-condition grammar).
+
+    Accepts ``2026-11-04T12:00:00Z``, offsets (``+02:00``) and the
+    date-only form; a value without a timezone is read as UTC. Returns
+    None when the value is not a valid timestamp so evaluation can
+    fail closed instead of guessing.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        moment = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return moment
+
+
 @dataclass(frozen=True)
 class Condition:
     operator: str
@@ -241,7 +289,8 @@ class Condition:
 
     @property
     def negated(self) -> bool:
-        return self.operator in {"StringNotEquals", "NotIpAddress"}
+        return self.operator in {"StringNotEquals", "StringNotLike",
+                                 "NotIpAddress"}
 
 
 @dataclass(frozen=True)
@@ -374,6 +423,12 @@ def _parse_statement(raw, *, index: int, bucket: str) -> Statement:
                                 "MalformedPolicy",
                                 "IpAddress conditions require valid networks",
                             ) from exc
+                if operator in _DATE_OPERATORS:
+                    for item in values:
+                        if _parse_datetime(item) is None:
+                            raise PolicyError(
+                                "MalformedPolicy",
+                                "Date conditions require ISO 8601 timestamps")
                 conditions.append(Condition(operator, key, tuple(values)))
     return Statement(
         sid=sid, effect=effect, principals=frozenset(principals),
@@ -427,12 +482,32 @@ def parse_policy(payload: bytes, *, bucket: str,
 
 
 def _compile_stored(bucket: str, document: str, updated_ns: int) -> CompiledPolicy:
-    """Compile an already-validated stored document (no credential store)."""
-    parsed = json.loads(document)
-    statements = tuple(
-        _parse_statement(item, index=index, bucket=bucket)
-        for index, item in enumerate(parsed["Statement"])
-    )
+    """Compile an already-validated stored document (no credential store).
+
+    A stored document that no longer compiles (corruption, a schema
+    change, manual SQL edits) is an auditable event, never a silent
+    fallback: the failure is logged with its reason and re-raised as a
+    :class:`PolicyError`, so the request fails CLOSED — an unparseable
+    policy can never degrade into an allow.
+    """
+    try:
+        parsed = json.loads(document)
+        statements = tuple(
+            _parse_statement(item, index=index, bucket=bucket)
+            for index, item in enumerate(parsed["Statement"])
+        )
+    except PolicyError as exc:
+        _logger.warning(
+            "stored bucket policy for %s (updated_ns=%s) failed to "
+            "compile: %s %s", bucket, updated_ns, exc.code, exc)
+        raise
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        _logger.warning(
+            "stored bucket policy for %s (updated_ns=%s) is corrupt: "
+            "%r", bucket, updated_ns, exc)
+        raise PolicyError(
+            "MalformedPolicy",
+            "The stored bucket policy failed to compile", 400) from exc
     return CompiledPolicy(bucket=bucket, statements=statements,
                           document=document, updated_ns=updated_ns)
 
@@ -471,6 +546,10 @@ def _condition_matches(condition: Condition, context: dict) -> bool:
         return all(not _string_matches("StringEquals", expected, actual)
                    for expected in condition.values
                    for actual in actual_values)
+    if operator == "StringNotLike":
+        return all(not _string_matches("StringLike", expected, actual)
+                   for expected in condition.values
+                   for actual in actual_values)
     if operator in {"IpAddress", "NotIpAddress"}:
         matched = False
         for actual in actual_values:
@@ -500,6 +579,22 @@ def _condition_matches(condition: Condition, context: dict) -> bool:
         if operator == "NumericGreaterThan":
             return any(number > limit for number in numbers for limit in limits)
         return any(number >= limit for number in numbers for limit in limits)
+    if operator in _DATE_OPERATORS:
+        # Temporal comparison, never lexical: values were validated as
+        # ISO 8601 at compile time; an unparsable CONTEXT value fails
+        # the condition (fail closed) instead of being skipped.
+        moments = [_parse_datetime(actual) for actual in actual_values]
+        if any(moment is None for moment in moments):
+            return False
+        limits = [_parse_datetime(expected)
+                  for expected in condition.values]
+        if operator == "DateGreaterThan":
+            return any(moment > limit for moment in moments for limit in limits)
+        if operator == "DateGreaterThanEquals":
+            return any(moment >= limit for moment in moments for limit in limits)
+        if operator == "DateLessThan":
+            return any(moment < limit for moment in moments for limit in limits)
+        return any(moment <= limit for moment in moments for limit in limits)
     return False
 
 

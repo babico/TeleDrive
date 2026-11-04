@@ -17,7 +17,11 @@ from fastapi import Request
 from fastapi.responses import Response
 
 import web.app as _webapp
-from teledrive.s3.acl import AclError, parse_acl_xml, render_acl_xml
+from teledrive.s3.acl import (
+    ACP_PERMISSIONS, AclError, BUCKET_ACL_PERMISSIONS,
+    GRANT_HEADER_NAMES, GRANT_HEADER_PERMISSIONS, OBJECT_ACL_PERMISSIONS,
+    parse_acl_xml, parse_grant_header, render_acl_xml,
+)
 from teledrive.s3.annotations import (
     AnnotationError, AnnotationStore, MAX_ANNOTATION_RESULTS,
     MAX_ANNOTATION_VALUE_BYTES, annotation_etag, annotation_http_date,
@@ -125,6 +129,65 @@ def _validated_acl(payload: bytes, *, object_level: bool, caller: str,
     return acl_owner, grants
 
 
+def _acl_grants_from_headers(request: Request, *, bucket_level: bool,
+                             store: S3CredentialStore,
+                             bucket_owner: str | None) -> list | None:
+    """Build an ACL grant list from ``x-amz-acl`` / ``x-amz-grant-*``.
+
+    Returns None when the request carries no ACL header at all (the
+    caller falls back to the XML body). AWS accepts exactly one of
+    canned ACL, grant headers or body on PutBucketAcl/PutObjectAcl;
+    mixing two is a 400, and the request guard has already restricted
+    the canned values to the private-only subset and required the
+    headers to be signed.
+    """
+    header_names = [name for name in GRANT_HEADER_NAMES
+                    if request.headers.get(name) is not None]
+    canned = request.headers.get("x-amz-acl")
+    if not header_names and canned is None:
+        return None
+    if header_names and canned is not None:
+        raise AclError("InvalidArgument",
+                       "Specify a canned ACL or grant headers, not both")
+    grants: list[tuple[str, str]] = []
+    if canned is not None:
+        # Only private / bucket-owner-full-control reach here. ``private``
+        # is the owner-only baseline (the store adds the implicit owner
+        # FULL_CONTROL row); on an object, the canned
+        # bucket-owner-full-control hands the bucket owner FULL_CONTROL,
+        # mirroring the upload-time Phase L5 grant. On a bucket AWS
+        # ignores the object-only canned ACLs, which is the same as
+        # private here.
+        if canned == "bucket-owner-full-control" and not bucket_level \
+                and bucket_owner:
+            grants.append((bucket_owner, "FULL_CONTROL"))
+        return grants
+    allowed = BUCKET_ACL_PERMISSIONS if bucket_level \
+        else OBJECT_ACL_PERMISSIONS
+    for name in header_names:
+        permission = GRANT_HEADER_PERMISSIONS[name]
+        if permission in ACP_PERMISSIONS:
+            raise AclError(
+                "NotImplemented",
+                f"{permission} grants have no backing here: ACL reads and "
+                "writes are scoped by the credential's own "
+                "s3:Get/PutObjectAcl permissions", 501)
+        if permission not in allowed:
+            raise AclError(
+                "InvalidArgument",
+                f"Permission {permission} is not valid for "
+                f"{'object' if not bucket_level else 'bucket'} ACLs")
+        for grantee in parse_grant_header(name, request.headers.get(name)):
+            grants.append((grantee, permission))
+    for grantee, _permission in grants:
+        if not store.is_active(grantee):
+            raise AclError("InvalidArgument",
+                           f"Unknown ACL grantee {grantee[:8]}…")
+    if not grants:
+        raise AclError("InvalidArgument", "Grant headers name no grantee")
+    return grants
+
+
 async def _handle_bucket_acl(ctx: _S3RequestContext) -> Response:
     """GET/PUT ?acl on a bucket: the Phase D grant store."""
     request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
@@ -155,9 +218,22 @@ async def _handle_bucket_acl(ctx: _S3RequestContext) -> Response:
             raise AclError("AccessDenied",
                            "BlockPublicAcls restricts ACL writes to "
                            "the ACL owner", 403)
-        acl_owner, grants = _validated_acl(
-            payload, object_level=False, caller=ctx.owner, store=ctx.store,
-            stored_owner=stored_owner)
+        header_grants = _acl_grants_from_headers(
+            request, bucket_level=True, store=ctx.store,
+            bucket_owner=None)
+        if header_grants is not None:
+            if payload:
+                raise AclError("InvalidArgument",
+                               "Specify an ACL body or ACL headers, not both")
+            acl_owner = stored_owner or ctx.owner
+            if not ctx.store.is_active(acl_owner):
+                raise AclError("InvalidArgument",
+                               "ACL owner is not an active credential")
+            grants = header_grants
+        else:
+            acl_owner, grants = _validated_acl(
+                payload, object_level=False, caller=ctx.owner, store=ctx.store,
+                stored_owner=stored_owner)
         catalog.set_bucket_acl(bucket, acl_owner, grants)
     except AclError as exc:
         return _error(exc.code, str(exc), exc.status)
@@ -196,9 +272,23 @@ async def _handle_object_acl(ctx: _S3RequestContext) -> Response:
             raise AclError("AccessDenied",
                            "BlockPublicAcls restricts ACL writes to "
                            "the ACL owner", 403)
-        acl_owner, grants = _validated_acl(
-            payload, object_level=True, caller=ctx.owner, store=ctx.store,
-            stored_owner=stored_owner)
+        bucket_owner, _bucket_rows = catalog.bucket_acl(bucket)
+        header_grants = _acl_grants_from_headers(
+            request, bucket_level=False, store=ctx.store,
+            bucket_owner=bucket_owner or ctx.owner)
+        if header_grants is not None:
+            if payload:
+                raise AclError("InvalidArgument",
+                               "Specify an ACL body or ACL headers, not both")
+            acl_owner = stored_owner or ctx.owner
+            if not ctx.store.is_active(acl_owner):
+                raise AclError("InvalidArgument",
+                               "ACL owner is not an active credential")
+            grants = header_grants
+        else:
+            acl_owner, grants = _validated_acl(
+                payload, object_level=True, caller=ctx.owner, store=ctx.store,
+                stored_owner=stored_owner)
         catalog.set_object_acl(bucket, key, acl_owner, grants)
     except AclError as exc:
         return _error(exc.code, str(exc), exc.status)

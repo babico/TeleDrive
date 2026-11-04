@@ -115,27 +115,65 @@ class BucketLockMixin:
         self.db.commit()
 
     def set_retention(self, object_id: str, *, mode: str,
-                      until_ns: int) -> None:
-        """COMPLIANCE retention is extend-only (AWS immutability)."""
+                      until_ns: int,
+                      governance_bypass: bool = False) -> None:
+        """AWS Object Lock retention-transition rules, per version.
+
+        * COMPLIANCE (active): extend-only and mode-immutable — not
+          even an owner or admin can shorten it or switch it to
+          GOVERNANCE (AWS WORM; "the retention mode can't be changed").
+        * GOVERNANCE (active): shortening the window is a governance
+          bypass and requires the dedicated permission plus the
+          explicit request header, proven by the caller through
+          ``governance_bypass``. Extending, and strengthening to
+          COMPLIANCE with a date at least as late, need no bypass.
+        * Expired or absent retention: freely settable.
+        """
         if mode not in ("COMPLIANCE", "GOVERNANCE"):
             raise ValueError("Invalid retention mode")
         current = self.object_lock_state(object_id)
-        if (current["mode"] == "COMPLIANCE"
-                and current["retain_until_ns"] is not None
-                and int(until_ns) < int(current["retain_until_ns"])):
-            raise ValueError(
-                "COMPLIANCE retention can only be extended")
+        now_ns = time.time_ns()
+        active = (current["retain_until_ns"] is not None
+                  and int(current["retain_until_ns"]) > now_ns)
+        if active and current["mode"] == "COMPLIANCE":
+            if mode != "COMPLIANCE":
+                raise PermissionError(
+                    "COMPLIANCE retention mode cannot be changed")
+            if int(until_ns) < int(current["retain_until_ns"]):
+                raise PermissionError(
+                    "COMPLIANCE retention can only be extended")
+        elif active and current["mode"] == "GOVERNANCE" \
+                and int(until_ns) < int(current["retain_until_ns"]) \
+                and not governance_bypass:
+            raise PermissionError(
+                "Shortening GOVERNANCE retention requires the "
+                "s3:BypassGovernanceRetention permission and the "
+                "x-amz-bypass-governance-retention header")
         self.db.connection.execute(
             update(objects).where(objects.c.id == object_id).values(
                 retention_mode=mode, retention_until_ns=until_ns))
         self.db.commit()
 
-    def clear_retention(self, object_id: str) -> None:
+    def clear_retention(self, object_id: str,
+                        *, governance_bypass: bool = False) -> None:
+        """Remove the retention window.
+
+        Active COMPLIANCE retention can never be removed. Active
+        GOVERNANCE retention is removable only through a proven
+        governance bypass (permission + explicit header), exactly like
+        shortening it.
+        """
         current = self.object_lock_state(object_id)
-        if current["mode"] == "COMPLIANCE" and current["retain_until_ns"] \
+        if current["retain_until_ns"] is not None \
                 and int(current["retain_until_ns"]) > time.time_ns():
-            raise ValueError(
-                "Active COMPLIANCE retention cannot be removed")
+            if current["mode"] == "COMPLIANCE":
+                raise PermissionError(
+                    "Active COMPLIANCE retention cannot be removed")
+            if not governance_bypass:
+                raise PermissionError(
+                    "Removing GOVERNANCE retention requires the "
+                    "s3:BypassGovernanceRetention permission and the "
+                    "x-amz-bypass-governance-retention header")
         self.db.connection.execute(
             update(objects).where(objects.c.id == object_id).values(
                 retention_mode=None, retention_until_ns=None))

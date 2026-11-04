@@ -12,6 +12,7 @@ present for the request to be evaluated as AWS would evaluate it.
 """
 from __future__ import annotations
 import logging
+import time
 
 from urllib.parse import unquote
 
@@ -32,6 +33,15 @@ def _policy_context(catalog, store, access_key: str, bucket: str,
                     key: str | None, request, action: str | None = None) -> dict:
     """Context keys the condition engine can honestly evaluate."""
     context: dict = {}
+    # AWS global time keys (always present in a real request context):
+    # aws:CurrentTime is the request time as ISO 8601 UTC, aws:EpochTime
+    # the same instant in whole seconds. Without them a Date* condition
+    # would never see a value: an Allow would silently fail closed and
+    # — worse — a Deny would silently never fire.
+    now = time.time()
+    context["aws:EpochTime"] = str(int(now))
+    context["aws:CurrentTime"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     for name, default in _LIST_DEFAULTS.items():
         value = request.query_params.get(name)
         if value is None and action != "s3:ListBucket":

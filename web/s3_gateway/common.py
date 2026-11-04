@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl
 from fastapi.responses import Response
 
 from teledrive.s3.aws_chunked import streaming_mode
+from teledrive.s3.acl import CANNED_ACLS, GRANT_HEADER_NAMES
 from teledrive.s3.checksums import crc64nvme
 from teledrive.s3.credentials import S3CredentialStore
 from teledrive.s3.object_metadata import signed_header_names
@@ -167,8 +168,26 @@ def _reject_unimplemented_write_options(request: Request, *,
     if canned_acl is not None:
         if "x-amz-acl" not in signed:
             raise SigV4Error("AccessDenied", "S3 access mode must be signed")
+        # AWS canned-ACL classification (S3 User Guide, "Canned ACL"):
+        # a value outside the eight canned ACLs is a malformed request
+        # (400 InvalidArgument), not an unsupported feature. The values
+        # INSIDE the set that this private-only gateway cannot honor
+        # keep answering 501.
+        if canned_acl not in CANNED_ACLS:
+            raise SigV4Error("InvalidArgument", "Invalid canned ACL")
         if canned_acl not in {"private", "bucket-owner-full-control"}:
             raise SigV4Error("NotImplemented", "Unsupported S3 ACL or storage tier")
+    if "acl" in request.query_params:
+        # PutBucketAcl/PutObjectAcl accept the x-amz-grant-* family as an
+        # alternative to the AccessControlPolicy body; the ACL handler
+        # parses and validates them with the same private-only grammar.
+        # They must be signed like every other x-amz-* option.
+        for name in GRANT_HEADER_NAMES:
+            if request.headers.get(name) is not None:
+                if name not in signed:
+                    raise SigV4Error("AccessDenied",
+                                     "S3 ACL grant headers must be signed")
+                rejected.discard(name)
     if (any(name in request.headers for name in rejected)
             or (request.headers.get("content-encoding", "").lower() == "aws-chunked"
                 and streaming_mode(request) is None)):

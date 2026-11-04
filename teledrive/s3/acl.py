@@ -23,7 +23,51 @@ NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 MAX_ACL_XML = 16384
 BUCKET_ACL_PERMISSIONS = ("READ", "WRITE", "FULL_CONTROL")
 OBJECT_ACL_PERMISSIONS = ("READ", "FULL_CONTROL")
+# AWS also has READ_ACP/WRITE_ACP (grant the ACL subresource itself).
+# TeleDrive scopes ACL reads/writes with the s3:Get*ObjectAcl /
+# s3:Put*ObjectAcl credential permissions instead, so an ACP grant has
+# no backing here — it is rejected with 501, not silently accepted.
+ACP_PERMISSIONS = ("READ_ACP", "WRITE_ACP")
 _GRANTEE_TYPES = ("CanonicalUser", "AmazonCustomerByEmail", "Group")
+
+# The canned ACL set, exactly AWS's (S3 User Guide, "Canned ACL": the
+# eight values below and nothing else). A value outside this set is a
+# malformed request, not an unsupported feature.
+CANNED_ACLS = frozenset({
+    "private", "public-read", "public-read-write", "authenticated-read",
+    "aws-exec-read", "bucket-owner-read", "bucket-owner-full-control",
+    "log-delivery-write",
+})
+# Canned values whose grant set names a group or an AWS service
+# principal (AllUsers, AuthenticatedUsers, LogDelivery, EC2). TeleDrive
+# is a private-only gateway with no public or group path, so these stay
+# unimplemented (501) — honoring or silently ignoring them would both
+# be lies. Enabling any of them is a product decision, not a code path.
+PUBLIC_CANNED_ACLS = frozenset({
+    "public-read", "public-read-write", "authenticated-read",
+    "aws-exec-read", "log-delivery-write",
+})
+# The remaining three only ever name the resource owner or the bucket
+# owner — the private-only subset TeleDrive can honor exactly.
+OWNER_CANNED_ACLS = frozenset({
+    "private", "bucket-owner-read", "bucket-owner-full-control",
+})
+
+# AWS grant-header family (PutObjectAcl/PutBucketAcl/PutObject/CreateBucket):
+# comma-separated ``type="value"`` grantee pairs per header.
+GRANT_HEADER_NAMES = (
+    "x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
+    "x-amz-grant-read-acp", "x-amz-grant-write-acp",
+)
+# The ACL permission each grant header carries. The ACP pair is valid AWS
+# grammar with no backing model here (see ACP_PERMISSIONS above).
+GRANT_HEADER_PERMISSIONS = {
+    "x-amz-grant-read": "READ",
+    "x-amz-grant-write": "WRITE",
+    "x-amz-grant-full-control": "FULL_CONTROL",
+    "x-amz-grant-read-acp": "READ_ACP",
+    "x-amz-grant-write-acp": "WRITE_ACP",
+}
 
 
 class AclError(ValueError):
@@ -59,9 +103,61 @@ def is_public_grant_set(grants: list[tuple[str, str]]) -> bool:
     for grantee, _permission in grants:
         lowered = grantee.lower()
         if ("allusers" in lowered or "authenticatedusers" in lowered
-                or "@" in lowered or "groups/global" in lowered):
+                or "@" in lowered or "groups/global" in lowered
+                or "logdelivery" in lowered):
             return True
     return False
+
+
+_GRANTEE_PAIR = "id, emailAddress or uri"
+
+
+def parse_grant_header(name: str, value: str) -> list[str]:
+    """Parse one ``x-amz-grant-*`` header with the AWS grammar.
+
+    AWS shape: comma-separated ``type="value"`` pairs where type is
+    ``id``, ``emailAddress`` or ``uri``. Only ``id`` grantees (TeleDrive
+    access keys) have backing here; email/uri grantees raise the same
+    private-only 501 as their XML forms. Malformed syntax — a missing
+    pair, a blank chunk, an empty or oversized grantee — raises 400
+    InvalidArgument, exactly like a malformed AccessControlPolicy body.
+    Returns the non-empty list of grantee IDs.
+    """
+    if name not in GRANT_HEADER_NAMES:
+        raise AclError("InvalidArgument", f"Unknown grant header {name[:64]}")
+    if not isinstance(value, str) or len(value) > 2048:
+        raise AclError("InvalidArgument", "Grant header is too long")
+    if not value.strip():
+        raise AclError("InvalidArgument",
+                       f"Grant header requires {_GRANTEE_PAIR} pairs")
+    grantees: list[str] = []
+    for chunk in value.split(","):
+        item = chunk.strip()
+        if not item:
+            raise AclError("InvalidArgument",
+                           f"Grant header requires {_GRANTEE_PAIR} pairs")
+        pair = item.split("=", 1)
+        if len(pair) != 2:
+            raise AclError("InvalidArgument",
+                           f"Grant header requires {_GRANTEE_PAIR} pairs")
+        grantee_type, raw = pair[0].strip(), pair[1].strip()
+        if (grantee_type not in ("id", "emailAddress", "uri")
+                or len(raw) < 2 or not raw.startswith('"')
+                or not raw.endswith('"')):
+            raise AclError("InvalidArgument",
+                           f"Grant header requires {_GRANTEE_PAIR} pairs")
+        grantee = raw[1:-1]
+        if not grantee or len(grantee) > 128:
+            raise AclError("InvalidArgument", "Grant header grantee is invalid")
+        if grantee_type == "id":
+            grantees.append(grantee)
+        else:
+            # The private-only line, identical to the XML grantee rule.
+            raise AclError(
+                "NotImplemented",
+                "Only id (CanonicalUser) grantees are supported; "
+                "emailAddress and uri grantees are not", 501)
+    return grantees
 
 
 def permits(*, action: str, access_key: str, bucket_rows: list,
@@ -150,6 +246,14 @@ def parse_acl_xml(payload: bytes, *, object_level: bool,
                 if grantee_key is None or permission is None:
                     raise AclError("MalformedXML", "Grant requires a grantee ID "
                                                "and a permission")
+                if permission in ACP_PERMISSIONS:
+                    # Valid in AWS, but TeleDrive has no separate
+                    # READ_ACP/WRITE_ACP permission model to back it.
+                    raise AclError(
+                        "NotImplemented",
+                        f"{permission} grants have no backing here: ACL "
+                        "reads and writes are scoped by the credential's "
+                        "own s3:Get/PutObjectAcl permissions", 501)
                 if permission not in allowed:
                     raise AclError(
                         "InvalidArgument",

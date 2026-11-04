@@ -114,7 +114,7 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `x-amz-tagging` (PUT) | SUPPORTED | Signed inline tags (≤8 KiB, ≤10 tags) applied atomically at publish; requires PutObjectTagging scope. | tests/s3/test_s3_tagging.py |
 | `x-amz-meta-*` (PUT/copy REPLACE) | SUPPORTED | Signed custom metadata persisted per version, ≤2 KiB serialized. | tests/s3/test_s3_metadata.py |
 | `Content-Type` / `Cache-Control` / `Content-Disposition` / `Content-Encoding` / `Content-Language` / `Expires` (PUT) | SUPPORTED | Signed HTTP metadata persisted per version and replayed on reads. | tests/s3/test_s3_metadata.py |
-| `x-amz-acl` | SUPPORTED | Only `private` and `bucket-owner-full-control` accepted (signed); other canned ACLs 501, unknown values 400 `InvalidArgument`; on PUT `?acl` a canned value may replace the XML body. | tests/s3/test_s3_acl_parity.py |
+| `x-amz-acl` | SUPPORTED | Only `private`, `bucket-owner-read` and `bucket-owner-full-control` accepted (signed); other canned ACLs 501, unknown values 400 `InvalidArgument`; on PUT `?acl` a canned value may replace the XML body. | tests/s3/test_s3_acl_parity.py |
 | `x-amz-storage-class` | SUPPORTED | Only `STANDARD` accepted (signed); other tiers 501. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-server-side-encryption: AES256` (PUT) | SUPPORTED | Real SSE-S3 envelope when `storage.encryption: envelope`; otherwise a precise 501 naming the setting. | tests/s3/test_s3_sse_c.py |
 | `x-amz-server-side-encryption: aws:kms` / `aws:kms:dsse` | REJECTED | 501: no AWS KMS backend exists. | tests/s3/test_s3_fail_closed.py |
@@ -125,7 +125,7 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `x-amz-grant-read` / `x-amz-grant-write` / `x-amz-grant-full-control` / `x-amz-grant-read-acp` / `x-amz-grant-write-acp` | SUPPORTED | On PUT `?acl` only (signed): `id="…"` CanonicalUser grantees apply like XML grants; `emailAddress`/`uri` grantees and the ACP pair 501; malformed grammar 400; every other route 501. | tests/s3/test_s3_acl_parity.py |
 | `x-amz-website-redirect-location` | REJECTED | 501: no website redirect. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-object-lock-mode` / `x-amz-object-lock-retain-until-date` / `x-amz-object-lock-legal-hold` (PUT) | REJECTED | 501: retention is set via the retention control, never acknowledged silently on upload. | tests/s3/test_s3_object_lock.py |
-| `x-amz-bypass-governance-retention` | REJECTED | 501: governance bypass does not exist. | tests/s3/test_s3_fail_closed.py |
+| `x-amz-bypass-governance-retention` | SUPPORTED | On PUT `?retention` only (signed, exactly `true`): shortens/clears an active GOVERNANCE window when the credential holds `s3:BypassGovernanceRetention`, else 403 `AccessDenied`; `false` is the explicit negative, other values 400; COMPLIANCE never shortens; every other route stays 501. | tests/s3/test_s3_governance_bypass.py |
 
 ## Object subresources
 

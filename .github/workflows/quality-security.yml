@@ -188,6 +188,9 @@ jobs:
             tests/s3/test_s3_acl_parity.py \
             tests/s3/test_s3_policy_operators.py \
             tests/s3/test_s3_lock_fences.py \
+            tests/s3/test_s3_governance_bypass.py \
+            tests/s3/test_s3_sigv4_query_canonical.py \
+            tests/s3/test_s3_lifecycle_filters.py \
             tests/s3/test_s3_replication.py \
             tests/s3/test_s3_notifications.py \
             tests/s3/test_s3_tagging_journal.py \
@@ -214,7 +217,17 @@ jobs:
             tests/s3/test_s3_evidence_metadata_config.py \
             tests/s3/test_s3_evidence_notifications.py \
             tests/s3/test_s3_evidence_tagging.py \
-            tests/s3/test_s3_evidence_website.py
+            tests/s3/test_s3_evidence_website.py \
+            tests/s3/test_s3_evidence_authfail.py \
+            tests/s3/test_s3_evidence_limits.py \
+            tests/s3/test_s3_evidence_restart_config.py \
+            tests/s3/test_s3_evidence_restart_objects.py \
+            tests/s3/test_s3_evidence_retry_config.py \
+            tests/s3/test_s3_evidence_retry_objects.py \
+            tests/s3/test_s3_evidence_race_listings.py \
+            tests/s3/test_s3_evidence_race_config.py \
+            tests/s3/test_s3_evidence_race_objects.py \
+            tests/s3/test_s3_evidence_race_control.py
       - name: Publish CI run summary
         if: always()
         shell: bash

@@ -10,10 +10,11 @@ Object Lock"):
   extend-only, mode-immutable, not clearable;
 * GOVERNANCE: altering or removing the retention requires the
   ``s3:BypassGovernanceRetention`` permission AND the explicit
-  ``x-amz-bypass-governance-retention:true`` header. TeleDrive has no
-  such permission scope, so NO principal can bypass: shortening or
-  clearing GOVERNANCE answers 403, and the header itself is rejected
-  501 on every route (the fail-closed posture, pinned here);
+  ``x-amz-bypass-governance-retention:true`` header (the dedicated
+  scope exists — tests/s3/test_s3_governance_bypass.py owns its full
+  matrix). Without both, shortening or clearing GOVERNANCE answers
+  403, and the header itself stays rejected 501 on every route except
+  the retention write;
 * a permanent DELETE (``?versionId``) of a protected version answers
   403; a simple DELETE answers 200 with a delete marker (the marker
   never removes the protected version);
@@ -170,8 +171,9 @@ def test_expired_retention_frees_the_version(service):
 
 
 # ---------------------------------------------------------------------------
-# GOVERNANCE: no bypass path exists (no permission scope), so every
-# shortening/clearing attempt is 403 and the header itself is 501.
+# GOVERNANCE: the fence holds for every principal that cannot prove the
+# dedicated bypass scope AND the explicit header (the full bypass matrix
+# lives in tests/s3/test_s3_governance_bypass.py).
 # ---------------------------------------------------------------------------
 
 def test_governance_retention_transitions(service):
@@ -229,28 +231,37 @@ def test_governance_retention_cannot_be_cleared_without_bypass(service):
                   f"{path}?versionId={version}").status_code == 403
 
 
-def test_bypass_header_has_no_backing_and_is_rejected(service):
-    """No s3:BypassGovernanceRetention scope exists in TeleDrive, so
-    the header is honestly rejected (501) on every route instead of
-    being accepted and ignored."""
+def test_governance_bypass_with_scope_and_header_shortens(service):
+    """The bypass now has backing: s3:BypassGovernanceRetention exists,
+    and the fixture credential (minted with the full default permission
+    set) holds it. With the explicit header the GOVERNANCE fence opens
+    for that principal — deliberately, exactly like AWS — while the
+    header without the scope stays 403 (pinned in
+    tests/s3/test_s3_governance_bypass.py)."""
     assert signed(service, "PUT", "/fence-bucket").status_code == 200
     assert signed(service, "PUT", "/fence-bucket/bypass.bin",
                   b"x").status_code == 200
     path = "/fence-bucket/bypass.bin"
+    original = _iso(3600)
     assert _put_retention(service, path, "GOVERNANCE",
-                          _iso(3600)).status_code == 200
+                          original).status_code == 200
+    shortened_at = _iso(60)
     body = (f'<Retention xmlns="{ACL_XMLNS}"><Mode>GOVERNANCE</Mode>'
-            f"<RetainUntilDate>{_iso(60)}</RetainUntilDate>"
+            f"<RetainUntilDate>{shortened_at}</RetainUntilDate>"
             f"</Retention>").encode()
-    refused = signed(service, "PUT", f"{path}?retention", body,
-                     extra_headers={
-                         "x-amz-bypass-governance-retention": "true"})
-    assert refused.status_code == 501
-    assert b"NotImplemented" in refused.content
-    # The retention is unchanged.
+    shortened = signed(service, "PUT", f"{path}?retention", body,
+                       extra_headers={
+                           "x-amz-bypass-governance-retention": "true"})
+    assert shortened.status_code == 200, shortened.text
     state = signed(service, "GET", f"{path}?retention")
     assert b"<Mode>GOVERNANCE</Mode>" in state.content
-    assert _iso(3600)[:10].encode() in state.content
+    assert ("T" + shortened_at[11:16] + ":").encode() in state.content
+    assert ("T" + original[11:16] + ":").encode() not in state.content
+    # The bypassed version stays otherwise fenced: it is still readable
+    # and a permanent delete of it keeps answering 403 while retained.
+    version = _version_of(service, path)
+    assert signed(service, "DELETE",
+                  f"{path}?versionId={version}").status_code == 403
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,86 @@ Entries describe the behaviour change and why it mattered. A version is
 listed only after its commits exist; a release tag is cut separately after
 the mandatory checks pass on the exact SHA.
 
+## [1.0.10] - 2026-11-04
+
+The fidelity release. The S3 fidelity program landed in full: real
+directory buckets with short-lived session credentials, a physical cold
+archive behind a truthful RestoreObject, AWS-exact null-version and
+object-lock semantics, condition operators, GetObject part reads and a
+server-enforced first-boot password rotation. The evidence program makes
+every claim measurable: a per-operation evidence matrix (114 operations
+x 7 classes, six columns complete), a parameter-level compatibility
+ledger, a fourth independent client (minio-py) in the live matrix, the
+race/restart matrices on real PostgreSQL and MySQL, and a DR rehearsal
+with an offline self-test. Schema 27 -> 30.
+
+### Added
+
+- **Directory buckets and CreateSession.** `bucket_type` general|directory
+  with immutable `base--zone-id--x-s3` names (the zone is a configured
+  logical compatibility label, never an AWS AZ claim), real
+  `ListDirectoryBuckets` pagination, and short-lived session credentials:
+  token hashed at rest, secret Fernet-encrypted with the master key,
+  durable SQL revocation, `s3express` signing scope plus the signed
+  `x-amz-s3session-token` header for zonal requests, and ReadOnly mode
+  that cannot write.
+- **Physical cold archive and real RestoreObject.** `ColdBlobStore` seals
+  the stored representation with fsync + hash-verified readback and
+  manifests that never carry key material; a resumable state machine with
+  idempotency keys, worker leases and generation fences drives restores
+  that open the read window only after whole-SHA256 verification. GC
+  permits hot deletion only when the cold blob readbacks with the exact
+  whole digest at collection time. Lifecycle gains `Transition`,
+  `NoncurrentVersionTransitions`, `NoncurrentVersionExpiration`,
+  `ExpiredObjectDeleteMarker`, `Tag`/`And` filters and `Date` schedules.
+- **GetObject `?partNumber=N`** from the immutable MPU layout with
+  sparse-safe offsets, 206/`Content-Range`/`x-amz-mp-parts-count`,
+  `416 InvalidPartNumber` and `400` for `Range`+`partNumber`.
+- **`s3:BypassGovernanceRetention`** as a real permission scope wired to
+  the retention route: GOVERNANCE shortening/clearing needs the scope
+  and the explicit header; COMPLIANCE stays immutable for everyone.
+- **`bucket-owner-read`** honored; **admin re-archive** route for a
+  suspect cold archive; **lifecycle Tag/And/Date** rules.
+- **Evidence program:** `docs/reference/s3-evidence.md` (per-operation
+  matrix, enforced by a meta test), `docs/reference/s3-parameters.md`
+  (parameter ledger, source-derived), minio-py 7.2.20 as a fourth
+  independent client, and `docs/operate/dr-checklist.md`.
+
+### Changed
+
+- **First-boot admin password is enforced server-side.** While the
+  seeded `admin` account still uses the shipped default, every
+  authenticated operation is refused (web, REST, S3 credential issue and
+  presign, API keys, admin WebSocket) through gates that run before
+  authorization. The allowlist is exactly the rotation flow, including
+  the new `POST /api/v1/auth/password` self-service change. API keys and
+  S3 credentials issued under the default are denied until rotation.
+- **Suspended-bucket versioning is AWS-exact:** every suspended write
+  occupies the null-version slot and retires the previous null occupant
+  (enabled-era versions are immutable history); a suspended DELETE
+  inserts a marker carrying the null version ID — uniform across PUT,
+  copy, multipart, REST and S3.
+- **ACL/policy/lock parity:** canned ACLs are exactly AWS's eight
+  (unknown values are 400), `PUT ?acl` accepts the header/canned
+  alternative, policy condition operators cover the common set with
+  temporal date comparison and AWS missing-key semantics, and a corrupt
+  stored policy answers `400 MalformedPolicy` instead of falling back.
+- **SSE-C multipart layouts are verifiable**, so part reads,
+  `GetObjectAttributes(ObjectParts)` and copies of SSE-C MPU objects work
+  where they previously failed closed with 409.
+- **`UpdateObjectEncryption`** parses the old-key family under the
+  AWS-spelled names (`x-amz-copy-source-server-side-encryption-customer-*`);
+  the earlier double-prefixed spelling was never an AWS name.
+- **SigV4 canonical query** uses the tokens exactly as sent, matching
+  AWS, so unencoded `/` in `response-*` values signs correctly.
+- **`BucketEncryptionStore.replace`** uses the UPDATE-first upsert, so
+  two concurrent first writes converge instead of surfacing a 500 on
+  PostgreSQL/MySQL.
+- **`ListObjectVersions`** pagination survives concurrent deletion of the
+  marker version (previously a legitimate cursor answered 400).
+- Schema 27 -> 30: `bucket_type`, `storage_s3_sessions`, archive
+  manifests.
+
 ## [1.0.9] - 2026-11-02
 
 The review release. A whole-tree review by six independent readers found 55

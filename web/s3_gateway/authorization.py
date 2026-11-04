@@ -163,17 +163,23 @@ def _require_source_acl(catalog, store, access_key: str, source_header: str,
 def _apply_bucket_owner_preferred(catalog, bucket: str, key: str,
                                   owner: str, request) -> None:
     """BucketOwnerPreferred: a ``bucket-owner-full-control`` upload adds
-    an owner FULL_CONTROL object grant.  Other models ignore it."""
-    if request.headers.get("x-amz-acl") != "bucket-owner-full-control":
+    an owner FULL_CONTROL object grant, and a ``bucket-owner-read``
+    upload adds an owner READ grant (the AWS canned table: the object
+    owner keeps FULL_CONTROL, the bucket owner gets READ).  Other models
+    ignore both."""
+    canned = request.headers.get("x-amz-acl")
+    if canned not in ("bucket-owner-full-control", "bucket-owner-read"):
         return
     if _ownership_model(catalog, bucket) != "BucketOwnerPreferred":
         return
     bucket_owner, _bucket_grants = catalog.bucket_acl(bucket)
     target_owner = bucket_owner or owner
     stored_owner, grants = catalog.object_acl(bucket, key)
+    permission = ("FULL_CONTROL"
+                  if canned == "bucket-owner-full-control" else "READ")
     catalog.set_object_acl(
         bucket, key, stored_owner or target_owner,
-        list(grants) + [(target_owner, "FULL_CONTROL")])
+        list(grants) + [(target_owner, permission)])
 
 
 _LIST_DEFAULTS = {"prefix": "", "delimiter": "", "max-keys": "1000"}

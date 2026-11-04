@@ -133,5 +133,6 @@ nav:
           - S3 fidelity and recovery (2026-11-02): project/plans/2026-11-02-s3-fidelity.md
       - Releases:
           - Overview: project/releases/index.md
+          - v1.0.10: project/releases/v1.0.10.md
           - v1.0.9: project/releases/v1.0.9.md
           - v1.0.8: project/releases/v1.0.8.md

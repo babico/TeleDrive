@@ -146,12 +146,27 @@ def _reject_unimplemented_write_options(request: Request, *,
         # declaration and the decoded length; the decoder enforces both
         # (and sigv4 requires a signed x-amz-trailer).
         rejected -= {"x-amz-trailer", "x-amz-decoded-content-length"}
+    if (request.method == "PUT" and "retention" in request.query_params):
+        # PutObjectRetention is the ONE route where the governance
+        # bypass header has meaning (AWS S3 User Guide, "Retention
+        # modes": overriding GOVERNANCE-mode retention requires the
+        # s3:BypassGovernanceRetention permission AND the explicit
+        # x-amz-bypass-governance-retention:true header). The retention
+        # handler parses it, demands the dedicated scope and refuses
+        # 403 without it. A bucket-level ?retention was already refused
+        # by the dispatcher's unsupported-selector check, so reaching
+        # here with ?retention means the object-level route; every other
+        # route (including ?legal-hold and GET ?retention) keeps the
+        # 501 below.
+        rejected.discard("x-amz-bypass-governance-retention")
     # The S3 gateway is permanently private and has exactly one storage
     # tier, so these explicit default values do not change actual behavior.
-    # ``bucket-owner-full-control`` is accepted because Phase L5 gives it
-    # real meaning under BucketOwnerPreferred. Reject every other canned
-    # ACL / storage-class rather than pretending to provide public-read,
-    # Glacier, Standard-IA or replicated durability.
+    # ``bucket-owner-full-control`` and ``bucket-owner-read`` are accepted
+    # because the ownership model gives them real meaning: the former
+    # hands the bucket owner FULL_CONTROL (Phase L5), the latter READ
+    # (the same grant-recording path with the READ permission). Reject
+    # every other canned ACL / storage-class rather than pretending to
+    # provide public-read, Glacier, Standard-IA or replicated durability.
     defaults = {
         "x-amz-storage-class": "STANDARD",
     }
@@ -175,7 +190,8 @@ def _reject_unimplemented_write_options(request: Request, *,
         # keep answering 501.
         if canned_acl not in CANNED_ACLS:
             raise SigV4Error("InvalidArgument", "Invalid canned ACL")
-        if canned_acl not in {"private", "bucket-owner-full-control"}:
+        if canned_acl not in {"private", "bucket-owner-read",
+                              "bucket-owner-full-control"}:
             raise SigV4Error("NotImplemented", "Unsupported S3 ACL or storage tier")
     if "acl" in request.query_params:
         # PutBucketAcl/PutObjectAcl accept the x-amz-grant-* family as an

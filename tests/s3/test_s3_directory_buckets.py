@@ -36,10 +36,13 @@ against our endpoint. No request in this suite is ever mocked.
 """
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import hashlib
+import hmac
 import threading
 import time
+import zlib
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
@@ -991,3 +994,209 @@ def test_actual_boto3_s3express_session_flow(service):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — aws-chunked streaming uploads on the zonal plane
+#
+# The aws-chunked decoder resolves chunk-signature secrets through the
+# SESSION credential view (ctx.store is the SessionCredentialView for
+# zonal requests), and its chunk-signature chain is derived from the
+# request's own Authorization scope — which on this plane is
+# ``s3express``, not ``s3``. These tests pin the real stock flow for
+# both streaming variants the general plane supports:
+# STREAMING-UNSIGNED-PAYLOAD-TRAILER (boto3's default checksum mode)
+# and STREAMING-AWS4-HMAC-SHA256-PAYLOAD (signed chunk chains).
+# ---------------------------------------------------------------------------
+
+SIGNED_STREAMING_MODE = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+UNSIGNED_TRAILER_STREAMING_MODE = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+
+
+def _zonal_streaming_sign(session, method, url, extra_headers):
+    """Manual s3express SigV4 exactly as the gateway verifies it.
+
+    botocore's S3ExpressAuth cannot be driven into a streaming payload
+    mode from a path-style endpoint, so the canonical request is built
+    by hand — with the streaming literal as the payload hash and the
+    session token signed, which is the S3ExpressAuth wire shape.
+    Returns (headers, seed signature, scope date, region).
+    """
+    import datetime
+    from urllib.parse import urlsplit as _split
+
+    path = _split(url).path
+    access, secret = session["access"], session["secret"]
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date = amz_date[:8]
+    region = "us-east-1"
+
+    values = {"host": "localhost:9000", "x-amz-date": amz_date,
+              SESSION_TOKEN_HEADER: session["token"]}
+    for name, value in extra_headers.items():
+        values[name.lower()] = value.strip()
+    signed = sorted(values)
+    headers_part = ";".join(signed)
+    payload = values["x-amz-content-sha256"]
+    canonical = (
+        f"{method}\n{path}\n"
+        "\n"
+        + "".join(f"{name}:{values[name]}\n" for name in signed)
+        + f"\n{headers_part}\n{payload}"
+    )
+    scope = f"{date}/{region}/s3express/aws4_request"
+    to_sign = (f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n"
+               + hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+    key = hmac.new(("AWS4" + secret).encode("utf-8"), date.encode(),
+                   hashlib.sha256).digest()
+    for word in (region, "s3express", "aws4_request"):
+        key = hmac.new(key, word.encode(), hashlib.sha256).digest()
+    signature = hmac.new(key, to_sign.encode("utf-8"),
+                         hashlib.sha256).hexdigest()
+    headers = dict(values)
+    headers["authorization"] = (
+        f"AWS4-HMAC-SHA256 Credential={access}/{scope}, "
+        f"SignedHeaders={headers_part}, Signature={signature}")
+    return headers, signature, date, region
+
+
+def _zonal_wire_body(session, seed, date, region, payload, chunk_size, *,
+                     signed_mode, amz_date, chain_service="s3express",
+                     trailer=None, tamper_chunk=None):
+    """The aws-chunked wire body with a chunk-signature chain derived
+    from ``chain_service``'s scope (s3express for the real flow, ``s3``
+    for the wrong-scope control)."""
+    key = hmac.new(("AWS4" + session["secret"]).encode("utf-8"),
+                   date.encode(), hashlib.sha256).digest()
+    for word in (region, chain_service, "aws4_request"):
+        key = hmac.new(key, word.encode(), hashlib.sha256).digest()
+    previous = seed
+    scope = f"{date}/{region}/{chain_service}/aws4_request"
+    out = bytearray()
+    chunk_index = 0
+    for start in range(0, len(payload), chunk_size):
+        data = payload[start:start + chunk_size]
+        wire_data = data
+        if tamper_chunk == chunk_index:
+            # Tamper AFTER signing: the signature covers the ORIGINAL
+            # bytes, the wire carries corrupted ones.
+            wire_data = bytes(b ^ 0xFF for b in data)
+        if signed_mode:
+            string_to_sign = "\n".join((
+                "AWS4-HMAC-SHA256-PAYLOAD", amz_date, scope, previous,
+                hashlib.sha256(b"").hexdigest(),
+                hashlib.sha256(data).hexdigest(),
+            ))
+            signature = hmac.new(
+                key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+            previous = signature
+            out += f"{len(data):x};chunk-signature={signature}\r\n".encode()
+        else:
+            out += f"{len(data):x}\r\n".encode()
+        out += wire_data + b"\r\n"
+        chunk_index += 1
+    if signed_mode:
+        string_to_sign = "\n".join((
+            "AWS4-HMAC-SHA256-PAYLOAD", amz_date, scope, previous,
+            hashlib.sha256(b"").hexdigest(),
+            hashlib.sha256(b"").hexdigest(),
+        ))
+        final = hmac.new(key, string_to_sign.encode(),
+                         hashlib.sha256).hexdigest()
+        out += f"0;chunk-signature={final}\r\n".encode()
+    else:
+        out += b"0\r\n"
+    for name, value in (trailer or {}).items():
+        out += f"{name}:{value}\r\n".encode()
+    out += b"\r\n"
+    return bytes(out)
+
+
+def _zonal_streaming_put(service, session, key, payload, mode, *,
+                         chunk_size=7, trailer_values=None,
+                         chain_service="s3express", tamper_chunk=None):
+    headers = {
+        "x-amz-content-sha256": mode,
+        "content-encoding": "aws-chunked",
+        "x-amz-decoded-content-length": str(len(payload)),
+    }
+    if trailer_values is not None:
+        headers["x-amz-trailer"] = ",".join(trailer_values)
+    url = f"http://localhost:9000/{DIR_A}/{key}"
+    auth_headers, seed, date, region = _zonal_streaming_sign(
+        session, "PUT", url, headers)
+    wire = _zonal_wire_body(session, seed, date, region, payload,
+                            chunk_size, signed_mode=(
+                                mode == SIGNED_STREAMING_MODE),
+                            amz_date=auth_headers["x-amz-date"],
+                            chain_service=chain_service,
+                            trailer=trailer_values, tamper_chunk=tamper_chunk)
+    return service[0].request("PUT", f"/{DIR_A}/{key}", content=wire,
+                              headers=auth_headers)
+
+
+def test_zonal_unsigned_trailer_streaming_upload(service):
+    """STREAMING-UNSIGNED-PAYLOAD-TRAILER (boto3's default checksum mode)
+    works on the zonal plane: decoded through the session-view store,
+    the declared trailer checksum verified, the object published and
+    readable back through the session."""
+    create_directory(service, DIR_A)
+    session = open_session(service)
+    payload = b"zonal-trailer-body" * 20
+    crc32 = base64.b64encode(
+        (zlib.crc32(payload) & 0xFFFFFFFF).to_bytes(4, "big")).decode()
+    reply = _zonal_streaming_put(
+        service, session, "streamed/trailer.bin", payload,
+        UNSIGNED_TRAILER_STREAMING_MODE,
+        trailer_values={"x-amz-checksum-crc32": crc32})
+    assert reply.status_code == 200, reply.text
+    got = zonal(service, session, "GET", f"/{DIR_A}/streamed/trailer.bin")
+    assert got.status_code == 200, got.text
+    assert got.content == payload
+
+
+def test_zonal_signed_streaming_upload_round_trip(service):
+    """STREAMING-AWS4-HMAC-SHA256-PAYLOAD with the chunk-signature chain
+    derived from the s3express scope (the scope the request's own
+    Authorization was verified against) round-trips on the zonal
+    plane."""
+    create_directory(service, DIR_A)
+    session = open_session(service)
+    payload = b"zonal-signed-body" * 20
+    reply = _zonal_streaming_put(service, session, "streamed/signed.bin",
+                                 payload, SIGNED_STREAMING_MODE)
+    assert reply.status_code == 200, reply.text
+    got = zonal(service, session, "GET", f"/{DIR_A}/streamed/signed.bin")
+    assert got.status_code == 200, got.text
+    assert got.content == payload
+
+
+def test_zonal_signed_chunk_tampering_fails_closed(service):
+    create_directory(service, DIR_A)
+    session = open_session(service)
+    payload = b"zonal-integrity-body" * 20
+    reply = _zonal_streaming_put(service, session, "streamed/tampered.bin",
+                                 payload, SIGNED_STREAMING_MODE,
+                                 tamper_chunk=2)
+    assert reply.status_code == 403, reply.text
+    assert b"SignatureDoesNotMatch" in reply.content
+    assert zonal(service, session, "GET",
+                 f"/{DIR_A}/streamed/tampered.bin").status_code == 404
+
+
+def test_zonal_chunk_chain_is_pinned_to_the_s3express_scope(service):
+    """The decoder derives the chain key from the request's own (already
+    verified) Authorization scope: a chain computed over the general
+    plane's ``s3`` service cannot authenticate s3express-signed chunks."""
+    create_directory(service, DIR_A)
+    session = open_session(service)
+    payload = b"zonal-wrong-scope-body" * 20
+    reply = _zonal_streaming_put(service, session,
+                                 "streamed/wrongscope.bin", payload,
+                                 SIGNED_STREAMING_MODE,
+                                 chain_service="s3")
+    assert reply.status_code == 403, reply.text
+    assert b"SignatureDoesNotMatch" in reply.content
+    assert zonal(service, session, "GET",
+                 f"/{DIR_A}/streamed/wrongscope.bin").status_code == 404

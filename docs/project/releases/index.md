@@ -10,6 +10,7 @@ the mandatory workflows pass on that exact SHA.
 
 | Release | Notes | Theme |
 | --- | --- | --- |
+| v1.0.10 | [v1.0.10](v1.0.10.md) | The fidelity release: directory buckets and session credentials, a physical cold archive with real RestoreObject, AWS-exact versioning/ACL/policy/lock semantics, part reads, the enforced bootstrap rotation, and the per-operation evidence program. Schema 30. |
 | v1.0.9 | [v1.0.9](v1.0.9.md) | The review release: every finding from the full-codebase review closed with its regression test, schema 27, the documentation site. |
 | v1.0.8 | [v1.0.8](v1.0.8.md) | S3 metadata parity, removal of HTTP Basic, API-key delegation ceilings, opt-in envelope encryption, serialized schema coordination, and the security review that closed 64 defects before the tag. |
 | v1.0.7 | No separate notes page | The previous release line of the single-container service; its contents are in the root changelog and the GitHub release. |

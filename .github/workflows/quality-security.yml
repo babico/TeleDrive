@@ -160,6 +160,19 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m pip install pytest "pytest-xdist>=3.6,<4" httpx boto3 "minio==7.2.20"
+      - name: Install pinned Cyberduck duck CLI
+        run: |
+          # The desktop GUI has no automation surface; duck is built from the
+          # same Java S3 module. Pin the release archive so drift fails a test.
+          curl -sSfL -o /tmp/duck.deb \
+            https://github.com/iterate-ch/cyberduck/releases/download/release-9-6-0/duck_9.6.0.46406_amd64.deb
+          dpkg-deb -x /tmp/duck.deb /tmp/duck
+          echo "TELEDRIVE_DUCK_CLASSPATH=/tmp/duck/opt/duck/lib/app/*" >> "$GITHUB_ENV"
+          # Do not depend on the runner's default JDK version.
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openjdk-21-jre
+          echo "/usr/lib/jvm/java-21-openjdk-amd64/bin" >> "$GITHUB_PATH"
+          java -version
       - name: S3 regression tests
         env:
           # Fail closed if the pinned minio-py SDK is missing: the client
@@ -179,6 +192,7 @@ jobs:
             tests/s3/test_s3_aws_chunked.py \
             tests/s3/test_s3_rclone_compat.py \
             tests/s3/test_s3_client_minio.py \
+            tests/s3/test_s3_client_cyberduck.py \
             tests/s3/test_s3_compat_reads.py \
             tests/s3/test_s3_policy_status.py \
             tests/s3/test_s3_multipart_preconditions.py \

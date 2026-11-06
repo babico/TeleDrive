@@ -277,6 +277,7 @@ def test_set_bucket_quota_is_really_applied(catalog):
     from teledrive.storage.quota import bucket_quota, set_bucket_quota
 
     cat, _ = catalog
+    cat.create_bucket("quota-bucket", 1)
     set_bucket_quota(cat.db, "quota-bucket", 100, 2, now=10)
     assert bucket_quota(cat.db, "quota-bucket") == (100, 2)
     # The update path (row already exists) must persist too.
@@ -300,3 +301,38 @@ def test_deleting_a_bucket_purges_its_share_rows(catalog):
     assert shares.list(cat.db)
     cat.delete_bucket("shared-bucket")
     assert shares.list(cat.db) == []
+
+
+def test_config_write_committed_after_delete_cannot_orphan(catalog):
+    """Regression for the documented DeleteBucket orphan window.
+
+    A configuration PUT may run its existence check in one transaction and
+    commit its INSERT after ``delete_bucket`` has already removed the row.
+    With the ON DELETE CASCADE foreign key (schema step 31) that INSERT now
+    fails on the FK instead of leaving a row for a deleted bucket, and a
+    same-name re-create cannot revive it.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    cat, _ = catalog
+    bucket = "late-config-write"
+    cat.create_bucket(bucket, 1)
+    cat.delete_bucket(bucket)
+
+    # The write that already passed its earlier existence check.
+    with pytest.raises(IntegrityError):
+        cat.db.connection.execute(text(
+            "INSERT INTO storage_bucket_tags (bucket, tag_key, tag_value) "
+            "VALUES (:bucket, 'k', 'v')"), {"bucket": bucket})
+    cat.db.connection.rollback()
+    assert cat.db.connection.execute(text(
+        "SELECT COUNT(*) FROM storage_bucket_tags WHERE bucket = :bucket"),
+        {"bucket": bucket}).scalar_one() == 0
+
+    # Re-creating the name starts clean, as the old sweep intended.
+    cat.create_bucket(bucket, 2)
+    assert cat.db.connection.execute(text(
+        "SELECT COUNT(*) FROM storage_bucket_tags WHERE bucket = :bucket"),
+        {"bucket": bucket}).scalar_one() == 0
+

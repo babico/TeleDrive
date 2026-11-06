@@ -243,9 +243,15 @@ def test_journal_cleanup_on_bucket_delete(service):
     try:
         # Bucket deletion refuses real object history; simulate the
         # post-GC empty-bucket state that leaves only an unreclaimable
-        # journal row behind.
+        # journal row behind.  SQLite now enforces foreign keys, so turn
+        # enforcement off for this synthetic pre-upgrade orphan (the real
+        # GC removes children first).
+        if db.engine.url.get_backend_name() == "sqlite":
+            db.connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         db.connection.execute(delete(objects).where(objects.c.id == staged))
         db.commit()
+        if db.engine.url.get_backend_name() == "sqlite":
+            db.connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         catalog.delete_bucket("journal-bucket")
         assert db.connection.execute(select(pending_tags.c.object_id).where(
             pending_tags.c.object_id == staged)).first() is None

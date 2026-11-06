@@ -60,6 +60,7 @@ jobs:
             tests/storage/test_storage_ops_health.py tests/meta/test_host_soak.py tests/meta/test_acceptance_cli.py \
             tests/storage/test_storage_gc_retention.py tests/storage/test_gc_reference_planner.py \
             tests/storage/test_storage_catalog.py \
+            tests/storage/test_schema_fk_cascade.py \
             tests/storage/test_stores.py \
             tests/storage/test_mtproto_rate_guard.py tests/storage/test_mtproto_multi_credentials.py \
             tests/storage/test_telegram_dr_rehearsal.py \
@@ -221,7 +222,7 @@ jobs:
         # re-runs ensure_schema (CREATE DATABASE is not granted), so they
         # must not interleave with the e2e DB tests above. Both matrices
         # on both backends add roughly two minutes to this job.
-        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py tests/storage/test_schema_init_race.py tests/s3/test_s3_retry_race_matrix.py tests/s3/test_s3_restart_matrix.py
+        run: python -m pytest -vv tests/e2e/test_database_live.py tests/e2e/test_phase_j_schema.py tests/storage/test_storage_engine.py tests/storage/test_storage_recovery.py tests/storage/test_schema_init_race.py tests/storage/test_schema_fk_cascade.py tests/s3/test_s3_retry_race_matrix.py tests/s3/test_s3_restart_matrix.py
       - name: Seed realistic metadata before native database backup
         run: |
           python scripts/ops/rehearse_native_database_restore.py seed --url-env DB_TEST_POSTGRES_URL --receipt "$RUNNER_TEMP/pg-dr.json" --source "$RUNNER_TEMP/pg-source.bin"

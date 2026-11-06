@@ -232,9 +232,15 @@ def test_bucket_delete_reclaims_orphaned_annotation_rows(prepared):
     try:
         # Simulate a verified physical GC that reclaimed the manifest row;
         # the annotation row is then an orphan the bucket delete must clear.
+        # SQLite now enforces foreign keys, so turn enforcement off for this
+        # synthetic pre-upgrade orphan (the real GC removes children first).
+        if db.engine.url.get_backend_name() == "sqlite":
+            db.connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         db.connection.exec_driver_sql(
             "DELETE FROM storage_objects WHERE id = ?", (object_id,))
         db.connection.commit()
+        if db.engine.url.get_backend_name() == "sqlite":
+            db.connection.exec_driver_sql("PRAGMA foreign_keys=ON")
     finally:
         db.close()
     assert signed(service, "DELETE", "/orphan-annotations").status_code == 204

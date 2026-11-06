@@ -16,7 +16,7 @@ archive behind a truthful RestoreObject, AWS-exact null-version and
 object-lock semantics, condition operators, GetObject part reads and a
 server-enforced first-boot password rotation. The evidence program makes
 every claim measurable: a per-operation evidence matrix (114 operations
-x 7 classes, six columns complete), a parameter-level compatibility
+x 7 classes, every applicable cell proven), a parameter-level compatibility
 ledger, a fourth independent client (minio-py) in the live matrix, the
 race/restart matrices on real PostgreSQL and MySQL, and a DR rehearsal
 with an offline self-test. Schema 27 -> 30.

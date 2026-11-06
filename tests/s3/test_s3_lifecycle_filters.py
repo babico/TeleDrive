@@ -1,22 +1,26 @@
-"""Lifecycle ``Filter`` Tag conjunctions and Date-based expiration.
+"""Lifecycle ``Filter`` conditions: tags, object size and Date schedules.
 
 The handoff-08 rule grammar parsed only ``Filter/Prefix``. AWS's
-lifecycle filter model is wider, and this module pins the two families
-that were explicitly left out of scope then:
+lifecycle filter model is wider, and this module pins the families
+that were left out of scope then:
 
 * ``Filter`` blocks containing ``Tag`` (key/value) conditions, directly
   or under an ``And`` together with a ``Prefix`` — matched against the
   VERSION's immutable tag set, all conditions conjunctive;
+* ``ObjectSizeGreaterThan`` / ``ObjectSizeLessThan`` (exclusive byte
+  bounds in AWS's 0..5 TiB range), directly or inside ``And`` with a
+  prefix and tags;
 * ``Expiration`` and ``NoncurrentVersionExpiration`` accepting a
   ``Date`` (ISO-8601) alongside ``Days`` — a Date rule fires for every
   matching version once ``now >= date``.
 
 Fail-closed taxonomy follows the existing parser: unknown filter
-contents (``ObjectSize*``, foreign namespaces, duplicate structural
-elements) answer 501, known-but-invalid combinations (Days and Date
-together, a Filter with two condition kinds, an ``And`` without a Tag)
-answer 400 InvalidArgument, and the legacy rule-level ``<Prefix>``
-element next to a ``Filter`` stays rejected.
+contents (foreign namespaces, unknown elements, duplicate structural
+nodes) answer 501, known-but-invalid combinations (Days and Date
+together, more than one condition kind directly under ``Filter``, an
+``And`` with only a Prefix, an inverted or out-of-range size interval, a
+Tag with an empty key) answer 400 InvalidArgument, and the legacy
+rule-level ``<Prefix>`` element next to a ``Filter`` stays rejected.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from sqlalchemy import select, update
 
 from tests.s3.test_s3_gateway import service, signed  # noqa: F401 — fixture
 from teledrive.s3.lifecycle import (
-    BucketLifecycleStore, LifecycleError, parse_lifecycle_xml,
+    BucketLifecycleStore, LifecycleError, lifecycle_xml, parse_lifecycle_xml,
 )
 from teledrive.storage.cold_store import ColdBlobStore
 from teledrive.storage.manifest import ManifestStore, objects
@@ -133,6 +137,39 @@ def _and_tags_rule(tags, ident="and"):
     return (f"<Rule><ID>{ident}</ID><Status>Enabled</Status>"
             f"<Filter><And>{tags_xml}</And></Filter>"
             f"<Expiration><Days>1</Days></Expiration></Rule>").encode()
+
+
+def _size_rule(*, greater=None, less=None, prefix=None, tags=(),
+               action="expiration", ident="sized"):
+    """A size-filtered rule. One condition sits directly under Filter;
+    anything else is wrapped in And, in AWS element order."""
+    elements = []
+    if prefix is not None:
+        elements.append(f"<Prefix>{prefix}</Prefix>")
+    for key, value in tags:
+        elements.append(f"<Tag><Key>{key}</Key><Value>{value}</Value></Tag>")
+    if greater is not None:
+        elements.append(
+            f"<ObjectSizeGreaterThan>{greater}</ObjectSizeGreaterThan>")
+    if less is not None:
+        elements.append(f"<ObjectSizeLessThan>{less}</ObjectSizeLessThan>")
+    inner = "".join(elements)
+    if len(elements) == 1 and not tags:
+        filter_xml = f"<Filter>{inner}</Filter>"
+    else:
+        filter_xml = f"<Filter><And>{inner}</And></Filter>"
+    if action == "expiration":
+        action_xml = "<Expiration><Days>1</Days></Expiration>"
+    elif action == "noncurrent-expiration":
+        action_xml = ("<NoncurrentVersionExpiration>"
+                      "<NoncurrentDays>1</NoncurrentDays>"
+                      "</NoncurrentVersionExpiration>")
+    else:
+        action_xml = ("<Transition><Days>1</Days>"
+                      "<StorageClass>ARCHIVE_ACCESS</StorageClass>"
+                      "</Transition>")
+    return (f"<Rule><ID>{ident}</ID><Status>Enabled</Status>"
+            f"{filter_xml}{action_xml}</Rule>").encode()
 
 
 def _expiration_rule(days=None, date=None, ident="dated"):
@@ -251,6 +288,161 @@ def test_tag_filter_gates_transitions(service, cold):
 
 
 # ---------------------------------------------------------------------------
+# Object-size filters
+# ---------------------------------------------------------------------------
+
+FIVE_TIB = 5 * 1024 ** 4
+
+
+def test_size_less_than_selects_smaller_heads(service, cold):
+    _bucket(service)
+    small = _seed(service, "docs/small.bin", b"x" * 10)
+    big = _seed(service, "docs/big.bin", b"x" * 1000)
+    _age(service, small, big, days=10)
+    _rules(service, _size_rule(less=100))
+    assert _apply(service, now=int(time.time())) == 1
+    assert _head_status(service, "docs/small.bin") == 404
+    assert _head_status(service, "docs/big.bin") == 200
+
+
+def test_size_greater_than_selects_larger_heads(service, cold):
+    _bucket(service)
+    small = _seed(service, "docs/small.bin", b"x" * 10)
+    big = _seed(service, "docs/big.bin", b"x" * 1000)
+    _age(service, small, big, days=10)
+    _rules(service, _size_rule(greater=100))
+    assert _apply(service, now=int(time.time())) == 1
+    assert _head_status(service, "docs/small.bin") == 200
+    assert _head_status(service, "docs/big.bin") == 404
+
+
+def test_size_bounds_are_exclusive(service, cold):
+    """An object exactly on the bound matches neither bound."""
+    _bucket(service)
+    exact = _seed(service, "docs/exact.bin", b"x" * 100)
+    _age(service, exact, days=10)
+    _rules(service, _size_rule(greater=100))
+    assert _apply(service, now=int(time.time())) == 0
+    _rules(service, _size_rule(less=100))
+    assert _apply(service, now=int(time.time())) == 0
+    assert _head_status(service, "docs/exact.bin") == 200
+
+
+def test_size_bounds_select_only_strictly_inside(service, cold):
+    """Just-below and just-above the bound are eligible; the bound
+    itself is not."""
+    _bucket(service)
+    below = _seed(service, "docs/below.bin", b"x" * 99)
+    exact = _seed(service, "docs/exact.bin", b"x" * 100)
+    above = _seed(service, "docs/above.bin", b"x" * 101)
+    _age(service, below, exact, above, days=10)
+    _rules(service, _size_rule(less=100))
+    assert _apply(service, now=int(time.time())) == 1
+    assert _head_status(service, "docs/below.bin") == 404
+    assert _head_status(service, "docs/exact.bin") == 200
+    assert _head_status(service, "docs/above.bin") == 200
+    _rules(service, _size_rule(greater=100))
+    assert _apply(service, now=int(time.time())) == 1
+    assert _head_status(service, "docs/exact.bin") == 200
+    assert _head_status(service, "docs/above.bin") == 404
+
+
+def test_and_size_prefix_and_tag_requires_every_condition(service, cold):
+    _bucket(service)
+    target = _seed(service, "docs/target.bin", b"x" * 200)
+    _seed(service, "docs/no-tag.bin", b"x" * 200)
+    _seed(service, "other/target.bin", b"x" * 200)
+    _seed(service, "docs/too-small.bin", b"x" * 10)
+    _seed(service, "docs/too-big.bin", b"x" * 1000)
+    _tag(service, "docs/target.bin", [("stage", "expired")])
+    _tag(service, "other/target.bin", [("stage", "expired")])
+    # The out-of-range tagged objects are tagged too, proving the size
+    # predicate (not the tag lookup) excludes them.
+    _tag(service, "docs/too-small.bin", [("stage", "expired")])
+    _tag(service, "docs/too-big.bin", [("stage", "expired")])
+    _age(service, target, days=10)
+    _rules(service, _size_rule(
+        greater=50, less=500, prefix="docs/", tags=[("stage", "expired")]))
+    assert _apply(service, now=int(time.time())) == 1
+    assert _head_status(service, "docs/target.bin") == 404
+    for key in ("docs/no-tag.bin", "other/target.bin",
+                "docs/too-small.bin", "docs/too-big.bin"):
+        assert _head_status(service, key) == 200
+
+
+def test_size_filter_gates_transitions(service, cold):
+    _bucket(service)
+    small = _seed(service, "docs/small.bin", b"x" * 10)
+    big = _seed(service, "docs/big.bin", b"x" * 1000)
+    _age(service, small, big, days=10)
+    _rules(service, _size_rule(greater=100, action="transition"))
+    assert _apply(service, now=int(time.time())) == 1
+    db = service[3]()
+    try:
+        classes = dict(db.connection.execute(select(
+            objects.c.id, objects.c.storage_class).where(
+            objects.c.id.in_([small, big]))).all())
+    finally:
+        db.close()
+    assert classes[big] == "ARCHIVE_ACCESS"
+    assert classes[small] == "STANDARD"
+
+
+def test_size_filter_gates_noncurrent_expiration(service, cold):
+    _bucket(service)
+    old = _seed(service, "docs/file.bin", b"x" * 10)   # size 10
+    _seed(service, "docs/file.bin", b"x" * 1000)       # makes v1 noncurrent
+    _age(service, old, days=10)
+    _rules(service, _size_rule(
+        greater=100, action="noncurrent-expiration"))
+    assert _apply(service, now=int(time.time())) == 0
+    # The inverse bound selects the same version.
+    _rules(service, _size_rule(
+        less=100, action="noncurrent-expiration"))
+    assert _apply(service, now=int(time.time())) == 1
+    db = service[3]()
+    try:
+        from teledrive.storage.catalog import removed_versions
+        revoked = db.connection.execute(select(
+            removed_versions.c.object_id).where(
+            removed_versions.c.object_id == old)).first()
+    finally:
+        db.close()
+    assert revoked is not None
+
+
+def test_size_predicate_fails_closed_on_missing_size():
+    """The evaluator never matches a size rule when size is unknown."""
+    assert BucketLifecycleStore._matches_size(None, 0, None) is False
+    assert BucketLifecycleStore._matches_size(None, None, 100) is False
+    assert BucketLifecycleStore._matches_size(None, None, None) is True
+    assert BucketLifecycleStore._matches_size(100, 99, 101) is True
+
+
+def test_size_bounds_parse_at_the_aws_boundaries():
+    def document(greater=None, less=None):
+        bounds = ""
+        if greater is not None:
+            bounds += (f"<ObjectSizeGreaterThan>{greater}"
+                       f"</ObjectSizeGreaterThan>")
+        if less is not None:
+            bounds += f"<ObjectSizeLessThan>{less}</ObjectSizeLessThan>"
+        return (b"<LifecycleConfiguration><Rule><ID>x</ID>"
+                b"<Status>Enabled</Status><Filter><And>" + bounds.encode()
+                + b"</And></Filter><Expiration><Days>1</Days></Expiration>"
+                b"</Rule></LifecycleConfiguration>")
+
+    zero = parse_lifecycle_xml(document(greater=0, less=1))
+    assert zero[0]["size_greater_than"] == 0
+    # Exactly 5 TiB is the inclusive top of the accepted range.
+    top = parse_lifecycle_xml(document(less=FIVE_TIB))
+    assert top[0]["size_less_than"] == FIVE_TIB
+    both = parse_lifecycle_xml(document(greater=0, less=FIVE_TIB))
+    assert (both[0]["size_greater_than"], both[0]["size_less_than"]) == (
+        0, FIVE_TIB)
+
+
+# ---------------------------------------------------------------------------
 # Date-based expiration
 # ---------------------------------------------------------------------------
 
@@ -350,18 +542,89 @@ def test_tag_and_date_rules_round_trip_through_the_api(service, cold):
         {"key": "a", "value": "1"}, {"key": "b", "value": "2"}]
 
 
+def test_size_rules_round_trip_in_aws_element_order(service, cold):
+    _bucket(service)
+    _rules(
+        service,
+        _size_rule(less=100, ident="single"),
+        _size_rule(greater=50, less=500, prefix="docs/",
+                   tags=[("a", "1"), ("b", "2")], ident="and"),
+    )
+    body = signed(service, "GET", f"/{BUCKET}?lifecycle").content
+    root = ET.fromstring(body)
+    by_id = {rule.findtext(NS + "ID"): rule
+             for rule in root.findall(NS + "Rule")}
+    # A lone size bound sits directly under Filter.
+    single = by_id["single"].find(NS + "Filter")
+    assert single.findtext(NS + "ObjectSizeLessThan") == "100"
+    assert single.find(NS + "And") is None
+    # Prefix, tags and both bounds ride in And, in AWS element order.
+    and_node = by_id["and"].find(NS + "Filter/" + NS + "And")
+    labels = [child.tag.rsplit("}", 1)[-1] for child in and_node]
+    assert labels == ["Prefix", "Tag", "Tag", "ObjectSizeGreaterThan",
+                      "ObjectSizeLessThan"]
+    assert and_node.findtext(NS + "ObjectSizeGreaterThan") == "50"
+    # parse -> store -> serialize -> re-parse preserves every field.
+    parsed = parse_lifecycle_xml(body)
+    assert parsed[0]["size_less_than"] == 100
+    assert parsed[0].get("size_greater_than") is None
+    assert parsed[1]["size_greater_than"] == 50
+    assert parsed[1]["size_less_than"] == 500
+    assert parsed[1]["prefix"] == "docs/"
+    assert parsed[1]["tags"] == [
+        {"key": "a", "value": "1"}, {"key": "b", "value": "2"}]
+    assert lifecycle_xml(parsed) == body
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed taxonomy
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("bad,expected", [
-    # Unknown filter contents still 501.
+    # A second condition kind directly under Filter needs And.
     (b"<Rule><ID>x</ID><Status>Enabled</Status>"
-     b"<Filter><ObjectSizeGreaterThan>1</ObjectSizeGreaterThan></Filter>"
-     b"<Expiration><Days>1</Days></Expiration></Rule>", 501),
+     b"<Filter><ObjectSizeGreaterThan>1</ObjectSizeGreaterThan>"
+     b"<ObjectSizeLessThan>2</ObjectSizeLessThan></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
     (b"<Rule><ID>x</ID><Status>Enabled</Status>"
-     b"<Filter><And><ObjectSizeLessThan>1</ObjectSizeLessThan></And></Filter>"
+     b"<Filter><ObjectSizeGreaterThan>1</ObjectSizeGreaterThan>"
+     b"<Tag><Key>a</Key><Value>1</Value></Tag></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    # Size bounds: integers in 0..5 TiB, greater strictly below less.
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><ObjectSizeGreaterThan>-1</ObjectSizeGreaterThan></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><ObjectSizeGreaterThan>1.5</ObjectSizeGreaterThan></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><ObjectSizeLessThan>not-a-number</ObjectSizeLessThan></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><ObjectSizeLessThan></ObjectSizeLessThan></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><ObjectSizeLessThan>5497558138881</ObjectSizeLessThan>"
+     b"</Filter><Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><And><ObjectSizeGreaterThan>100</ObjectSizeGreaterThan>"
+     b"<ObjectSizeLessThan>100</ObjectSizeLessThan></And></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><And><ObjectSizeGreaterThan>200</ObjectSizeGreaterThan>"
+     b"<ObjectSizeLessThan>100</ObjectSizeLessThan></And></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    # A repeated structural node is a duplicate, not a condition.
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><And><ObjectSizeGreaterThan>1</ObjectSizeGreaterThan>"
+     b"<ObjectSizeGreaterThan>2</ObjectSizeGreaterThan></And></Filter>"
      b"<Expiration><Days>1</Days></Expiration></Rule>", 501),
+    # A delete marker has no size to match.
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><ObjectSizeLessThan>100</ObjectSizeLessThan></Filter>"
+     b"<Expiration><Days>1</Days>"
+     b"<ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker>"
+     b"</Expiration></Rule>", 400),
     # The legacy rule-level Prefix next to a Filter stays rejected.
     (b"<Rule><ID>x</ID><Status>Enabled</Status><Prefix>p/</Prefix>"
      b"<Filter><Prefix>p/</Prefix></Filter>"
@@ -375,6 +638,9 @@ def test_tag_and_date_rules_round_trip_through_the_api(service, cold):
      b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
     (b"<Rule><ID>x</ID><Status>Enabled</Status>"
      b"<Filter><Tag><Key>a</Key></Tag></Filter>"
+     b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
+    (b"<Rule><ID>x</ID><Status>Enabled</Status>"
+     b"<Filter><Tag><Key></Key><Value>1</Value></Tag></Filter>"
      b"<Expiration><Days>1</Days></Expiration></Rule>", 400),
     (b"<Rule><ID>x</ID><Status>Enabled</Status>"
      b"<Filter><And><Tag><Key>a</Key><Value>1</Value></Tag>"

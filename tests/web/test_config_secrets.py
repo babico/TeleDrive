@@ -24,7 +24,7 @@ def api(tmp_path, monkeypatch):
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     config_path.write_text(yaml.safe_dump({
-        "web": {"allowed_hosts": "localhost",
+        "web": {"allowed_hosts": "localhost,127.0.0.1,[::1]",
                 "auth_dir": str(tmp_path / "auth")},
         "state": {"database_url": f"sqlite:///{db_path}"},
         "upload": {"source_dir": str(tmp_path / "uploads")},
@@ -151,3 +151,19 @@ def test_config_write_requires_an_interactive_session(api):
                        json=webapp.read_raw_config())
     assert reply.status_code == 403, reply.text
     assert "interactive session" in reply.text
+
+
+def test_ipv6_host_headers_match_the_allowlist(api):
+    """A bracketed IPv6 Host must resolve like any other allowlisted host.
+
+    The middleware used to split the header on the first colon, so
+    ``Host: [::1]:8080`` became ``"["`` and the documented default
+    allowlist entry ``[::1]`` could never match — every IPv6 request was
+    rejected with 400 while localhost worked.
+    """
+    client = api[0]
+    for host in ("localhost", "[::1]", "[::1]:8080", "127.0.0.1"):
+        response = client.get("/api/health", headers={"host": host})
+        assert response.status_code == 200, (host, response.text)
+    rejected = client.get("/api/health", headers={"host": "evil.example"})
+    assert rejected.status_code == 400

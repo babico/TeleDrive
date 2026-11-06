@@ -1020,6 +1020,12 @@ def test_telegram_session_delete_soft_guard(authenv):
     try:
         _insert_session(db, "user-3003")
         from sqlalchemy import text as _text
+        # storage_chunks.object_id is a foreign key; seed the object it
+        # belongs to instead of an orphan row.
+        db.connection.execute(_text(
+            "INSERT INTO storage_objects (id, bucket, object_key, status, "
+            "size, created_at, updated_at) VALUES "
+            "('obj-1', 'rbac-bucket', 'obj-1', 'ready', 300, 1, 1)"))
         db.connection.execute(_text(
             "INSERT INTO storage_chunks (object_id, ordinal, offset, size, "
             "sha256, account, chat_id, message_id) VALUES "

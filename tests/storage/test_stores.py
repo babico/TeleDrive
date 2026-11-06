@@ -17,6 +17,12 @@ from teledrive.stores import (
 @pytest.fixture
 def db(tmp_path):
     conn = connect_database(str(tmp_path / "stores.sqlite"))
+    # Shares, pins and quotas are bucket-keyed with an ON DELETE CASCADE
+    # foreign key (schema step 31), so their buckets must exist.
+    from sqlalchemy import text
+    conn.connection.execute(text(
+        "INSERT INTO storage_buckets (name, created_at) VALUES ('b1', 0), ('b2', 0)"))
+    conn.commit()
     try:
         yield conn
     finally:

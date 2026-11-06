@@ -98,6 +98,8 @@ nav:
   - Operating:
       - Backup and restore: operate/backup-restore.md
       - DR checklist: operate/dr-checklist.md
+      - S3 Express zonal verification: operate/s3-express-zonal.md
+      - Cyberduck: operate/cyberduck.md
       - Garbage collection: operate/garbage-collection.md
       - Monitoring: operate/monitoring.md
       - Reverse proxy: operate/reverse-proxy.md

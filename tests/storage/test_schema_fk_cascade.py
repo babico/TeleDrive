@@ -142,21 +142,40 @@ def _assert_all_cascade_sqlite(connection) -> None:
 
 def _assert_all_cascade_information_schema(connection) -> None:
     backend = connection.engine.url.get_backend_name()
-    schema = "DATABASE()" if backend == "mysql" else "current_schema()"
-    present = _cascade_tables_present(connection)
-    assert present, "no bucket-keyed tables were created"
-    missing = []
-    for table, column in present:
-        rows = connection.execute(text(
+    # MySQL keeps the referenced table on key_column_usage; PostgreSQL does
+    # not have that column and exposes it through constraint_column_usage.
+    # Mirroring the production query keeps this assertion honest instead of
+    # passing on the one backend whose catalog happens to have the column.
+    if backend == "mysql":
+        sql = (
             "SELECT kcu.column_name, rc.delete_rule "
             "FROM information_schema.key_column_usage AS kcu "
             "JOIN information_schema.referential_constraints AS rc "
             "  ON rc.constraint_schema = kcu.constraint_schema "
             " AND rc.constraint_name = kcu.constraint_name "
-            f"WHERE kcu.table_schema = {schema} "  # nosec B608 - fixed literal
+            "WHERE kcu.table_schema = DATABASE() "
             "  AND kcu.table_name = :table "
             "  AND kcu.referenced_table_name = 'storage_buckets'"
-        ), {"table": table}).fetchall()
+        )
+    else:
+        sql = (
+            "SELECT kcu.column_name, rc.delete_rule "
+            "FROM information_schema.referential_constraints AS rc "
+            "JOIN information_schema.key_column_usage AS kcu "
+            "  ON kcu.constraint_schema = rc.constraint_schema "
+            " AND kcu.constraint_name = rc.constraint_name "
+            "JOIN information_schema.constraint_column_usage AS ccu "
+            "  ON ccu.constraint_schema = rc.unique_constraint_schema "
+            " AND ccu.constraint_name = rc.unique_constraint_name "
+            "WHERE kcu.table_schema = current_schema() "
+            "  AND kcu.table_name = :table "
+            "  AND ccu.table_name = 'storage_buckets'"
+        )
+    present = _cascade_tables_present(connection)
+    assert present, "no bucket-keyed tables were created"
+    missing = []
+    for table, column in present:
+        rows = connection.execute(text(sql), {"table": table}).fetchall()
         rules = {row[0]: (row[1] or "").upper() for row in rows}
         if rules.get(column) != "CASCADE":
             missing.append(f"{table}.{column} (rules={rules})")

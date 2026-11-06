@@ -628,19 +628,43 @@ def _bucket_fk_is_cascade(engine: Engine, table: str, column: str) -> bool:
         # The inspector normally reports options, but not every reflected
         # constraint shape carries them; the catalog is authoritative and
         # keeps a re-run a true no-op.
-        schema = "DATABASE()" if dialect == "mysql" else "current_schema()"
-        with engine.connect() as connection:
-            rows = connection.execute(text(
+        # The two catalogs answer "is this FK cascading?" differently:
+        # MySQL's key_column_usage carries referenced_table_name, while
+        # PostgreSQL has no such column (it lives in
+        # constraint_column_usage, reached through the unique constraint).
+        # Using the MySQL spelling on PostgreSQL failed the migration with
+        # "column kcu.referenced_table_name does not exist" — invisible on
+        # SQLite, fatal on the two real backends.
+        if dialect == "mysql":
+            sql = (
                 "SELECT rc.delete_rule "
                 "FROM information_schema.key_column_usage AS kcu "
                 "JOIN information_schema.referential_constraints AS rc "
                 "  ON rc.constraint_schema = kcu.constraint_schema "
                 " AND rc.constraint_name = kcu.constraint_name "
-                f"WHERE kcu.table_schema = {schema} "  # nosec B608 - fixed literal
+                "WHERE kcu.table_schema = DATABASE() "
                 "  AND kcu.table_name = :table "
                 "  AND kcu.column_name = :column "
                 "  AND kcu.referenced_table_name = 'storage_buckets'"
-            ), {"table": table, "column": column}).fetchall()
+            )
+        else:
+            sql = (
+                "SELECT rc.delete_rule "
+                "FROM information_schema.referential_constraints AS rc "
+                "JOIN information_schema.key_column_usage AS kcu "
+                "  ON kcu.constraint_schema = rc.constraint_schema "
+                " AND kcu.constraint_name = rc.constraint_name "
+                "JOIN information_schema.constraint_column_usage AS ccu "
+                "  ON ccu.constraint_schema = rc.unique_constraint_schema "
+                " AND ccu.constraint_name = rc.unique_constraint_name "
+                "WHERE kcu.table_schema = current_schema() "
+                "  AND kcu.table_name = :table "
+                "  AND kcu.column_name = :column "
+                "  AND ccu.table_name = 'storage_buckets'"
+            )
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(sql), {"table": table, "column": column}).fetchall()
         return any((row[0] or "").upper() == "CASCADE" for row in rows)
     return False
 

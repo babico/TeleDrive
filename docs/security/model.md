@@ -21,11 +21,11 @@ There are three credential types, and they are not interchangeable.
 | S3 credential | SigV4 `Credential=<access key>/...`, or a presigned query | Access key in clear, secret Fernet-encrypted in `storage_s3_credentials` | `s3:*` permission strings, optional expiry, independently revocable |
 
 A session user is a **person**. An API key is a **delegated program**: it is
-not a user, gets role `api-key`, and never passes through the role map
-(`require_auth` checks it first and returns). An S3 credential is an
-**independent principal**: it has no user row, no role, and no access to the
-WebUI or REST JSON API. A Basic header is ignored as if absent; there is no
-Basic code path and no configuration password.
+not a user and gets only the internal pseudo-role `api-key` for logging; it
+never passes through the role map (`require_auth` checks it first and
+returns). An S3 credential is an **independent principal**: it has no user
+row, no role, and no access to the WebUI or REST JSON API. A Basic header is
+ignored as if absent; there is no Basic code path and no configuration password.
 
 First boot inserts `admin`/`admin` only when no `admin` row exists. The row is
 never overwritten, cannot be renamed, and the UI forces a password change
@@ -34,26 +34,30 @@ lockout recovery.
 
 ## 2. CSRF and origin rules
 
-Every state-changing WebUI/REST handler calls `_same_origin(request)` before
-doing work:
+Every state-changing WebUI/REST session handler calls `_same_origin(request)`
+before doing work:
 
 1. The request must carry `X-TeleDrive-CSRF: 1`. A missing header is HTTP 403.
 2. If an `Origin` header is present, its host must equal the request `Host`.
    A mismatched or unparsable origin is HTTP 403. An absent `Origin` (common
    for non-browser clients) passes step 2 but not step 1.
 
-This applies to the browser session flow and to authenticated API-key calls;
-the login and logout handlers enforce it too. The rule exists because a
+This applies to the browser session flow and to authenticated API-key calls on
+the administration/JSON surface; the login and logout handlers enforce it too.
+The REST bearer data plane (`/api/v1/buckets...`) deliberately does not: it
+authenticates the key itself and has no cookie to protect with a CSRF token.
+The rule exists because a
 cookie-authenticated browser can be made to submit a
 cross-site form; requiring a custom header that a cross-origin form cannot
 set is the primary defence, and the origin check catches a browser that does
 send one. GET/HEAD reads do not require the header.
 
-The reverse-proxy mode (`TELEDRIVE_TRUSTED_PROXY`) changes only two things:
-`Secure` cookies are set when `X-Forwarded-Proto: https`, and login throttles
-use the leftmost **public** `X-Forwarded-For` address. Without the flag that
-header is ignored entirely, so an untrusted client cannot mint or dodge a
-throttle bucket.
+The reverse-proxy mode (`TELEDRIVE_TRUSTED_PROXY`) changes two classes of
+behaviour: `Secure` cookies are set when `X-Forwarded-Proto: https`, and every
+consumer of the client identity (login and public-share throttles, audit and
+request-log client address) switches from the socket peer to the leftmost
+**public** `X-Forwarded-For` address. Without the flag that header is ignored
+entirely, so an untrusted client cannot mint or dodge a throttle bucket.
 
 ## 3. Role to permission derivation
 
@@ -61,14 +65,18 @@ throttle bucket.
 `route_views()`, so the catalog cannot drift from the routes. Every
 `/api/*` route gets one permission: a curated name for the nine REST bearer
 endpoints, otherwise `"<method>:<path template>"`. Public routes (health,
-login page, static assets, shares, website, docs) get none.
+login page, static assets, shares, website, docs) get none. The
+`/api/v1/certificate.cer` and `/api/v1/certificate.pem` aliases are an
+inconsistency: they have no auth dependency (deliberately public) but the
+registry still assigns them a route permission because their paths are under
+`/api/`.
 
 `ROLE_PERMISSION_RULES` is the only source of human authority:
 
 | Role | Rule | Current snapshot |
 | --- | --- | --- |
-| `admin` | Every permission in the registry, including routes added later | 139 |
-| `operator` | Every permission except the admin-only surfaces | 96 |
+| `admin` | Every permission in the registry, including routes added later | 142 |
+| `operator` | Every permission except the admin-only surfaces | 99 |
 | `viewer` | Only `GET`/`HEAD` and the curated REST read names, outside admin-only surfaces | 44 |
 | unknown/absent | Nothing (fail closed) | 0 |
 
@@ -106,16 +114,22 @@ dimensions:
 | Permissions | A key may create/rotate/revoke only scopes it already holds (`_require_within_delegation`). | A key scoped to one mint route creating a fully privileged key. |
 | Lifetime | A child key's expiry must be `<=` the parent's; a parent with an expiry cannot mint a non-expiring child (`_require_within_lifetime`). | Revoking a short-lived parent while a permanent descendant keeps working. |
 
-`admin:*` is a real wildcard over the live route table, resolved at issue and
-check time, so a route added later cannot retroactively widen an existing key.
-Legacy grouped scopes (`buckets:read`, `objects:write`, ...) expand to their
-endpoint sets so old keys keep working; new keys should use per-endpoint
-names. `admin:*` cannot be combined with other scopes.
+`admin:*` is a real wildcard over the live route table. It is stored as the
+wildcard, and both issuance and every authorization check expand it against
+the routes that exist at that moment; a route added later therefore extends an
+existing `admin:*` key, which is the intended "full access" meaning. A key
+issued with per-endpoint names never widens. Legacy grouped scopes are
+accepted, but only `buckets:read`, `buckets:manage`, `objects:read`,
+`objects:write` and `objects:delete` expand to endpoints; `jobs:*`,
+`accounts:*`, `settings:*` and `keys:manage` expand to the empty set, so a key
+holding only one of them authorizes nothing. New keys should use
+per-endpoint names. `admin:*` cannot be combined with other scopes.
 
 Some surfaces refuse an API key entirely (`_require_interactive_session`):
 issuing, editing, revoking or revealing an **S3 credential**, **presigning**
-an object URL, and **writing configuration**. Each either creates or returns
-a durable secret; delegating it would bypass the ceiling. A key that holds
+an object URL, and **writing configuration**. S3-governance writes also
+refuse API keys (their handler admits only the admin role). Each either
+creates or returns a durable secret; delegating it would bypass the ceiling. A key that holds
 the share-create permission can create a share link (that permission is the
 grant), but listing/revoking all tokens stays admin-role-only.
 
@@ -201,9 +215,12 @@ only ciphertext. The passphrase is unrecoverable by design.
 
 `security_audit_events` never stores a secret: values matching TeleDrive's
 own token shapes (`td_live_`, `td_sess_`, Fernet, PBKDF2, Telethon session)
-are replaced with `[redacted]`. The log buffer and file additionally redact
-share tokens and database URLs. The audit writer swallows its own failures on
-purpose — an audit write must not be able to fail the operation it describes.
+are replaced with `[redacted]`. The log buffer and file mask share tokens in
+request paths, and scrub exception text for URL passwords, query secrets and
+phone numbers before logging; credential call sites log ids, prefixes and
+scope names rather than secret values. The audit writer swallows its own
+failures on purpose — an audit write must not be able to fail the operation
+it describes.
 
 ## 8. Trust boundaries
 

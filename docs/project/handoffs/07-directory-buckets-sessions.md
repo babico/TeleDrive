@@ -1,6 +1,6 @@
 # Handoff 07 — Real directory bucket and CreateSession behavior
 
-**State:** Architecture work order. **Prerequisite:** Handoff 06 and baseline S3 operation route tests green.
+**State:** Delivered in v1.0.10. **Prerequisite:** Handoff 06 and baseline S3 operation route tests green.
 
 **Existing:** `teledrive/s3/directory_buckets.py` always lists zero directory buckets and rejects `CreateSession`; `web/s3_gateway/dispatch.py` discriminates `s3express` signing. This is an honest refusal but not a working Express-like service.
 

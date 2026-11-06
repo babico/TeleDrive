@@ -7,16 +7,18 @@ absorbed into the tree — the structure they describe is documented in the
 [module map](../../reference/module-map.md). Handoff 11 (legacy branch
 retirement) closed with the archived tags named `archive/2026-11-02/*`.
 
-## Open work orders
+## Work orders
 
-Handoffs 06–10 follow the [S3 fidelity execution
-plan](../plans/2026-11-02-s3-fidelity.md) and are **not implemented yet**:
+Handoffs 06–09 followed the [S3 fidelity execution
+plan](../plans/2026-11-02-s3-fidelity.md) and are **delivered in v1.0.10**.
+Handoff 10 is the owner-executed DR/payload-backup plan: the tooling is
+delivered, the run itself is not (and must not be run from CI).
 
-- [06 — GetObject partNumber and bootstrap password](06-get-part-and-bootstrap.md)
-- [07 — Directory buckets and session credentials](07-directory-buckets-sessions.md)
-- [08 — Real archive and restore](08-physical-archive-restore.md)
-- [09 — S3 submodes and identity](09-s3-submodes-and-identity.md)
-- [10 — Owner media backup and DR](10-owner-media-backup-and-dr.md)
+- [06 — GetObject partNumber and bootstrap password](06-get-part-and-bootstrap.md) — delivered
+- [07 — Directory buckets and session credentials](07-directory-buckets-sessions.md) — delivered
+- [08 — Real archive and restore](08-physical-archive-restore.md) — delivered
+- [09 — S3 submodes and identity](09-s3-submodes-and-identity.md) — delivered
+- [10 — Owner media backup and DR](10-owner-media-backup-and-dr.md) — tooling complete, owner-run
 
 ## Rules that apply to every handoff
 

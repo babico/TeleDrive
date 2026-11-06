@@ -33,7 +33,7 @@ mapping, the in-container listener and the healthcheck.
 | Method | Use it for | Notes |
 | --- | --- | --- |
 | Web UI settings pages | Day-to-day changes: allowed hosts, limits, storage policy, Telegram accounts, S3 credentials. | A save writes the SQL row **and** rewrites `config.yaml`. |
-| `PUT /api/v1/config` | Automation | Requires an interactive login session (cookie), not an API key, and the `x-teledrive-csrf: 1` header. |
+| `PUT /api/v1/config` | Automation | Requires an interactive login session (session cookie or `td_sess_` bearer), not an API key, and the `x-teledrive-csrf: 1` header. |
 | Editing `config/config.yaml` by hand | First bootstrap, disaster recovery, or a value that must exist before the service starts. | Once SQL holds the row, the service rewrites the file from SQL; a manual edit is reverted on the next read. |
 | Editing `.env` | Ports, TLS, bind address, `PUID`/`PGID`, `TZ` | Requires recreating the container: `docker compose up -d`. |
 
@@ -72,10 +72,10 @@ TeleDrive needs a 32-byte Fernet key, called the S3 master key. It protects:
   `storage.encryption: envelope` is set.
 
 The key is read from `storage.s3_master_key_file` (default
-`/config/s3-master.key`) or, if that is unset, from the
-`TELEDRIVE_S3_MASTER_KEY` environment variable. In the shipped Compose
-deployment, use the file. The file must be mode `0600` and owned by the
-container user.
+`/config/s3-master.key`) when that file exists; if it is missing or the path
+is empty, the `TELEDRIVE_S3_MASTER_KEY` environment variable is used. In the
+shipped Compose deployment, use the file. The file must be mode `0600` and
+owned by the container user.
 
 ```bash
 openssl rand -base64 32 > config/s3-master.key

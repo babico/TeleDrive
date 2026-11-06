@@ -12,7 +12,7 @@ that closed it; check the current tree before treating an old finding as live.
 | --- | --- | --- |
 | [Full-codebase review 2026-10-31](review-2026-10-31.md) | Six independent reviewers across storage, the S3 data plane, web/API, persistence, and S3/web test realism. | The most recent whole-tree review: correctness bugs fixed before shipping, false positives dropped, and explicitly declined test-realism items. |
 | [API review](api-review.md) | Seven waves over 25 endpoints — the authority surface, not the whole route list. | Per-endpoint defect reports with fix status. Sixty-four real defects were closed before the 1.0.8 tag, including four takeovers; one finding was disproved with evidence. |
-| [Codebase review](codebase-review.md) | Structural review of `teledrive/`, `web/`, the UI, tests and scripts at `054af3a`. | Fifteen refactor findings with a correction-status table; the closed ones carry commits, the open ones are carried into the [roadmap](../roadmap.md). Parts of the document are written in Turkish. |
+| [Codebase review](codebase-review.md) | Structural review of `teledrive/`, `web/`, the UI, tests and scripts at `054af3a`. | Fifteen refactor findings with a correction-status table; the closed ones carry commits, the open ones are carried into the [roadmap](../roadmap.md). |
 | [Audit 2026-10-29](audit-2026-10-29.md) | TODO/docs/roadmap claims checked against the tree at `08a7c8e`. | Shows which documentation claims were true, which were stale, and how the bucket-delete, MySQL, permission-catalog and schema-race findings were closed. Keeps its pre-fix state visible. |
 
 ## How to read a review

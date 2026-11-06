@@ -1,6 +1,6 @@
 # Handoff 06 — GetObject partNumber and first-boot admin security
 
-**State:** Ready for implementation; no code changes claimed. **Read first:** [execution plan](../plans/2026-11-02-s3-fidelity.md), `docs/project/handoffs/README.md`, `docs/reference/s3-specs.md`.
+**State:** Delivered in v1.0.10 — both Task A and Task B shipped with their regression tests. This page is kept as the work order. **Read first:** [execution plan](../plans/2026-11-02-s3-fidelity.md), `docs/project/handoffs/README.md`, `docs/reference/s3-specs.md`.
 
 ## Task A — GET ?partNumber=N
 

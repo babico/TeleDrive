@@ -1,7 +1,7 @@
 # Upgrade TeleDrive
 
 This page is for an operator moving an existing installation to the current
-`main` / 1.0.8 line. It lists the upgrade sequence, the schema version, and
+`main` / 1.0.10 line. It lists the upgrade sequence, the schema version, and
 every operator-visible breaking change that needs a decision. It does not
 repeat the installation guide; see [Install](../start/install.md) for the
 container layout.
@@ -62,7 +62,8 @@ automatically on startup; there is no separate migrate command.
 ## Schema migrations
 
 `SCHEMA_VERSION` is the length of the append-only step list in
-`teledrive/storage/schema.py`, currently **30**. Migrations run
+`teledrive/storage/schema.py`, currently **31** on `main` (the v1.0.10 tag
+shipped 30). Migrations run
 automatically on startup — there is no separate migrate command and no
 step you must run by hand. The per-step reference, including what each
 step creates and what a rollback would leave behind, is
@@ -74,7 +75,8 @@ The coordinator:
 - if it is current, performs no DDL;
 - otherwise takes a cross-process lock and runs every idempotent step in order
   (SQLite `flock` on `<db>.schema-lock`, PostgreSQL advisory lock, MySQL
-  `GET_LOCK` — all with a 30-second timeout);
+  `GET_LOCK`; SQLite and MySQL give up after 30 seconds, PostgreSQL waits on
+  the advisory lock);
 - records the new version.
 
 Three consequences matter during an upgrade:
@@ -83,11 +85,11 @@ Three consequences matter during an upgrade:
 - Steps are append-only and there is no down-migration. Rolling back the code
   after the schema advanced requires restoring the pre-upgrade database
   backup.
-- On a busy database the lock wait is bounded at 30 seconds. If another
+- On SQLite and MySQL the lock wait is bounded at 30 seconds; if another
   worker is mid-migration longer than that, the starting worker fails with a
-  timeout rather than queueing indefinitely; let the first worker finish and
-  start again. A stopped container while another holds the lock is the
-  normal cause.
+  timeout rather than queueing indefinitely. PostgreSQL waits on the advisory
+  lock until the holder finishes. Let the first worker finish and start again.
+  A stopped container while another holds the lock is the normal cause.
 
 Before a major version jump, check three things:
 
@@ -100,8 +102,9 @@ Before a major version jump, check three things:
 3. **Concurrent workers.** Every worker that opens the same database runs
    the same serialized migration. One worker migrates while the others wait
    on the lock; you do not need to drain workers first, but avoid restarting
-   the whole fleet simultaneously on a slow database, because each worker's
-   lock wait is capped at 30 seconds.
+   the whole fleet simultaneously on a slow database, because SQLite and
+   MySQL lock waits are capped at 30 seconds (PostgreSQL waits on the advisory
+   lock).
 
 Step 27 deduplicates `telegram_sessions.account` and
 `telegram_channels.channel_id` (keeping the most recently updated row) before
@@ -188,7 +191,10 @@ TELEDRIVE_S3_SSL_KEYFILE=/config/ssl/server.key
 
 Each listener has an independent TLS pair. A combined PEM needs only the
 `_CERTFILE` variable. `deploy/tls/generate.sh` writes the material under
-`config/ssl` and prints the matching lines.
+`config/ssl` and prints the matching lines. `TELEDRIVE_BIND_ADDRESS` belongs
+in `.env`: Compose reads it for the host-side port mapping, while putting it
+in the container `environment:` block also changes the in-container bind
+address.
 
 ### Service settings now live in SQL
 
@@ -234,7 +240,7 @@ owner `FULL_CONTROL` grant when an object is uploaded with
 
 ### S3 credential scopes are not retroactively granted
 
-The permission catalog grew from 18 scopes to 90 in the current tree. New
+The permission catalog grew from 18 scopes to 91 in the current tree. New
 credentials get whatever list is requested; existing credentials keep the
 permissions stored when they were issued. Nothing is auto-granted.
 
@@ -277,8 +283,8 @@ Security events are also stored in `security_audit_events` (schema step 25)
 and exposed at `GET /api/v1/admin/audit`. That covers credential
 issue/edit/revoke/reveal, API-key issue/rotate, config writes, user changes,
 physical GC start/finish, presign and share creation, with the actor, target
-and a scrubbed detail blob. The table is append-only and refuses to store
-anything shaped like a credential.
+and a scrubbed detail blob. The table is append-only and scrubs anything
+shaped like a credential before storing it.
 
 ### Envelope encryption is available and opt-in
 
@@ -315,8 +321,10 @@ Object Lock is one-way. Enabling it is permanent; the default retention can
 only be extended, never shortened. `COMPLIANCE` retention is extend-only and
 cannot be cleared while active. Retained and held versions refuse explicit and
 batch version deletes, and GC/lifecycle will not touch them.
-`x-amz-bypass-governance-retention` is rejected `501`; there is no
-governance-elevation model. Test on a disposable bucket first.
+`x-amz-bypass-governance-retention: true` is accepted only on a retention
+write, only when signed, and only with the dedicated
+`s3:BypassGovernanceRetention` scope; `COMPLIANCE` retention cannot be
+bypassed. Test on a disposable bucket first.
 
 Intelligent-Tiering is an **access gate**, not a cold backend. Enabling a
 tiering configuration starts access counting and lets the scheduler move
@@ -341,9 +349,10 @@ keep their class until a new configuration matches the bucket.
 
 The physical-GC gate list was: independent backup, restore drill, writer
 barrier and a two-person deletion approval. **The last one is removed by owner
-decision.** The other three still gate `deletion_permitted`, which remains
-`False`, and `scripts/ops/verify_production_bundle.py` still verifies the
-technical evidence and any signature that is supplied.
+decision.** The other three remain the owner's evidence checklist, but the
+dry-run contract still reports `deletion_permitted: false` and never
+authorizes deletion; `scripts/ops/verify_production_bundle.py` still verifies
+the technical evidence and any signature that is supplied.
 
 Upgrading never turns physical GC on. See
 [Garbage collection](../operate/garbage-collection.md).

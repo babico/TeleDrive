@@ -31,9 +31,11 @@ rather than inferring them from this table.
 - Behaviour changes that operators must act on belong in both the changelog
   and [Upgrade](../operate/upgrade.md). A breaking change is never buried in
   a feature bullet.
-- Release notes on GitHub are generated from the tag and the changelog; there
-  is no second per-version Markdown file maintained in the docs tree.
+- Release notes on GitHub are generated from the tag and the changelog; the
+  docs site also keeps one page per release under
+  `docs/project/releases/`, pinned to that tag and never retroactively
+  rewritten when `main` moves on.
 
 For the acceptance boundary behind a release, see
-[Project status](status.md). For the open work after 1.0.8, see the
+[Project status](status.md). For the open work after 1.0.10, see the
 [roadmap](roadmap.md).

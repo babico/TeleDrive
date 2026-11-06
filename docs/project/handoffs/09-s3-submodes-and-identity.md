@@ -1,6 +1,6 @@
 # Handoff 09 — S3 submodes, IAM/STS and KMS boundaries
 
-**State:** Analysis + ordered implementation backlog. **Do not** treat operation inventory 114/0/2 as complete AWS parity.
+**State:** Delivered in v1.0.10 for the implemented submodes (versioning null-slot, ACL/policy/lock fences, lifecycle transitions, governance bypass scope); the identity/KMS/STS backlog below remains a design record. **Do not** treat operation inventory 114/0/2 as complete AWS parity.
 
 ## Submode backlog (follow actual current code)
 

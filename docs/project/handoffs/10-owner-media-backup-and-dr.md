@@ -1,6 +1,6 @@
 # Handoff 10 — Owner-run original Telegram DR and physically independent payload backup
 
-**State:** Instructions and test plan only. **Owner executes; development/CI must not touch original media.** Start with `docs/project/plans/local-acceptance.md`, `docs/operate/backup-restore.md`, `scripts/ops/rehearse_telegram_dr.py`.
+**State:** Owner-executed; the supporting tooling and checklists are delivered, the real-data run is not performed by CI. **Development/CI must not touch original media.** Start with `docs/project/plans/local-acceptance.md`, `docs/operate/backup-restore.md`, `scripts/ops/rehearse_telegram_dr.py`.
 
 ## A. Read-only original Telegram media recovery rehearsal
 

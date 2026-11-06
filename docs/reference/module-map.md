@@ -9,42 +9,43 @@ they are a size signal, not the boundary.
 
 | Module | Lines | Responsibility |
 | --- | ---: | --- |
-| `web/app.py` | 1576 | App construction, middleware stack, lifespan/startup, the `include_router` calls, shared upload/read cores (`_stream_object_upload`, `_stream_object_response`, `_rest_read_gate`), settings read/write, auth bootstrap, and re-exports of names the tests monkeypatch. |
-| `web/s3.py` | 191 | The S3 gateway's public import path: the ASGI `app`, both middlewares, `ENVELOPE_ENABLED`, and re-exports from `web/s3_gateway/*`. |
-| `web/routers/rest.py` | 279 | REST data plane `/api/v1/buckets/**`, authorized by per-route API-key permissions. Reaches shared cores through `_webapp()`. |
-| `web/routers/auth.py` | 280 | Login/logout/me, password change helpers, session resolution, PBKDF2 and the login throttle. |
+| `web/app.py` | 1074 | App construction, middleware stack, lifespan/startup, the `include_router` calls, shared upload/read cores (`_stream_object_upload`, `_stream_object_response`, `_rest_read_gate`), the settings-document cache, auth bootstrap, and re-exports of settings/scheduler names the tests monkeypatch. Settings machinery lives in `web/settings_runtime.py`, scheduler loops in `web/schedulers.py`. |
+| `web/s3.py` | 235 | The S3 gateway's public import path: the ASGI `app`, its HTTP middlewares (audit, encoded-control-key normalization, bootstrap gate), `ENVELOPE_ENABLED`, and re-exports from `web/s3_gateway/*`. |
+| `web/routers/rest.py` | 282 | REST data plane `/api/v1/buckets/**`, authorized by per-route API-key permissions. Reaches shared cores through `_webapp()`. |
+| `web/routers/auth.py` | 445 | Login/logout/me, the self-service password change and bootstrap probe, session resolution, PBKDF2 and the login throttle. |
 | `web/routers/users.py` | 287 | User CRUD, roles, password reset, session revocation, the durable audit listing. |
-| `web/routers/telegram.py` | 930 | Telegram session request/verify, health, quotas, channels, flood-wait, strategy, replication. |
+| `web/routers/telegram.py` | 961 | Telegram session request/verify, health, quotas, channels, flood-wait, strategy, replication. |
 | `web/routers/config.py` | 168 | Config GET/PUT, log buffer and WebSocket stream, health, settings guards. |
 | `web/routers/public.py` | 544 | Share links, website hosting, the public certificate, and HTML page shells. Public routes authenticate inside the handler. |
 | `web/routers/buckets.py` | 1079 | WebUI bucket browser: bucket CRUD, object browse/download/upload via session, quota, pins, CORS, share admin, search/reindex, usage. |
 | `web/routers/s3admin.py` | 965 | S3 credential CRUD/reveal, API keys, multipart and pending-upload recovery, GC administration, storage jobs. |
 | `web/deps.py` | 295 | `require_auth` (session + API key), `require_api_scope`, `_same_origin`, delegation/lifetime ceilings, role gate, `permission_registry()`. |
 | `web/permissions.py` | 472 | Route-to-permission registry, role map, `is_admin_only`, `route_views()`. |
-| `web/errors.py` | — | Error shaping and credential scrubbing. |
+| `web/errors.py` | 79 | Error shaping and credential scrubbing. |
 | `web/s3_gateway/*` | — | S3 implementation: `dispatch`, `objects`, `buckets`, `multipart`, `metadata_ops`, `authorization`, `checksums`, `ranges`, `xml`, `context`, `common`. |
-| `web/s3_governance_api.py` | 1281 | `/s3/governance` write surface: policy, ABAC, encryption, replication, tiering, reports, notifications, logging. |
-| `web/static/app.js` | 167 | Alpine bootstrap: shared primitives (`api`, `toast`, `confirmDelete`), role getters, `init`, guarded spreads of page groups. |
-| `web/static/<group>.js` | — | `credentials`, `buckets`, `telegram`, `governance`, `admin`; each exports `<group>State()`/`<group>Methods()` and is loaded only where used, **before** `app.js`. |
+| `web/s3_governance_api.py` | 1339 | `/s3/governance` write surface: policy, ABAC, encryption, replication, tiering, reports, notifications, logging. |
+| `web/static/app.js` | 218 | Alpine bootstrap: shared primitives (`api`, `toast`, `confirmDelete`), role getters, `init`, guarded spreads of page groups. |
+| `web/static/<group>.js` | — | `credentials`, `buckets`, `telegram`, `governance`, `admin`; each exports `<group>State()`/`<group>Methods()` and is loaded only where used, **before** `app.js`. `teledrive-crypto.js` holds the browser-side encryption helpers. |
 
 ## 2. Storage and data access
 
 | Module | Lines | Responsibility |
 | --- | ---: | --- |
-| `teledrive/storage/schema.py` | 726 | **The only DDL issuer.** 27 append-only, idempotent steps; `SCHEMA_VERSION` is the step count; a real cross-process lock (flock / `pg_advisory_xact_lock` / `GET_LOCK`). Every step is catalogued in [Schema steps](schema-steps.md). |
-| `teledrive/storage/catalog.py` | 132 | `BucketCatalog` assembly: construction, static validators, cross-cutting transaction helpers, table re-exports. |
-| `teledrive/storage/catalog_tables.py` | — | Table and index declarations. |
-| `teledrive/storage/catalog_buckets.py` | 273 | Bucket create/list/delete, versioning state, public read, Public Access Block, ownership. |
-| `teledrive/storage/catalog_versions.py` | 775 | `publish`, `delete_marker`, `delete_version`, `remove_current`, rename, listings, legacy head indexing. |
-| `teledrive/storage/catalog_lock.py` | 174 | Object lock, retention, legal hold, read gate, access counters. |
-| `teledrive/storage/catalog_acl.py` | — | Bucket and object ACL grants. |
+| `teledrive/storage/schema.py` | 1120 | **The only DDL issuer.** 31 append-only, idempotent steps (`SCHEMA_VERSION` is the step count; v1.0.10 shipped 30); a real cross-process lock (flock / `pg_advisory_xact_lock` / `GET_LOCK`). Every step is catalogued in [Schema steps](schema-steps.md). |
+| `teledrive/storage/catalog.py` | 139 | `BucketCatalog` assembly: construction, static validators, cross-cutting transaction helpers, table re-exports. |
+| `teledrive/storage/catalog_tables.py` | 107 | Table and index declarations. |
+| `teledrive/storage/catalog_buckets.py` | 229 | Bucket create/list/delete, versioning state, public read, Public Access Block, ownership. |
+| `teledrive/storage/catalog_versions.py` | 878 | `publish`, `delete_marker`, `delete_version`, `remove_current`, rename, listings, legacy head indexing. |
+| `teledrive/storage/catalog_lock.py` | 212 | Object lock, retention, legal hold, read gate, access counters. |
+| `teledrive/storage/catalog_acl.py` | 101 | Bucket and object ACL grants. |
 | `teledrive/storage/manifest.py` | 712 | Manifests, chunks, aliases, writer fences, encryption markers. |
-| `teledrive/storage/envelope.py` / `sse.py` | 163 / 250 | Envelope (SSE-S3) key wrapping and SSE-C primitives. |
-| `teledrive/storage/engine.py` | 936 | Upload/read orchestration over the transport and catalog. |
-| `teledrive/storage/gc_collect.py` | 575 | Physical collection: candidates, leases, execution, journal. |
-| `teledrive/storage/copy.py` / `quota.py` / `audit.py` | 185 / — / 80+ | Copying, quota enforcement, durable security trail. |
+| `teledrive/storage/envelope.py` / `sse.py` | 163 / 265 | Envelope (SSE-S3) key wrapping and SSE-C primitives. |
+| `teledrive/storage/engine.py` | 987 | Upload/read orchestration over the transport and catalog. |
+| `teledrive/storage/cold_store.py` | 1046 | Sealed cold archive (`ColdBlobStore`), archive/restore state machine, leases and generation fences. |
+| `teledrive/storage/gc_collect.py` | 618 | Physical collection: candidates, leases, execution, journal. |
+| `teledrive/storage/copy.py` / `quota.py` / `audit.py` | 204 / 115 / 146 | Copying, quota enforcement, durable security trail. |
 | `teledrive/stores/*` | — | Typed table access: `users`, `sessions`, `shares`, `pins`, `telegram_pending`, `telegram_accounts`, `content_index`. |
-| `teledrive/s3/*` | — | Protocol modules (SigV4, policy, ACL, tagging, lifecycle, multipart, reports, tiering, ...); the machine-readable inventory is `operation_manifest.json`. |
+| `teledrive/s3/*` | — | Protocol modules (SigV4, policy, ACL, tagging, lifecycle, multipart, reports, tiering, directory buckets, ...); the machine-readable inventory is `operation_manifest.json`. |
 
 ## 3. Layering rules
 
@@ -123,7 +124,7 @@ expects it. Never issue the DDL from a store constructor.
 
 | Test | Rule it pins |
 | --- | --- |
-| `tests/meta/test_route_surface.py` | The exact `(method, path, permission, admin_only)` surface, in both directions; every non-public route has a permission (currently 160 surface entries, 139 permissioned method/path pairs plus one WebSocket). |
+| `tests/meta/test_route_surface.py` | The exact `(method, path, permission, admin_only)` surface, in both directions; every non-public route has a permission (currently 163 surface entries: 140 permissioned method/path pairs plus one WebSocket). |
 | `tests/meta/test_schema_ddl_is_centralized.py` | No DDL text outside `schema.py`, except the declared step-owned module. |
 | `tests/meta/test_no_swallowed_name_errors.py` | A broad `except Exception` must not hide a name its scope cannot resolve. |
 | `tests/web/test_page_composition.py` | Markup and fragment script tags agree; fragments load before `app.js`. |
@@ -132,3 +133,133 @@ expects it. Never issue the DDL from a store constructor.
 
 A refactor that changes one of these rules is not a refactor; it is an
 authorization or schema change and needs its own review.
+
+## 6. Complete module inventory
+
+Every non-package Python module under `web/` and `teledrive/`, plus the
+non-vendor frontend files, with `wc -l` on the current tree. The tables above
+explain the load-bearing modules; this list is the completeness check, so a
+new module is added here (and every path below resolves today).
+
+### Web
+
+| Module | Lines |
+| --- | ---: |
+| `web/app.py` | 1074 |
+| `web/certs.py` | 82 |
+| `web/container_healthcheck.py` | 72 |
+| `web/deps.py` | 295 |
+| `web/errors.py` | 79 |
+| `web/permissions.py` | 472 |
+| `web/s3.py` | 235 |
+| `web/s3_governance_api.py` | 1339 |
+| `web/schedulers.py` | 293 |
+| `web/settings_runtime.py` | 522 |
+| `web/unified.py` | 112 |
+| `web/routers/auth.py` | 445 |
+| `web/routers/buckets.py` | 1079 |
+| `web/routers/config.py` | 168 |
+| `web/routers/public.py` | 544 |
+| `web/routers/rest.py` | 282 |
+| `web/routers/s3admin.py` | 965 |
+| `web/routers/telegram.py` | 961 |
+| `web/routers/users.py` | 287 |
+| `web/s3_gateway/authorization.py` | 195 |
+| `web/s3_gateway/buckets.py` | 1346 |
+| `web/s3_gateway/checksums.py` | 148 |
+| `web/s3_gateway/common.py` | 299 |
+| `web/s3_gateway/context.py` | 71 |
+| `web/s3_gateway/dispatch.py` | 958 |
+| `web/s3_gateway/metadata_ops.py` | 751 |
+| `web/s3_gateway/multipart.py` | 743 |
+| `web/s3_gateway/objects.py` | 1392 |
+| `web/s3_gateway/ranges.py` | 146 |
+| `web/s3_gateway/xml.py` | 166 |
+| `web/static/admin.js` | 365 |
+| `web/static/app.js` | 218 |
+| `web/static/buckets.js` | 382 |
+| `web/static/credentials.js` | 751 |
+| `web/static/governance.js` | 391 |
+| `web/static/teledrive-crypto.js` | 129 |
+| `web/static/telegram.js` | 294 |
+
+### Teledrive
+
+| Module | Lines |
+| --- | ---: |
+| `teledrive/api_keys.py` | 376 |
+| `teledrive/db.py` | 521 |
+| `teledrive/settings.py` | 279 |
+| `teledrive/settings_store.py` | 111 |
+| `teledrive/uploader.py` | 184 |
+| `teledrive/s3/acl.py` | 289 |
+| `teledrive/s3/annotations.py` | 365 |
+| `teledrive/s3/aws_chunked.py` | 236 |
+| `teledrive/s3/batch_delete.py` | 137 |
+| `teledrive/s3/bucket_encryption.py` | 205 |
+| `teledrive/s3/bucket_flags.py` | 135 |
+| `teledrive/s3/bucket_listing.py` | 139 |
+| `teledrive/s3/checksums.py` | 55 |
+| `teledrive/s3/conditions.py` | 61 |
+| `teledrive/s3/cors.py` | 266 |
+| `teledrive/s3/credentials.py` | 417 |
+| `teledrive/s3/directory_buckets.py` | 590 |
+| `teledrive/s3/lifecycle.py` | 1183 |
+| `teledrive/s3/metadata_journal.py` | 815 |
+| `teledrive/s3/multipart.py` | 1005 |
+| `teledrive/s3/notifications.py` | 810 |
+| `teledrive/s3/object_metadata.py` | 130 |
+| `teledrive/s3/ownership.py` | 77 |
+| `teledrive/s3/policy.py` | 834 |
+| `teledrive/s3/post_policy.py` | 229 |
+| `teledrive/s3/public_access.py` | 76 |
+| `teledrive/s3/replication.py` | 419 |
+| `teledrive/s3/report_configs.py` | 584 |
+| `teledrive/s3/report_runner.py` | 503 |
+| `teledrive/s3/restore.py` | 153 |
+| `teledrive/s3/route_guard.py` | 384 |
+| `teledrive/s3/select.py` | 884 |
+| `teledrive/s3/sigv4.py` | 580 |
+| `teledrive/s3/tagging.py` | 384 |
+| `teledrive/s3/tiering.py` | 573 |
+| `teledrive/s3/versioning.py` | 61 |
+| `teledrive/s3/website.py` | 225 |
+| `teledrive/s3/write_conditions.py` | 82 |
+| `teledrive/storage/audit.py` | 146 |
+| `teledrive/storage/catalog.py` | 139 |
+| `teledrive/storage/catalog_acl.py` | 101 |
+| `teledrive/storage/catalog_buckets.py` | 229 |
+| `teledrive/storage/catalog_lock.py` | 212 |
+| `teledrive/storage/catalog_tables.py` | 107 |
+| `teledrive/storage/catalog_versions.py` | 878 |
+| `teledrive/storage/cold_store.py` | 1046 |
+| `teledrive/storage/content_index.py` | 200 |
+| `teledrive/storage/copy.py` | 204 |
+| `teledrive/storage/cutover_acceptance.py` | 206 |
+| `teledrive/storage/engine.py` | 987 |
+| `teledrive/storage/envelope.py` | 163 |
+| `teledrive/storage/gc.py` | 298 |
+| `teledrive/storage/gc_collect.py` | 618 |
+| `teledrive/storage/gc_safety.py` | 192 |
+| `teledrive/storage/history_inventory.py` | 184 |
+| `teledrive/storage/jobs.py` | 547 |
+| `teledrive/storage/legacy_bridge.py` | 85 |
+| `teledrive/storage/manifest.py` | 712 |
+| `teledrive/storage/mtproto_rate_guard.py` | 301 |
+| `teledrive/storage/placement.py` | 28 |
+| `teledrive/storage/quota.py` | 115 |
+| `teledrive/storage/rebuild.py` | 240 |
+| `teledrive/storage/reconcile_inventory.py` | 98 |
+| `teledrive/storage/recovery.py` | 238 |
+| `teledrive/storage/schema.py` | 1120 |
+| `teledrive/storage/sse.py` | 265 |
+| `teledrive/storage/target_resolver.py` | 55 |
+| `teledrive/storage/telethon_adapter.py` | 163 |
+| `teledrive/storage/user_mode.py` | 899 |
+| `teledrive/stores/content_index.py` | 85 |
+| `teledrive/stores/pins.py` | 60 |
+| `teledrive/stores/sessions.py` | 118 |
+| `teledrive/stores/shares.py` | 135 |
+| `teledrive/stores/telegram_accounts.py` | 341 |
+| `teledrive/stores/telegram_pending.py` | 101 |
+| `teledrive/stores/users.py` | 191 |

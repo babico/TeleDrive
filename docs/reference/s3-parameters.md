@@ -12,17 +12,18 @@
 | REJECTED | Parsed or matched by a fail-closed guard and answered with a modeled S3 error (`NotImplemented` 501, `InvalidArgument` 400, …) before any SQL or Telegram side effect. |
 | UNVERIFIED | The gateway routes or tolerates the parameter, but no test pins its behavior. Treat these rows as the honest gap list — do not rely on them. |
 
-A machine test keeps this ledger honest: `tests/meta/test_s3_parameter_ledger.py` (a) requires every SUPPORTED/REJECTED row to name an existing test file, and (b) re-derives the gateway's parsed query/header name sets from `teledrive/s3/route_guard.py` and the `web/s3_gateway/` sources, so a parameter added to the code without a ledger row fails CI.
+A machine test keeps this ledger honest: `tests/meta/test_s3_parameter_ledger.py` (a) requires every SUPPORTED/REJECTED row to name an existing test file, and (b) re-derives the gateway's parsed query/header name sets from `teledrive/s3/route_guard.py`, `teledrive/s3/sigv4.py`, the protocol helpers and the `web/s3_gateway/` sources, so a parameter added to the code without a ledger row fails CI.
 
 ## Common (every operation)
 
 | Parameter | State | Enforced behavior | Proven by |
 | --- | --- | --- | --- |
 | `Authorization` (SigV4 header) | SUPPORTED | AWS Signature V4 header signing with scoped persisted S3 keys; SigV2 rejected. | tests/s3/test_s3_sigv4_defense.py |
-| `x-amz-date` / `Date` | SUPPORTED | Request timestamp inside the SigV4 clock-skew window. | tests/s3/test_s3_sigv4_defense.py |
-| `x-amz-content-sha256` | SUPPORTED | Signed payload hash verified before staging; `UNSIGNED-PAYLOAD` only with a signed Content-MD5 or SDK checksum. | tests/s3/test_s3_sigv4_defense.py |
+| `x-amz-date` | SUPPORTED | Signed request timestamp inside the 15-minute SigV4 clock-skew window. The legacy `Date` header alone is not parsed; a header-signed request must carry a signed `x-amz-date`. | tests/s3/test_s3_sigv4_defense.py |
+| `x-amz-content-sha256` | SUPPORTED | Signed payload hash verified before staging; `UNSIGNED-PAYLOAD` only with a signed Content-MD5 or SDK checksum. The one exemption is a CreateMultipartUpload initiation (`?uploads=`) that declares `Content-Length: 0` and is not chunked — it carries no bytes; every request that can carry bytes still needs a digest. | tests/s3/test_s3_sigv4_defense.py, tests/s3/test_s3_client_cyberduck.py |
+| `content-length` | SUPPORTED | Read only to distinguish a zero-body multipart initiation from a payload-bearing request; a missing length plus `Transfer-Encoding` is never treated as empty. | tests/s3/test_s3_client_cyberduck.py |
 | `Host` (virtual-host addressing) | SUPPORTED | Configured virtual-host suffix maps the bucket from the Host header; path-style remains the default. | tests/s3/test_s3_vhost.py |
-| `x-amz-security-token` | UNVERIFIED | No STS/session-token issuer exists (handoff 09). The code rejects the presigned-query form with `InvalidToken`, but no test pins that, and the header form is not parsed at all. | — |
+| `x-amz-security-token` | UNVERIFIED | No STS issuer exists; the S3 Express session token uses `x-amz-s3session-token`, not this header. The code rejects the presigned-query form with `InvalidToken`, but no test pins that, and the header form is not parsed at all. | — |
 | `x-amz-mfa` | REJECTED | 501 on every route; no MFA device exists. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-expected-bucket-owner` | REJECTED | 501 fail-closed; single-owner deployment has no cross-account bucket-owner check. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-request-payer` | REJECTED | 501 on every route; requester-pays does not exist. | tests/s3/test_s3_fail_closed.py |
@@ -36,7 +37,7 @@ A machine test keeps this ledger honest: `tests/meta/test_s3_parameter_ledger.py
 | --- | --- | --- | --- |
 | ListBuckets `max-buckets` | SUPPORTED | 1–10,000 page size with keyset pagination. | tests/s3/test_s3_bucket_listing.py |
 | ListBuckets `prefix` | SUPPORTED | Bucket-name prefix filter. | tests/s3/test_s3_bucket_listing.py |
-| ListBuckets `bucket-region` | SUPPORTED | Only `us-east-1` accepted; other regions are `InvalidArgument` 400. | tests/s3/test_s3_bucket_listing.py |
+| ListBuckets `bucket-region` | SUPPORTED | Only `us-east-1` accepted; another region is `InvalidRequest` 400. | tests/s3/test_s3_bucket_listing.py |
 | ListBuckets `continuation-token` | SUPPORTED | HMAC-scoped cursor bound to the prefix and credential. | tests/s3/test_s3_bucket_listing.py |
 | ListDirectoryBuckets `continuation-token` | SUPPORTED | 1–1024 chars; HMAC-scoped, expires after 15 minutes; stale/foreign tokens 400. | tests/s3/test_s3_directory_buckets.py |
 | ListDirectoryBuckets `max-directory-buckets` | SUPPORTED | Decimal 1–1000 validation; real keyset pages. | tests/s3/test_s3_directory_buckets.py |
@@ -52,7 +53,7 @@ A machine test keeps this ledger honest: `tests/meta/test_s3_parameter_ledger.py
 | ListObjectsV2 `start-after` | UNVERIFIED | Parsed and applied as the keyset start position, but no dedicated test pins it. | — |
 | ListObjectsV2 `max-keys` | SUPPORTED | 0 is a valid empty page; large values are clamped. | tests/s3/test_s3_bucket_listing.py |
 | ListObjectsV2 `encoding-type` | SUPPORTED | `url` URL-encodes keys in the XML response; other values rejected. | tests/s3/test_s3_listing_v1.py |
-| ListObjectsV2 `fetch-owner` | SUPPORTED | `true` adds the Owner element; other values are 400. | tests/s3/test_s3_gap_closures.py |
+| ListObjectsV2 `fetch-owner` | SUPPORTED | `true` adds the Owner element, `false` omits it, and any other value is 400. | tests/s3/test_s3_gap_closures.py |
 | ListObjectsV1 `marker` | SUPPORTED | Keyset cursor; mixing with V2 cursors is 400. | tests/s3/test_s3_listing_v1.py |
 | ListObjectVersions `versions` | SUPPORTED | Empty-flag selector for the version listing. | tests/s3/test_s3_version_listing.py |
 | ListObjectVersions `key-marker` / `version-id-marker` | SUPPORTED | Paired cursors; a version-id marker requires a key marker and must resolve to a published version. | tests/s3/test_s3_version_listing.py |
@@ -80,15 +81,15 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `replication` | SUPPORTED | SQL-backed replication configuration over the replica engine. | tests/s3/test_s3_replication.py |
 | `website` | SUPPORTED | Index/error documents; public read is a separate admin gate. | tests/s3/test_s3_website.py |
 | `notification` / `notificationConfiguration` | SUPPORTED | Owner-approved destinations, event filtering, outbox rows. | tests/s3/test_s3_notifications.py |
-| `logging` | SUPPORTED | Logging configuration round trip; reads without config are honest 404s. | tests/s3/test_s3_notifications.py |
-| `encryption` | SUPPORTED | Bucket default-encryption configuration CRUD (AES256 default rule). | tests/s3/test_s3_sse_c.py |
+| `logging` | SUPPORTED | Logging configuration round trip; a bucket without logging returns an empty `BucketLoggingStatus` (AWS shape), not a 404. | tests/s3/test_s3_notifications.py |
+| `encryption` | SUPPORTED | Bucket default-encryption configuration CRUD: an empty SSE-C rule set always, or an AES256 default only when `storage.encryption: envelope`; `aws:kms` is 501. | tests/s3/test_s3_sse_c.py |
 | `object-lock` | SUPPORTED | One-way enable with default mode/days. | tests/s3/test_s3_object_lock.py |
 | `publicAccessBlock` | SUPPORTED | Four persisted flags, all-true default. | tests/s3/test_s3_public_access_block.py |
 | `lifecycle` | SUPPORTED | AbortIncompleteMultipartUpload, Expiration (incl. ExpiredObjectDeleteMarker), Transition, NoncurrentVersionTransitions and NoncurrentVersionExpiration rules; archive classes only (others 501). | tests/s3/test_s3_lifecycle.py |
 | `requestPayment` | SUPPORTED | BucketOwner accepted and reported; Requester is an honest 501. | tests/s3/test_s3_request_payment_accelerate.py |
 | `accelerate` | SUPPORTED | Suspended accepted and reported; Enabled is an honest 501. | tests/s3/test_s3_request_payment_accelerate.py |
 | `session` | SUPPORTED | S3 Express CreateSession: issues real short-lived zonal credentials for an existing directory bucket (control plane, long-lived signer). | tests/s3/test_s3_directory_buckets.py |
-| `x-amz-create-session-mode` | SUPPORTED | Signed CreateSession mode validation; `ReadOnly`/`ReadWrite` (default `ReadWrite`), malformed modes 400. | tests/s3/test_s3_directory_buckets.py |
+| `x-amz-create-session-mode` | SUPPORTED | CreateSession mode validation; `ReadOnly`/`ReadWrite` (default `ReadWrite`), malformed modes 400. The handler reads the header but does not currently require it to be in `SignedHeaders`. | tests/s3/test_s3_directory_buckets.py |
 | `x-amz-s3session-token` | SUPPORTED | Required and signed on every zonal (object data-plane) directory-bucket request; matched exactly against the stored SHA-256 hash of the issued session token. Missing, unsigned, wrong or replayed-after-revocation tokens are 403 without ever echoing the token. | tests/s3/test_s3_directory_buckets.py |
 | `intelligent-tiering` (+ `id`) | SUPPORTED | Tiering configuration CRUD and scheduler. | tests/s3/test_s3_tiering.py |
 | `analytics` / `inventory` / `metrics` (+ `id`) | SUPPORTED | Storage-report configuration CRUD; CSV/JSON lines outputs. | tests/s3/test_s3_report_configs.py |
@@ -119,10 +120,10 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `x-amz-server-side-encryption: AES256` (PUT) | SUPPORTED | Real SSE-S3 envelope when `storage.encryption: envelope`; otherwise a precise 501 naming the setting. | tests/s3/test_s3_sse_c.py |
 | `x-amz-server-side-encryption: aws:kms` / `aws:kms:dsse` | REJECTED | 501: no AWS KMS backend exists. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-server-side-encryption-aws-kms-key-id` / `x-amz-server-side-encryption-context` / `x-amz-bucket-key-enabled` | REJECTED | 501 fail-closed on every route (KMS family). | tests/s3/test_s3_fail_closed.py |
-| SSE-C: `x-amz-server-side-encryption-customer-algorithm`, `x-amz-server-side-encryption-customer-key`, `x-amz-server-side-encryption-customer-key-md5` | SUPPORTED | Full family required and signed; per-object AES-256-GCM; wrong key is `BadDigest`/403 without plaintext. | tests/s3/test_s3_sse_c.py |
+| SSE-C: `x-amz-server-side-encryption-customer-algorithm`, `x-amz-server-side-encryption-customer-key`, `x-amz-server-side-encryption-customer-key-md5` | SUPPORTED | Full family required and signed; per-object AES-256-GCM; a missing or wrong key is `400 InvalidRequest` before any plaintext is emitted. | tests/s3/test_s3_sse_c.py |
 | `x-amz-trailer` + `x-amz-decoded-content-length` (aws-chunked) | SUPPORTED | Accepted only on genuine streaming uploads; the decoder enforces the declared trailer and length. | tests/s3/test_s3_aws_chunked.py |
 | `Content-Encoding: aws-chunked` | SUPPORTED | Decoded and verified when streaming mode is genuine; otherwise rejected. | tests/s3/test_s3_aws_chunked.py |
-| `x-amz-grant-read` / `x-amz-grant-write` / `x-amz-grant-full-control` / `x-amz-grant-read-acp` / `x-amz-grant-write-acp` | SUPPORTED | On PUT `?acl` only (signed): `id="…"` CanonicalUser grantees apply like XML grants; `emailAddress`/`uri` grantees and the ACP pair 501; malformed grammar 400; every other route 501. | tests/s3/test_s3_acl_parity.py |
+| `x-amz-grant-read` / `x-amz-grant-write` / `x-amz-grant-full-control` / `x-amz-grant-read-acp` / `x-amz-grant-write-acp` | SUPPORTED | On PUT `?acl` (signed): `id="…"` CanonicalUser grantees apply like XML grants; `emailAddress`/`uri` grantees and the ACP pair 501; malformed grammar 400; grant headers on other write routes 501. A GET `?acl` that carries grant headers currently ignores them instead of refusing. | tests/s3/test_s3_acl_parity.py |
 | `x-amz-website-redirect-location` | REJECTED | 501: no website redirect. | tests/s3/test_s3_fail_closed.py |
 | `x-amz-object-lock-mode` / `x-amz-object-lock-retain-until-date` / `x-amz-object-lock-legal-hold` (PUT) | REJECTED | 501: retention is set via the retention control, never acknowledged silently on upload. | tests/s3/test_s3_object_lock.py |
 | `x-amz-bypass-governance-retention` | SUPPORTED | On PUT `?retention` only (signed, exactly `true`): shortens/clears an active GOVERNANCE window when the credential holds `s3:BypassGovernanceRetention`, else 403 `AccessDenied`; `false` is the explicit negative, other values 400; COMPLIANCE never shortens; every other route stays 501. | tests/s3/test_s3_governance_bypass.py |
@@ -169,7 +170,7 @@ Unless noted, each selector is an empty-flag query (GET/PUT/DELETE per the route
 | `partNumber` (PUT UploadPart) | SUPPORTED | 1–10,000; required together with `uploadId`. | tests/s3/test_s3_multipart.py |
 | `partNumber` (GET Object) | SUPPORTED | Exactly one decimal 1–10,000; serves the logical MPU part from the immutable completion layout (sparse-safe offset math); 206 + `Content-Range` + `x-amz-mp-parts-count`; single-PUT part 1 is the whole object; zero-byte part is an empty 200; absent part → 416 `InvalidPartNumber`; Range+partNumber → 400 `InvalidRequest`; HEAD stays 501. | tests/s3/test_s3_part_number.py |
 | `part-number-marker` / `max-parts` (ListParts) | SUPPORTED | Decimal 0–10000 / 1–1000 bounded pages. | tests/s3/test_s3_multipart.py |
-| `x-amz-checksum-type` (initiate) | SUPPORTED | Composite checksum type validation at completion. | tests/s3/test_s3_multipart.py |
+| `x-amz-checksum-type` (complete) | SUPPORTED | `COMPOSITE`/`FULL_OBJECT` validation at completion; a non-SHA declaration requires an explicit type. | tests/s3/test_s3_multipart.py |
 
 ## Known non-goals
 

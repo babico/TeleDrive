@@ -11,7 +11,7 @@ The authoritative operation-by-operation matrix is [S3 compatibility](../referen
 | Default endpoint | `http://127.0.0.1:9000` (`TELEDRIVE_S3_PORT`) |
 | Addressing style | Path-style: `http://host:9000/<bucket>/<key>` |
 | Region | `us-east-1` (equivalent contract) |
-| Signing service | `s3` for the general-purpose plane and control plane; `s3express` for directory-bucket zonal operations and CreateSession |
+| Signing service | `s3` for the general-purpose plane, plus directory-bucket Create/DeleteBucket and HeadBucket (an `s3express`-scoped call to these three is not accepted today); `s3express` for ListDirectoryBuckets, CreateSession and the zonal object data plane |
 | TLS | Independent `TELEDRIVE_S3_SSL_CERTFILE` / `TELEDRIVE_S3_SSL_KEYFILE` |
 
 Path-style is the documented default and the only style that works without extra DNS. Virtual-hosted addressing exists but is opt-in: the deployment must set `TELEDRIVE_S3_VHOST_SUFFIX` (for example `s3.example.com`), after which a request to `mybucket.s3.example.com` selects `mybucket`. The suffix is validated, and the bucket label is validated with the normal bucket-name rules. Without that variable the `Host` header never selects a bucket.
@@ -120,7 +120,7 @@ rclone's S3 backend performs several probe requests at startup. The gateway answ
 
 ### Tested clients
 
-The compatibility contract is verified against four real clients in CI. Everything else is untested, however likely it is to work; the gateway implements the documented S3 contract, but only these four binaries and SDKs are exercised by the test suite. The full operation-by-operation matrix is [S3 compatibility](../reference/s3-specs.md).
+The compatibility contract is verified against five real clients in CI. Everything else is untested, however likely it is to work; the gateway implements the documented S3 contract, but only these five binaries and SDKs are exercised by the test suite. The full operation-by-operation matrix is [S3 compatibility](../reference/s3-specs.md).
 
 | Client | Version | What is actually exercised | Where |
 | --- | --- | --- | --- |
@@ -128,10 +128,10 @@ The compatibility contract is verified against four real clients in CI. Everythi
 | AWS CLI | Current PyPI release at run time; CI installs it unpinned and prints `aws --version` per run | `s3api` create-bucket, put-object, head-object, get-object, list-objects-v2, delete-object; high-level `aws s3 sync` round trip including `--delete` and directory semantics | [CLI compat tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_cli_compat.py) |
 | rclone | Pinned v1.66.0, installed from the official release archive | `copyto`, `lsf`, `lsd`, `ls`, `cat`, `size`, `mkdir`, `delete`, `deletefile`, overwrite semantics, and the multipart path (CreateMultipartUpload, UploadPart, Complete) forced via a 5 MiB upload cutoff | [CLI compat tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_cli_compat.py) and [rclone compat tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_rclone_compat.py) |
 | minio-py (MinIO Python SDK) | Pinned `minio==7.2.20`; CI and `requirements-dev.txt` install the same pin and the test fails on version drift | Its own SigV4 signer and urllib3 transport (no botocore anywhere in the wire path): bucket create/exists/list, plain PUT with content type and user metadata, HEAD/stat, full and ranged GET via the SDK's offset/length API, ListObjectsV2 with `encoding-type=url`, multipart PUT past the SDK's 5 MiB part cutoff (CreateMultipartUpload, parallel UploadPart, Complete) with byte-identical readback, DELETE, presigned GET including response-header overrides, and the negative wrong-credentials path (403 `SignatureDoesNotMatch`) | [minio-py client tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_client_minio.py) |
-| Cyberduck | Explicitly untested — no pinned version, no live flow, no coverage claim | Cyberduck is a GUI macOS/Windows application with no headless or automation surface, so it can neither run in CI nor in this test suite; nothing about it is verified. Only the read-only startup probes such clients send (ownership controls, request payment, accelerate, notification, logging) are covered, via raw signed requests — the application itself is never run | [compat-read probes](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_compat_reads.py) |
-| MinIO client (`mc`), s3fs, Terraform AWS provider, other SDKs | Untested — likely works, not warranted | Same as above: their documented probe requests are answered with valid AWS shapes, but no binary other than the four above and no SDK other than botocore and minio-py is exercised by CI | [compat-read probes](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_compat_reads.py) |
+| Cyberduck (`duck` CLI) | Pinned **9.6.0 build 46406**, installed from the official `duck_9.6.0.46406_amd64.deb` release archive | The real Java client (same S3 module as the desktop GUI), not a replica: list-all-buckets, create bucket, ListObjectsV2 with `encoding-type=url` plus the `?uploads=` in-progress probe, make folder, single PUT with `Content-MD5` and `UNSIGNED-PAYLOAD`, long list, HEAD+GET download compared byte for byte, version probe, DELETE with a versioned delete marker, and the documented `409` bucket-delete refusal. A forced multipart upload completes end to end (initiation, parts, complete); the zero-length `POST ?uploads` initiation is exempt from the unsigned-upload rule, while every payload-bearing part still needs a checksum. The shipped default (no checksum, `UNSIGNED-PAYLOAD` without `Content-MD5`) is still pinned as refused for payload-bearing uploads, so a plain-HTTP endpoint needs a connection profile with `Scheme=http`, `s3.bucket.virtualhost.disable=true` and `queue.upload.checksum.calculate=true` — see [Cyberduck](../operate/cyberduck.md) | [Cyberduck client tests](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_client_cyberduck.py) |
+| MinIO client (`mc`), s3fs, Terraform AWS provider, other SDKs | Untested — likely works, not warranted | Same as above: their documented probe requests are answered with valid AWS shapes, but no binary other than the five above and no SDK other than botocore and minio-py is exercised by CI | [compat-read probes](https://github.com/babico/TeleDrive/blob/main/tests/s3/test_s3_compat_reads.py) |
 
-Local test runs skip the CLI binaries and the minio-py SDK when they are absent; CI sets `TELEDRIVE_REQUIRE_CLI_CLIENTS=1` so a missing client fails the job instead of silently skipping. Checksum behavior in particular varies by SDK version, and no SDK checksum mode other than the ones listed under [Consistency and integrity](#consistency-and-integrity) is verified.
+Local test runs skip the CLI binaries and the minio-py SDK when they are absent; CI sets `TELEDRIVE_REQUIRE_CLI_CLIENTS=1` so a missing client fails the job instead of silently skipping. Checksum behavior in particular varies by SDK version, and no SDK checksum mode other than the ones listed under [Consistency and integrity](#consistency-and-integrity) is verified. Cyberduck is exercised through `duck`, which shares the GUI's S3 implementation; the desktop GUI has no automation surface, so it is covered by the manual checklist in [Cyberduck](../operate/cyberduck.md).
 
 ## Quickstart
 
@@ -180,18 +180,18 @@ Every non-final part must be at least 5 MiB, part numbers run 1–10,000, and co
 - **Checksums.** Uploads are verified before publication: signed SHA-256, SHA-1, `Content-MD5`, CRC32, CRC32C and CRC64NVME are checked on the implemented PUT and UploadPart paths. `x-amz-checksum-mode: ENABLED` on an object GET/HEAD returns the immutable full-object SHA-256; `GetObjectAttributes` exposes the same digest with `FULL_OBJECT` semantics.
 - **Reads.** Bytes are read from Telegram and verified against the manifest before they are streamed. An encrypted object is authenticated per chunk before decryption.
 - **Conditional requests.** `If-Match` and `If-None-Match` work for object GET/HEAD and for bounded simple PUT/DELETE and multipart completion. Date-based write preconditions and conditional explicit-version deletes are rejected with `501` rather than ignored.
-- **Versioning.** `Enabled` creates a new version on every write and delete markers on delete; `Suspended` replaces the current version and deletes the head without a marker. History remains readable.
+- **Versioning.** `Enabled` creates a new version on every write and delete markers on delete; in `Suspended` buckets every write occupies the single null-version slot, and a DELETE inserts a null delete marker (AWS's suspended-bucket contract). Enabled-era history remains readable.
 
 ## Limits and quotas
 
 | Limit | Value |
 | --- | --- |
-| Single request body | 2 GiB default (`web.rest_max_upload_bytes`); `0` disables REST/S3 uploads |
+| Single request body | 2 GiB default (`web.rest_max_upload_bytes`); `0` disables REST/S3 uploads (REST answers `503` by policy) |
 | Multipart parts | 10,000 numbered parts; 5 MiB minimum for every non-final part |
-| List page | `max-keys` 1–1000 |
+| List page | `max-keys` 0–1000 (0 is a valid empty page; larger values are clamped) |
 | ListBuckets page | `max-buckets` 1–10,000 |
 | Object user metadata | 2 KiB serialized |
-| Object tags | 10 per version; 128-byte keys, 256-byte values |
+| Object tags | 10 per version; 128-unit keys, 256-unit values (UTF-16 code units, like AWS) |
 | Bucket tags | 50 per bucket |
 | Object annotations | 50 per object; 128-byte name, 1 KiB value |
 | Bucket CORS | 100 rules, 64 KiB document |

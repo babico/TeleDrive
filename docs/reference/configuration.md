@@ -45,7 +45,8 @@ code-execution primitive:
 
 Deployment plumbing is environment-only by owner policy, so the host port
 mapping, the in-container listener and the healthcheck can never disagree.
-These variables are read in `teledrive/settings.py`; the four listener/TLS
+Most of these variables are read in `teledrive/settings.py`; the S3 gateway
+variables are read in `teledrive/s3/`. The four listener/TLS
 pairs are deliberately **ignored** in `config.yaml` even though a generated
 default file still contains legacy `web.port`/`web.s3_port` keys.
 
@@ -65,6 +66,13 @@ default file still contains legacy `web.port`/`web.s3_port` keys.
 | `TZ` | `Europe/Istanbul` in Compose | Container timezone only; timestamps in SQL are epoch values. |
 | `PUID` / `PGID` | `1000` | Host uid/gid the container runs as. Must own `./config` and `./data`. |
 | `TELEDRIVE_DB_EXTRA_PACKAGES` | empty | Docker **build** argument (`docker-compose.yml`), pip-installed into the image. Runtime installation is configured separately through `state.db_extra_packages`. |
+| `TELEDRIVE_DATA_DIR` | `/data` | Root for stateful defaults: scratch, auth, sessions, logs, SQLite roots, site-packages and the cold archive. |
+| `TELEDRIVE_COLD_ARCHIVE_DIR` | `<TELEDRIVE_DATA_DIR>/cold-archive` | Root of the local-filesystem cold archive used by tiering and `RestoreObject`. |
+| `TELEDRIVE_S3_VHOST_SUFFIX` | empty | Public suffix for virtual-hosted-style S3 requests. Empty means path-style only. |
+| `TELEDRIVE_S3_REGION` | `us-east-1` | Region used in the SigV4 credential scope for S3 Express requests. |
+| `TELEDRIVE_S3_DIRECTORY_ZONE_ID` | `use1-az1` | Logical compatibility zone in a directory-bucket name; not an AWS Availability Zone. |
+| `TELEDRIVE_S3_SESSION_LIFETIME_SECONDS` | `300` | Directory-bucket `CreateSession` lifetime, clamped to 30–3600 seconds. |
+| `TELEDRIVE_S3_INTERNAL_HOST` | `127.0.0.1` | Host the WebUI governance bridge uses to reach the loopback S3 listener. |
 
 `settings.py` also accepts legacy environment fallbacks for keys that
 normally live in the file: `TELEDRIVE_ALLOWED_HOSTS`,
@@ -170,10 +178,10 @@ a path outside its allowlist is rejected, not silently accepted.
 
 | Section | Key | Type | Default | What it changes |
 | --- | --- | --- | --- | --- |
-| `logging` | `log_path` | string | `/data/uploader.log` | Rotating log file, subject to `paths.log_roots`. |
+| `logging` | `log_path` | string | `/data/uploader.log` (generated default); `/data/teledrive.log` is the startup fallback when the key is absent | Rotating log file, subject to `paths.log_roots`. |
 | `logging` | `level` | string | `INFO` | Python log level. |
-| `app` | `auto_run` | boolean | `false` (written only) | **Inert.** Jobs are controlled by `jobs.auto_run`. |
-| `app` | `run_interval_minutes` | integer | `60` (written only) | **Inert.** No scheduler reads it. |
+| `app` | `auto_run` | boolean | not written | **Inert.** Jobs are controlled by `jobs.auto_run`. |
+| `app` | `run_interval_minutes` | integer | not written | **Inert.** No scheduler reads it. |
 
 ## 11. Settings that no longer exist
 

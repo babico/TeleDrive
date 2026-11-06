@@ -19,12 +19,12 @@ names group related checks. Files live in
 | CI 4 · Live E2E | [`live-telegram-user.yml`](https://github.com/babico/TeleDrive/blob/main/.github/workflows/live-telegram-user.yml) | `telegram-roundtrip` | A real authorized USER MTProto session uploads, reads back, checks SHA-256, exercises Range and performs owned-fixture history inventory. |
 | CI 4 · Live E2E | [`live-telegram-multiworker.yml`](https://github.com/babico/TeleDrive/blob/main/.github/workflows/live-telegram-multiworker.yml) | `three-process-telegram` | Three independent worker processes share PostgreSQL and a real Telegram test target. |
 | CI 5 · Delivery | [`delivery-release.yml`](https://github.com/babico/TeleDrive/blob/main/.github/workflows/delivery-release.yml) | `verify`, `cleanup-merged-branches`, `build`, `publish` | Release regression and security gate, merged-branch hygiene, single-container image package, GitHub Release publication. |
-| Docs | [`docs-pages.yml`](https://github.com/babico/TeleDrive/blob/main/.github/workflows/docs-pages.yml) | `build`, `deploy` | `mkdocs build --strict` on every push/PR; deploys to GitHub Pages only from `main`. |
+| Docs | [`docs-pages.yml`](https://github.com/babico/TeleDrive/blob/main/.github/workflows/docs-pages.yml) | `build`, `deploy` | `mkdocs build --strict` on pushes and PRs that touch the docs paths; deploys to GitHub Pages only from `main`. |
 | CI 6 · Endurance | [`endurance-capacity.yml`](https://github.com/babico/TeleDrive/blob/main/.github/workflows/endurance-capacity.yml) | `isolated-endurance` | Manual 60–110 minute synthetic-media SQLite endurance run. |
 
-**Six workflows are automatic** on `main` (CI 1–5, two of which are the live
-E2E pair). Endurance is `workflow_dispatch` only. The Docs workflow is
-automatic but builds a site, not the service. Count workflow runs and jobs
+**Seven workflows are automatic** on `main`: CI 1–5 (including the two live
+E2E workflows) plus Docs. Six of them verify the service; Docs builds the
+site. Endurance is `workflow_dispatch` only. Count workflow runs and jobs
 separately: a green `database` job does not make a failed CI 2 run green.
 
 ## 2. Run checks locally
@@ -156,14 +156,14 @@ not evidence for the tag.
   `/api/health` while `load_config` fails; the harness runs
   `load_config("/config/config.yaml")` inside each Web container and asserts
   every required upload field is present.
-- **S3 operation matrices are table-driven.** Four sweeps each carry a
+- **S3 operation matrices are table-driven.** Five matrices each carry a
   meta-test that fails when a supported operation is added without an entry:
   unsigned (all supported operations answer 401/403 with no mutation or
-  Telegram traffic), malformed XML (4xx, never 5xx), over-limit bodies, and
-  crash/restart plus real-thread race matrices. A manifest addition fails all
-  four until the case exists.
+  Telegram traffic), malformed XML (4xx, never 5xx), over-limit bodies,
+  crash/restart, and retry/multiworker race matrices. A manifest addition fails all
+  five until the case exists.
 - **The authorization surface is frozen.** `tests/meta/test_route_surface.py`
-  asserts the current 160-entry `(method, path, permission, admin_only)` set
+  asserts the current 163-entry `(method, path, permission, admin_only)` set
   in both directions through `route_views()`.
 - **DDL and swallowed-name tests** catch two classes of silent refactor bug:
   DDL outside `schema.py`, and a broad `except` around an unresolvable name.

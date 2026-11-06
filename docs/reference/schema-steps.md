@@ -1,6 +1,6 @@
 # Schema migration steps
 
-TeleDrive has exactly one place that issues DDL: the migration coordinator in `teledrive/storage/schema.py`. Every store constructor calls `ensure_schema()`, which either proves the schema is current with one cheap `SELECT` or takes a real cross-process lock and applies every pending step. This page documents all 30 steps: what each one creates, which subsystem owns it, what data it touches, and what a code rollback would leave behind. It is the reference for operators checking an upgrade and for developers appending step 31.
+TeleDrive has exactly one place that issues DDL: the migration coordinator in `teledrive/storage/schema.py`. Every store constructor calls `ensure_schema()`, which either proves the schema is current with one cheap `SELECT` or takes a real cross-process lock and applies every pending step. This page documents all 31 steps: what each one creates, which subsystem owns it, what data it touches, and what a code rollback would leave behind. It is the reference for operators checking an upgrade and for developers appending step 32.
 
 The step list is append-only. `SCHEMA_VERSION` is simply the length of the `_STEPS` list, so adding a step bumps the version; steps are never reordered, edited after shipping, or removed. The source of truth is [`teledrive/storage/schema.py`](https://github.com/babico/TeleDrive/blob/main/teledrive/storage/schema.py); if this page and the code disagree, the code wins and this page needs a fix.
 
@@ -68,6 +68,7 @@ Correctness over cleverness: when several steps were added at once, the whole li
 | 28 | `directory_bucket_type` | Manifest and catalog | The `bucket_type` column separating general-purpose and S3 Express directory rows in the shared bucket table. |
 | 29 | `s3_express_sessions` | Credentials and encryption | Short-lived CreateSession credentials for directory-bucket zonal requests (hashed token, encrypted secret, bucket/mode/zone/owner binding, revocation flag). |
 | 30 | `archive_manifests` | Cold archive | The per-version physical archive state machine (`storage_archive_versions`): resumable HOT → ARCHIVING → ARCHIVED → RESTORING → RESTORED_TEMP transitions, idempotency key, generation fence, durable worker lease, sealed-manifest mirror (whole SHA-256, stored bytes, target URI, manifest JSON, timestamps, last error). |
+| 31 | `bucket_fk_cascade` | Manifest and catalog | `ON DELETE CASCADE` bucket foreign keys on every bucket-name-keyed configuration table, so deleting a bucket removes its configuration atomically. |
 
 The sections below follow this family grouping; step numbers inside each family are the recorded `schema_migrations.version` values.
 
@@ -102,7 +103,7 @@ Creates `service_settings`, the single-row encrypted settings document. Older re
 
 Enforces one row per Telegram account and per channel. Both the session and channel upserts are UPDATE-then-INSERT, and their race recovery assumes the database rejects a duplicate INSERT; without the constraint, two concurrent logins created phantom sessions in listings, duplicate account labels in Prometheus scrapes and credentials probed twice.
 
-The step is the only data-modifying migration in the list. For each of `telegram_sessions.account` and `telegram_channels.channel_id` it first deduplicates: the keep-set is computed deterministically (the row with the latest `updated_at`, ties broken by the lowest `id`) into a temporary table, then the losers are deleted, then the named unique index (`uq_telegram_sessions_account`, `uq_telegram_channels_channel_id`) is created unless an equivalent constraint already exists. A downgrade does not remove the indexes or revive the deleted rows; older code that races on login will simply start accumulating duplicates again. Operators who deliberately kept duplicate rows must export them before upgrading, because the deletion is permanent.
+The step is one of two data-modifying migrations; the other is step 31's removal of configuration rows for buckets that no longer exist. For each of `telegram_sessions.account` and `telegram_channels.channel_id` it first deduplicates: the keep-set is computed deterministically (the row with the latest `updated_at`, ties broken by the lowest `id`) into a temporary table, then the losers are deleted, then the named unique index (`uq_telegram_sessions_account`, `uq_telegram_channels_channel_id`) is created unless an equivalent constraint already exists. A downgrade does not remove the indexes or revive the deleted rows; older code that races on login will simply start accumulating duplicates again. Operators who deliberately kept duplicate rows must export them before upgrading, because the deletion is permanent.
 
 ## Manifest and catalog
 
@@ -133,6 +134,19 @@ Adds `share_links.object_id VARCHAR(36)`, nullable. A link used to be bound to a
 ### Step 28 - `directory_bucket_type`
 
 Adds `storage_buckets.bucket_type VARCHAR(16) NOT NULL DEFAULT 'general'` (handoff 07). The S3 Express directory namespace shares the bucket table so object heads, manifests and GC keep working unchanged; only listings and routing read the type. Every pre-existing row reads as `general` through the server default, and `ListBuckets` filters to `general` while `ListDirectoryBuckets` reads `directory` rows — neither namespace ever leaks the other. A directory bucket's name is immutable (`base--zone-id--x-s3`, where the zone is a deployment-configured *logical compatibility zone*, never an AWS Availability Zone claim). A downgrade leaves the column in place; older code ignores it and simply sees every bucket as general-purpose again.
+
+### Step 31 - `bucket_fk_cascade`
+
+Gives every bucket-name-keyed configuration table a real foreign key to `storage_buckets.name` with `ON DELETE CASCADE`, then `BucketCatalog.delete_bucket` deletes only the bucket row. The tables are `storage_bucket_tags`, `storage_bucket_lifecycle`, `storage_bucket_cors`, `storage_website_configs`, `storage_metadata_journal`, `storage_metadata_configs`, `storage_bucket_acl_grants`, `storage_bucket_policy`, `storage_bucket_abac`, `storage_bucket_encryption`, `storage_replication_configs`, `storage_tiering_configs`, `storage_report_configs`, `storage_notification_configs`, `storage_logging_configs`, `bucket_quotas`, `bucket_account_pins`, `share_links`, `storage_object_acl_grants` and `storage_object_heads`.
+
+The step closes a documented race: the old delete swept these tables explicitly, but a configuration write whose existence check ran in an earlier transaction could commit after the sweep and leave a row for a deleted bucket, which a same-name re-create then silently revived. With the cascade the bucket DELETE removes the configuration atomically, and a late INSERT fails on the foreign key instead.
+
+The migration differs per backend because the engines differ:
+
+- **SQLite** cannot alter a foreign key, so each table is rebuilt in one explicit transaction: create a reflected copy with the cascading key (columns, primary key, server defaults, other foreign keys, unique constraints and indexes preserved), copy every row, drop the old table, rename the new one, recreate the indexes. An interrupted run rolls back to the old table; a re-run sees the cascade already present and skips. SQLite also needs `PRAGMA foreign_keys=ON` for a declared cascade to fire, so the coordinator enables it on every SQLite connection.
+- **PostgreSQL and MySQL** drop any existing non-cascading bucket foreign key and add a named `fk_<table>_bucket_cascade`. A crash between drop and add leaves no bucket key, which the next start repairs. MySQL additionally needs the child column indexed and the string lengths to match, so `bucket_quotas.bucket` is narrowed from `VARCHAR(255)` to `VARCHAR(63)`.
+
+Rows for buckets that no longer exist (pre-migration orphans) are deleted before the constraint is validated; no live row is touched. Tables missing on an older deployment are skipped. Object-keyed tables (`storage_object_tags`, `storage_pending_tags`, `storage_object_annotations`) are a separate shape and are not part of this step: they have no bucket column, and deleting a bucket already refuses when object history exists. A downgrade leaves every cascading key and the extra bucket index in place. Older code still runs its explicit sweep, so behavior is unchanged; on PostgreSQL and MySQL the cascade also fires, while SQLite ignores the declared key until the newer coordinator enables foreign-key enforcement again (older binaries never do).
 
 ## S3 configuration
 
@@ -247,17 +261,17 @@ Failures are swallowed with a warning by design: search is an accelerator, and a
 
 ### Step 25 - `security_audit`
 
-Creates `security_audit_events`, the durable security-event trail (credential issue/edit/revoke/reveal, API-key issue/rotate, config writes, user changes, physical GC start/finish, presign and share creation), with actor, target and a scrubbed detail blob, exposed to admins at `GET /api/v1/admin/audit`. The table is append-only and refuses to store anything shaped like a credential. The in-memory log buffer that preceded it was bounded and lost on restart, so no investigation could answer "who revealed this credential last week". A downgrade loses access to the trail but the rows remain for a later re-upgrade.
+Creates `security_audit_events`, the durable security-event trail (credential issue/edit/revoke/reveal, API-key issue/rotate, config writes, user changes, physical GC start/finish, presign and share creation), with actor, target and a scrubbed detail blob, exposed to admins at `GET /api/v1/admin/audit`. The table is append-only and scrubs anything shaped like a credential before storing it. The in-memory log buffer that preceded it was bounded and lost on restart, so no investigation could answer "who revealed this credential last week". A downgrade loses access to the trail but the rows remain for a later re-upgrade.
 
 ## Downgrades and residue
 
 There is no down-migration, ever. The upgrade procedure is therefore: back up the database, upgrade, and if you must return to the previous code, restore the pre-upgrade backup. See [Upgrade](../operate/upgrade.md) for the sequence. What a code rollback leaves behind, mechanically:
 
-- The recorded `schema_migrations.version` stays at 30. An older binary with a smaller `SCHEMA_VERSION` sees the database as current and performs no DDL, so the rollback itself never migrates anything down.
+- The recorded `schema_migrations.version` stays at 31. An older binary with a smaller `SCHEMA_VERSION` sees the database as current and performs no DDL, so the rollback itself never migrates anything down.
 - Orphan tables (`security_audit_events`, `storage_report_configs`, and so on) and orphan columns (`wrapped_key`, `object_id`, ...) remain. Older code ignores them; every defensive column is nullable or carries a server default, so older inserts still succeed.
-- Step 27 is the exception that matters: it deleted duplicate rows, and that deletion is not reversible by rolling back code. Restoring the backup is the only way back.
+- Step 27 is the data-loss exception that matters: it deleted duplicate rows, and that deletion is not reversible by rolling back code. Restoring the backup is the only way back.
 - The reverse direction is not safe: newer code on an older schema re-runs the full idempotent step list, which is correct, but the version probe means a partially applied migration completes rather than rolls back. Back up before every major version jump.
 
-## Adding step 31
+## Adding step 32
 
 For developers: append a `(name, function)` pair to `_STEPS` and nothing else. The version bump is automatic (`SCHEMA_VERSION = len(_STEPS)`). Never edit or reorder a shipped step - an already-migrated database will never run it again, which is exactly why steps 2, 3 and the index steps exist as separate versions. Keep the step idempotent: `checkfirst` for tables and indexes, column probes before ALTERs, and temporary-table materialisation for any dedupe. See the module docstring in [`teledrive/storage/schema.py`](https://github.com/babico/TeleDrive/blob/main/teledrive/storage/schema.py) for the design constraints, and [Databases](../guide/databases.md) for the supported backends.

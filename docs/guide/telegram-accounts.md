@@ -55,7 +55,7 @@ POST /api/v1/admin/storage/telegram-session/request-code
 POST /api/v1/admin/storage/telegram-session/verify-code
 ```
 
-Both are interactive-session and CSRF protected. A pending code request lives
+Both require admin authority and CSRF protection: a session user with the admin role, or a bearer API key explicitly granted these route permissions. A pending code request lives
 for five minutes, is bound to the unauthorised session that requested it, and
 is destroyed after five wrong codes. The service stores the authorised
 session string in `telegram_sessions` and also mirrors it to
@@ -237,6 +237,9 @@ is fixed. Add accounts one at a time and check the Logs page.
   catalog row that still points at an accessible message can be read through
   the user session, but there is no Bot-token fallback.
 
-Physical deletion of Telegram messages remains disabled (`deletion_permitted`
-is `False`). See [Garbage collection](../operate/garbage-collection.md) and
+Physical deletion of Telegram messages is off by default. It becomes possible
+only after an owner enables the physical GC gate and executes a confirmed
+collection; the GC plan/health `deletion_permitted` flag stays `False` because
+it reports the default, not the runtime gate. See
+[Garbage collection](../operate/garbage-collection.md) and
 [Backup and restore](../operate/backup-restore.md).

@@ -8,7 +8,7 @@ A recoverable TeleDrive installation needs all of the following inputs, taken as
 
 | Asset | Default location | Why a restore fails without it | Handling |
 | --- | --- | --- | --- |
-| Metadata database | `state.database_url` in `config/config.yaml` (default `sqlite:////data/state.db`) | Holds object heads and versions, chunk journal, dedup aliases, MTProto send intents, durable jobs, bucket policy, object-lock/tiering state, service settings, users, audit trail and GC state | Native consistent dump or `scripts/ops/backup_metadata.py`; encrypted at rest, SHA-256 recorded |
+| Metadata database | `state.database_url` in `config/config.yaml` (default `sqlite:////data/state.db`) | Holds object heads and versions, chunk journal, dedup aliases, MTProto send intents, durable jobs, bucket policy, object-lock/tiering state, service settings, users, audit trail and GC state | Native consistent dump or `scripts/ops/backup_metadata.py`; keep the archive on encrypted storage and record its SHA-256 |
 | Bootstrap config | `./config/config.yaml` | Seeds the encrypted `service_settings` row on first boot and remains the disaster-recovery copy when that row cannot be decrypted | Protected copy; no real secrets in source control |
 | Environment file / Compose environment | `.env`, `docker-compose.override.yml` or the orchestrator secret store | Ports, TLS paths, `TELEDRIVE_TRUSTED_PROXY`, master-key path and database driver packages are environment-only | Protected copy of the exact values, not a screenshot |
 | S3 master key | `storage.s3_master_key_file` (default `/config/s3-master.key`) or `TELEDRIVE_S3_MASTER_KEY` | Decrypts S3 credential secrets and the `service_settings` row; it is also the KEK source for envelope encryption | Separate secret backup, independent of the SQL archive; never rotate during a recovery |
@@ -131,7 +131,7 @@ For that, the owner-executed read-only rehearsal of one original object has its 
 ## Restore procedure
 
 1. Declare the incident and stop the TeleDrive container. Do not start a second writer against the same SQL database or Telegram session.
-2. Provision a clean host or database server with the same TeleDrive release. The release's schema coordinator will apply pending migrations up to schema version 30.
+2. Provision a clean host or database server with the same TeleDrive release. The release's schema coordinator will apply pending migrations up to schema version 31 on `main` (the v1.0.10 tag ships 30).
 3. Restore the SQL archive into a new, empty database. Do not overwrite a production database as a test.
 4. Restore `config/config.yaml`, the environment file, the S3 master key and every Telegram session file. Set owner-only permissions and verify the master key is a valid 32-byte Fernet value.
 5. Keep upload jobs from starting until validation is complete. Set `TELEDRIVE_JOB_AUTO_RUN=0` or `jobs.auto_run: false` for the first boot.
@@ -160,7 +160,7 @@ Restoring the database file without the master key leaves S3 credentials and the
 
 | Check | Command or endpoint | Pass condition |
 | --- | --- | --- |
-| Schema version | `SELECT MAX(version) FROM schema_migrations;` | `30` for this release |
+| Schema version | `SELECT MAX(version) FROM schema_migrations;` | `31` on `main` (`30` for the v1.0.10 tag) |
 | Container liveness | `docker compose ps` and `GET /api/health` | Healthy; `{"ok": true}` |
 | Both listeners | `python -m web.container_healthcheck` | Exit status 0; probes `/api/health` and S3 `/__health` |
 | Telegram session | `GET /api/v1/admin/storage/telegram-sessions` | The expected account is present and `authorized` is true |
@@ -193,7 +193,7 @@ Use a nightly logical dump plus a weekly full drill as a baseline. Increase freq
 - **Independent payload backup.** No second copy of Telegram media is created by the backup scripts. Physical GC remains gated for this reason; see [Garbage collection](garbage-collection.md).
 - **Encrypted objects without the master key.** Envelope-encrypted objects need the wrapped key in SQL and the exact master key. Rotating or losing that key makes the ciphertext unreadable.
 - **In-flight sends.** A send acknowledged after the SQL snapshot can be absent from the catalog. It is retained, not lost, but it is not a usable object.
-- **GC authorization.** A restore does not prove an independent backup, a restore drill or a writer barrier. `deletion_permitted` stays false until the owner gates are independently evidenced.
+- **GC authorization.** A restore does not prove an independent backup, a restore drill or a writer barrier. Those are owner evidence for the enable decision; the dry-run contract's `deletion_permitted` stays false and never authorizes deletion.
 
 ## Operator checklist
 
@@ -205,7 +205,7 @@ Use a nightly logical dump plus a weekly full drill as a baseline. Increase freq
 | [ ] | S3 master key backed up independently | Separate secret record |
 | [ ] | Every `storage.apis[].session_file` backed up `0600` | Owner-only archive |
 | [ ] | Restore rehearsal executed on a disposable database | `restore_valid: true` receipt |
-| [ ] | Schema version recorded | `27` |
+| [ ] | Schema version recorded | `31` on `main` (`30` for the v1.0.10 tag) |
 | [ ] | Health, session, catalog and one object read verified after restore | Command output in the change record |
 | [ ] | Jobs kept disabled until acceptance | `jobs.auto_run: false` or `TELEDRIVE_JOB_AUTO_RUN=0` |
 | [ ] | Physical GC left disabled unless the owner gates are complete | `GET /api/v1/admin/storage/gc` shows `enabled: false` |

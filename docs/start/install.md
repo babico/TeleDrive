@@ -64,9 +64,9 @@ is connected or that uploads work.
 - The process is `python -m web.unified`. It opens **two TCP listeners in the
   same process** and routes each request by the socket's local port: the web
   UI/REST listener and the S3 gateway listener.
-- The job scheduler, lifecycle pass, tiering pass, notification sender, folder
-  watcher and Telegram health loop run inside that process. There is no worker
-  sidecar.
+- The job scheduler, lifecycle pass, tiering pass, notification sender,
+  storage-report runner, folder watcher and Telegram health loop run inside
+  that process. There is no worker sidecar.
 - Both listeners use the same SQL database and the same Telegram channel. An
   object uploaded through the UI is immediately readable over S3, and the
   reverse.
@@ -102,7 +102,7 @@ credential store.
 | `TELEDRIVE_SSL_CERTFILE` / `TELEDRIVE_SSL_KEYFILE` | empty | TLS for the web listener; a combined PEM needs only the certificate variable. |
 | `TELEDRIVE_S3_SSL_CERTFILE` / `TELEDRIVE_S3_SSL_KEYFILE` | empty | Independent TLS pair for the S3 listener. |
 | `TELEDRIVE_TRUSTED_PROXY` | empty | Set to `1` only when a reverse proxy terminates TLS in front of the app. |
-| `TELEDRIVE_DB_EXTRA_PACKAGES` | empty | Extra Python DB drivers installed at image build time (Compose build arg). |
+| `TELEDRIVE_DB_EXTRA_PACKAGES` | empty | Extra Python DB drivers installed at image build time (Compose build arg) and re-applied at service startup. |
 
 `TELEDRIVE_CONFIG=/config/config.yaml` is set by the Compose file and normally
 needs no change. `TELEDRIVE_S3_MASTER_KEY` is also understood by the code, but
@@ -140,7 +140,7 @@ On the first start the service:
    is missing (the commented template at
    [config.example.yaml](https://github.com/babico/TeleDrive/blob/main/config.example.yaml)
    is a better starting point if you want documentation in the file);
-2. creates the SQL schema, currently **version 27**;
+2. creates the SQL schema, currently **version 31**;
 3. creates one hardcoded administrator account, `admin` / `admin`, but only
    when no `admin` row already exists. It never overwrites an existing
    `admin` row.

@@ -9,7 +9,7 @@ tree or captured by the [reference docs](../../reference/) — the
 
 | Document | Status | What it contains |
 | --- | --- | --- |
-| [S3 fidelity and recovery 2026-11-02](2026-11-02-s3-fidelity.md) | Not implemented | Real S3 Express sessions, physical cold-tier restore, GetObject partNumber, submode parity, bootstrap password enforcement, owner-run DR and independent payload backup. Work orders: handoffs 06–10. |
+| [S3 fidelity and recovery 2026-11-02](2026-11-02-s3-fidelity.md) | Delivered in v1.0.10; owner-run DR gates remain | Real S3 Express sessions, physical cold-tier restore, GetObject partNumber, submode parity, bootstrap password enforcement, owner-run DR and independent payload backup. Engineering work orders 06–09 shipped in v1.0.10; handoff 10 is owner-executed. |
 | [Local acceptance](local-acceptance.md) | Executable mission; owner gates remain blocked | Instructions for an agent on the owner's machine: isolated Docker setup, byte fixtures, independent SQL and payload backups, recovery drills, GC race tests and evidence files. It explicitly forbids using production data or treating one host as two. |
 
 ## Using a plan

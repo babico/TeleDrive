@@ -23,12 +23,12 @@ Evidence boundaries are in [Project status](status.md), CI mechanics in
       website hosting, CORS, deferred tags, reports, tiering, SSE-C.
 - [x] Opt-in envelope encryption (SSE-S3 shape) with its capability limits
       reported, not hidden.
-- [x] One serialized schema coordinator (27 steps at the time; schema 30 in
-      v1.0.10, real cross-process lock);
+- [x] One serialized schema coordinator (27 steps when the split landed; schema
+      30 in v1.0.10, 31 in the current tree, real cross-process lock);
       the bucket-delete orphan-table, MySQL portability and hot-index fixes.
-- [x] Module split: `web/app.py` 6027 → 944 lines (settings runtime and
+- [x] Module split: `web/app.py` 6027 → 1074 lines (settings runtime and
       scheduler loops extracted to their own modules), `web/s3.py` 5106 →
-      191, `web/static/app.js` 1469 → 167, `catalog.py` 1465 → 132, with
+      235, `web/static/app.js` 1469 → 218, `catalog.py` 1465 → 139, with
       the route surface frozen by a meta-test.
 - [x] Raw SQL reduced to four annotated read-only aggregate call sites; no
       mutating handler SQL remains in `web/`.
@@ -118,7 +118,7 @@ authority.
 ## 4. Code health (conditional)
 
 - [ ] **Split the remaining `catalog_*` growth points only when a real change
-      touches them.** `catalog_versions.py` (775) and `manifest.py` (712) are
+      touches them.** `catalog_versions.py` (878) and `manifest.py` (712) are
       large but cohesive; do not split for line count alone. Acceptance: a
       concrete bug or feature that needs a new seam, not a refactor-only PR.
 

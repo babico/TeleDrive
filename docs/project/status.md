@@ -9,16 +9,17 @@ approval to operate on production data or to delete Telegram messages.
 | Item | Value |
 | --- | --- |
 | Current release line | **v1.0.10** |
-| Tag / commit | `v1.0.10` resolves to the release commit named in the tag message; `v1.0.9` resolves to `69a503ab07b4d372d3dcdba887204228c3e52c4f` |
+| Tag / commit | `v1.0.10` resolves to `fa61ca29e8bfd679ab049013ae7c8878c417f6a7`; `v1.0.9` resolves to `69a503ab07b4d372d3dcdba887204228c3e52c4f` |
 | Previous release | `v1.0.9` at `69a503ab07b4d372d3dcdba887204228c3e52c4f` |
 | Previous release | `v1.0.8` at `7d2aa773d3839a65899815dd9f3fa2ed2e534324` |
 | Previous release | `v1.0.7` at `747747652cd1ca36878453d49daf627d8c0a60ad` |
 | Package version | `1.0.10` in `pyproject.toml` |
-| Schema version | 30 recorded, append-only steps in `teledrive/storage/schema.py` |
+| Schema version | 31 recorded, append-only steps in the current tree; **v1.0.10 shipped schema 30** |
 | S3 inventory | **114 supported / 0 partial / 2 unsupported** of 116 operations |
 
-The tag message and [release notes](releases/v1.0.10.md) state that the six
-mandatory workflows were green on the tagged SHA. This page does not copy
+The tag message and [release notes](releases/v1.0.10.md) state that all seven
+mandatory workflows (the six service workflows plus the Docs build) were green
+on the tagged SHA. This page does not copy
 run logs: confirm the exact SHA in
 [Actions](https://github.com/babico/TeleDrive/actions) before treating it as
 evidence. Commits after the v1.0.10 tag are post-release and are not in the image or
@@ -34,7 +35,7 @@ elsewhere in history does not transfer to a release candidate.
 | **P0** | Basic upload, authentication, integrity, supported REST/S3 subset, one-container deployment | **Development-validated** | SQLite/PostgreSQL/MySQL integration, immutable manifests, SHA-256 and ranged reads, session/API-key/RBAC auth, quotas, signed S3 requests, the documented supported subset. Not full AWS parity. |
 | **P1** | Disposable Docker acceptance with real PostgreSQL; live test-channel USER MTProto; multiworker PostgreSQL | **Development-validated** | 13 fault-injection gates with four evidence stages; real Telethon user round-trip; three workers sharing PostgreSQL. Telegram I/O in the Docker suite is synthetic. |
 | **P1** | Production operation on independent hosts with the owner's data | **Not signed off** | No independent host attestation, owner media recovery rehearsal, authorized 1-hour soak or signed evidence bundle. |
-| **P2** | Advanced recovery, physical GC, exhaustive protocol verification | **In development / owner-gated** | Rebuild and offline verification components exist and are race-tested; physical GC is disabled; per-operation crash/restart coverage is partially complete. |
+| **P2** | Advanced recovery, physical GC, exhaustive protocol verification | **In development / owner-gated** | Rebuild and offline verification components exist and are race-tested; physical GC is disabled. Per-operation normal/auth-failure/malformed/over-limit/retry/crash-restart/race evidence is complete for every applicable cell of all 114 supported operations. |
 
 ### P0 boundaries
 
@@ -129,11 +130,12 @@ The collector still enforces the actual reference graph, retention/legal holds, 
 
 ## 7. Open engineering work
 
-Tracked in the [roadmap](roadmap.md): the final `web/app.py` extraction
-(settings machinery and scheduler loops), the exhaustive per-operation
-crash/restart and multiworker-race matrices, and test-realism items from the
-reviews. None of
-these is required for the 1.0.8 release to be correct; they reduce future
+Tracked in the [roadmap](roadmap.md): the remaining `catalog_*` growth points
+that a future change touches, and test-realism items from the reviews. The
+settings-machinery and scheduler-loop extraction is complete
+(`web/settings_runtime.py`, `web/schedulers.py`), and the per-operation
+crash/restart and multiworker-race matrices are closed. None of the remaining
+work is required for the v1.0.10 release to be correct; it reduces future
 risk.
 
 Update this page only when the verified **behaviour or acceptance boundary**

@@ -17,17 +17,17 @@ This bootstrap account is not configurable. No config key and no environment var
 The login form posts `{"username": ..., "password": ...}` to `POST /api/v1/auth/login`. On success the server sets the httpOnly `teledrive_session` cookie (seven days, `SameSite=Lax`, `Secure` when the web listener uses TLS or a trusted proxy forwarded HTTPS) and returns the same token in the JSON body for non-browser clients. HTTP Basic is not implemented: a `Basic` header is treated as no credential at all.
 
 !!! danger "Change the bootstrap password immediately"
-    While the shipped `admin`/`admin` password is still in use, `GET /api/v1/auth/me` reports `must_change_password: true` and every page redirects to **Access → Users**. Use the **Password** button on the `admin` row, enter at least eight characters, and save. The change also revokes that user's existing sessions, so you will sign in again. Until you do this, the deployment is one guess away from full control.
+    While the shipped `admin`/`admin` password is still in use, `GET /api/v1/auth/me` reports `must_change_password: true` and every page redirects to `/login`, which replaces the login box with the change-password form. Enter the current password and at least eight characters for the new one, and save. The change also revokes that user's existing sessions, so you will sign in again. Until you do this, the deployment is one guess away from full control.
 
 Signing out calls `POST /api/v1/auth/logout`, which deletes the server-side session row and clears the cookie. A browser that loses the cookie lands on `/login`.
 
 ## Navigation map
 
-The sidebar has four groups. Each entry is a page shell that authenticates on load; the data it shows comes from the endpoints named below.
+The sidebar keeps Dashboard, Queue and History at the top, then groups the rest under **Settings**, **S3** and **Access**. Each entry is a page shell that authenticates on load; the data it shows comes from the endpoints named below.
 
 | Page | Route | Purpose | Main endpoints |
 | --- | --- | --- | --- |
-| Dashboard | `/` or `/dashboard` | Health cards, upload activity, Telegram accounts, physical GC | `/api/v1/admin/storage/health`, `/storage/usage`, `/storage/telegram-sessions`, `/storage/gc`, `/storage/buckets` |
+| Dashboard | `/` or `/dashboard` | Health cards, upload activity, Telegram accounts, physical GC | `/api/v1/admin/storage/health`, `/storage/usage`, `/storage/telegram-sessions`, `/storage/active-channel`, `/storage/gc`, `/storage/buckets` |
 | Queue | `/queue` | The durable local-file job queue | `/api/v1/admin/storage/jobs` |
 | History | `/history` | Finished job runs and every published object version | `/storage/jobs`, `/storage/version-history` |
 | Settings → General | `/settings/general` | Upload policy, database URL, automation, scratch, TLS certificate download | `/api/v1/config` |
@@ -45,7 +45,7 @@ Page shells are served to any authenticated role. What a page can actually read 
 
 ## Dashboard
 
-The four top cards come from `GET /api/v1/admin/storage/health`: queued plus running plus staged plus publishing jobs, failed jobs, completed jobs, and the active upload strategy. **Run next job** calls `POST /api/v1/admin/storage/jobs/run-next` and processes one queued durable job — it never deletes Telegram media.
+The four top cards come from `GET /api/v1/admin/storage/health`: pending jobs (queued plus running plus staged plus publishing), failed jobs, uploaded jobs (`done`), and the active upload strategy. The strategy label is read from `/api/v1/admin/storage/active-channel` and then from `/api/v1/admin/storage/telegram-sessions`. **Run next job** calls `POST /api/v1/admin/storage/jobs/run-next` and processes one queued durable job — it never deletes Telegram media.
 
 Below the cards:
 
@@ -56,11 +56,11 @@ Below the cards:
 
 ## Queue and History
 
-**Queue** is the durable local-file job list. Each row is one `storage_upload_jobs` record: source path, state, attempt count, the Telegram account used, and the last error. The UI has no single-file enqueue form; jobs are created by the REST endpoint or by the optional folder watcher (see [Local file jobs](local-jobs.md)). **Run next job** on the dashboard is the manual worker trigger.
+**Queue** is the durable local-file job list. Each row is one `storage_upload_jobs` record: source path, state, attempt count and the last error. The table also has an Account column, but the job row has no account field, so it currently shows `-`. The UI has no single-file enqueue form; jobs are created by the REST endpoint or by the optional folder watcher (see [Local file jobs](local-jobs.md)). **Run next job** on the dashboard is the manual worker trigger.
 
 **History** has two panels:
 
-- **Upload history** filters the same job list to terminal states (`done`, `failed`, `cancelled`).
+- **Upload history** filters the same job list to terminal states (`done`, `completed`, `failed`, `cancelled`).
 - **Object versions** reads `GET /api/v1/admin/storage/version-history` and shows every published version and delete marker from every write path — browser upload, REST, multipart and server-side copy. Deleted objects remain listed; their Telegram media is retained until an owner-authorized physical GC run.
 
 Direct S3 and REST uploads do not create upload jobs, so they appear only in the versions panel, never in the job queue.
@@ -73,13 +73,13 @@ This page edits the deployment settings document. Saving calls `PUT /api/v1/conf
 | --- | --- |
 | Upload | Source directory, send mode, files per run and per day, send delay, retry/backoff, FloodWait buffer, maximum file size, caption template, allowed extensions |
 | Database | The SQLAlchemy URL of the shared catalog (displayed redacted) |
-| Automation | Legacy batch-runner toggle and interval |
+| Automation | The `jobs.auto_run` worker toggle (the durable scheduler reads it immediately) |
 | Storage | Scratch directory used to stage uploads |
 | TLS certificate | Download `/server.cer` (DER) or `/server.crt` (PEM chain) |
 
-Two values are deliberately file-only. A save that tries to change `state.database_url`, `state.db_path` or `state.db_extra_packages` is rejected with `400`; edit `config/config.yaml` on the host instead. The reason is that redirecting the database or installing a package at boot is a host-level takeover, not a dashboard setting. TLS is also environment-only (`TELEDRIVE_SSL_*` and `TELEDRIVE_S3_SSL_*`); the form only lets you download the public certificate.
+Three values are deliberately file-only. A save that tries to change `state.database_url`, `state.db_path` or `state.db_extra_packages` is rejected with `400`; edit `config/config.yaml` on the host instead. The reason is that redirecting the database or installing a package at boot is a host-level takeover, not a dashboard setting. TLS is also environment-only (`TELEDRIVE_SSL_*` and `TELEDRIVE_S3_SSL_*`); the form only lets you download the public certificate.
 
-The Automation section is the historic batch-runner switch. The durable job scheduler is governed by `jobs.auto_run` and the optional `jobs.watch` settings in `config/config.yaml`, not by this form.
+The Automation section edits `jobs.auto_run` directly: turning it off stops the in-process durable worker, and turning it on resumes it. The optional `jobs.watch` folder auto-sync is a separate `config/config.yaml` setting with no UI toggle.
 
 ## Settings → Telegram
 
@@ -87,7 +87,7 @@ This is the account and channel control room.
 
 - **Channels** lists every configured storage channel. An operator or admin can add one (display name, channel ID or username, strategy, scratch directory), activate it, or remove it. Writes go to the active channel; every configured credential set must be able to post to it.
 - **Active channel settings** switches the write target. Activation reloads the storage runtime.
-- **Telegram session (USER MTProto)** starts an interactive login: enter API ID, API hash and phone, press **Send code**, then enter the code from the newest Telegram message and the 2FA password if the account has one. The code request is stored for five minutes, a wrong code can be retried at most five times, and FloodWait responses show a live countdown. Adding, requesting a code or verifying a code is an admin-only action; the resulting session becomes the identity every upload is sent as.
+- **Telegram session (USER MTProto)** starts an interactive login: enter API ID, API hash and phone, press **Send code**, then enter the code from the newest Telegram message and the 2FA password if the account has one. The code request is stored for five minutes, a wrong code can be retried at most five times, and FloodWait responses show a live countdown. Adding a Telegram account session (requesting and verifying the code) is an admin-only action; the resulting session becomes the identity every upload is sent as. The separate **Add channel** control is available to operators too.
 - **Authorized accounts** lists each session with phone (masked), API ID, current objects and bytes, retained bytes, soft quota, cooldown and health. **Check** probes one account immediately; **Delete** removes a session, and refuses without `force=true` while that account still stores chunks.
 - **Upload routing strategy** applies to all accounts: `single`, `round_robin`, `failover` or `parallel`. A FloodWait on one account fails over to the others.
 - **Cross-account replication target** designates a second account that receives a copy of each new upload's chunks. **Repair missing replicas** re-sends chunks that are missing from the target.
@@ -99,7 +99,7 @@ Soft quotas are advisory routing headroom: they are displayed here, in metrics a
 This page issues the SigV4 keypairs that S3 clients use. A credential is not a user: it has no session and no access to this dashboard or the REST admin API.
 
 - **Generate new credentials** asks for a name, an expiry (30/90/365 days, never, or a custom date), and the exact `s3:*` actions. Presets are starting points; every checkbox remains editable, and actions that can destroy data or change governance are flagged. Saving returns the access key ID and secret once.
-- The list shows name, access key ID, scope families, expiry and status. **Show secret** decrypts the secret server-side and writes an audit entry; **Rotate** issues a replacement and revokes the old key immediately; **Revoke** ends access on the next request with no grace period.
+- The list shows name, access key ID, scope families, expiry and status. **Show secret** decrypts the secret server-side and writes an audit entry; **Rotate** issues a replacement and then revokes the old key in the same confirmed step; **Revoke** ends access on the next request with no grace period.
 - Revoking or expiring a key is irreversible. Instructions and the permission reference are on [S3 API](s3-api.md).
 
 !!! warning "The secret is shown once"
@@ -111,16 +111,16 @@ All credential creation, editing, reveal and revocation requires an interactive 
 
 The object browser works on the shared catalog, so an object uploaded here is immediately visible over REST and S3, and vice versa.
 
-- **Buckets** lists name, current object count, total size and quota, with **New bucket** for admins. Creating a bucket uses the same 3–63 character name rules as S3. **Delete** requires the bucket to be empty and also removes its share links.
+- **Buckets** lists name, current object count, total size and quota, with **New bucket** for admins. Creating a bucket uses the same 3–63 character name rules as S3. **Delete** requires the bucket to have no object history and no multipart history (unlinking every object is not enough), and also removes its share links.
 - **Upload** supports drag-and-drop and a file picker. The optional **Encrypt before upload** checkbox encrypts the file in the browser with AES-256-GCM using a passphrase you type; the passphrase never leaves the device and cannot be recovered. Such objects are stored as ciphertext, are not previewable, and can only be decrypted by a client that has the passphrase.
-- **Search** runs in key mode by default, or in content mode over the plaintext full-text index. **Reindex** backfills content for existing text-extractable objects in bounded batches. Encrypted objects are not content-indexed.
+- **Search** runs in key mode by default, or in content mode over the plaintext full-text index. **Reindex** backfills content for existing text-extractable objects in bounded batches. Client-side encrypted objects are ciphertext, so the extractor normally rejects them and they do not become meaningfully searchable.
 - Per-object actions:
   - **Download** and **Preview** stream verified bytes through the session.
   - **Link** creates a presigned GET URL (1–604800 seconds) signed with an S3 credential that holds `s3:GetObject`.
   - **Share** creates a `/share/<token>` link bounded by expiry, download count and an optional password, all enforced server-side.
   - **Rename** and **Move** are catalog-level copies: no Telegram bytes move, the destination quota is checked, and the destination generation is fenced.
   - **Unlink** removes the key from the catalog. In a versioning-enabled bucket it writes a delete marker; in every case the Telegram media is retained until physical GC, so this is not an erase.
-- **Quota** sets `max_size_bytes` and `max_objects`; blank means unlimited. Both S3 and REST uploads, server-side copies and durable jobs enforce it, answering `413` when it would be exceeded.
+- **Quota** sets `max_size_bytes` and `max_objects`; blank means unlimited. Both S3 and REST uploads and server-side copies enforce it with `413` when it would be exceeded; a durable job that would breach it is marked `failed` with the quota message instead.
 - **CORS** edits the bucket's browser rules (origins, methods, allowed headers, max age). CORS is a browser policy, never authentication.
 - **Pin** fixes a bucket's uploads to one Telegram account; an explicit pin wins over strategy rotation and soft quotas.
 
@@ -149,7 +149,7 @@ Every control on this page is an S3 configuration operation signed server-side w
 
 This page manages REST bearer keys. Unlike an S3 credential, an API key authorizes `/api/v1/*` calls and is scoped to individual endpoints.
 
-- **Generate new key** takes a name, an expiry, and a set of permissions. The permission picker is built from the live route table (`GET /api/v1/admin/keys/permissions`): each entry is the canonical `method:path` name, and the nine original REST data-plane routes keep their short `rest:*` names. Legacy grouped scopes (`objects:read`, `buckets:manage`, …) remain selectable and expand to endpoint sets; `admin:*` expands to the whole live route table.
+- **Generate new key** takes a name, an expiry, and a set of permissions. The permission picker is built from the live route table (`GET /api/v1/admin/keys/permissions`): each entry is the canonical `method:path` name, and the nine original REST data-plane routes keep their short `rest:*` names. Legacy grouped scopes (`objects:read`, `buckets:manage`, …) remain selectable; the object/bucket families expand to endpoint sets, while the retired `jobs:*`, `accounts:*`, `settings:*` and `keys:manage` groups expand to nothing. `admin:*` expands to the whole live route table.
 - The secret (`td_live_...`) is returned once and stored hashed.
 - The list shows name, prefix, scopes, creation, last use, expiry and status. **Rotate** replaces the secret and revokes the old one; **Revoke** is immediate.
 - Delegation is bounded: a key can only mint, rotate or revoke authority it already holds, and a child key cannot outlive the key that created it.
@@ -161,11 +161,11 @@ The page also links to `/docs`, `/redoc` and `/openapi.json`. All three require 
 The user table lists username, role, enabled state, creation time and last login. Admin actions:
 
 - **Add user** creates a username (1–64 characters of letters, digits, dot, dash or underscore), a password of at least eight characters, and a role (`admin`, `operator`, `viewer`).
-- The role selector changes a user's role. The service refuses to remove the last enabled admin, and the bootstrap `admin` account cannot be renamed or deleted.
+- The role selector changes a user's role. The service refuses to remove the last enabled admin. The bootstrap `admin` account cannot be renamed through the API (the UI also hides its delete control), and if it is deleted by an API call while another enabled admin exists, the next startup re-creates `admin`/`admin`.
 - **Password** sets a new password and revokes all of that user's sessions in the same transaction.
 - **Delete** removes the user and their sessions together.
 
-This is also the page the first-login gate sends you to while `admin`/`admin` is still active.
+The first-login gate does not send you here: while `admin`/`admin` is still active, every page redirects to `/login`, which hosts the change-password form. The Users page becomes usable once the rotation is complete.
 
 ## Access → Logs
 
@@ -174,13 +174,13 @@ The log viewer shows the in-memory activity buffer with time, user, source and m
 - **Live** opens the WebSocket `/api/v1/logs/stream`, which sends the last 200 entries and then every new line. If a proxy does not support WebSockets, the page falls back to polling every three seconds.
 - **Hide polling noise** removes the page's own request lines from the view only; they remain in the log.
 
-The endpoint and the WebSocket are admin-only because the buffer carries object keys, request paths and failure detail. Credentials are redacted before they reach the log, phone numbers are masked, and share tokens are replaced with `***` in request paths. The durable security trail — who changed which authority — is a separate store at `GET /api/v1/admin/audit`, not this page.
+The endpoint and the WebSocket are admin-only because the buffer carries object keys, request paths and failure detail. Request paths mask share tokens as `***`, exception text is scrubbed for URL/query secrets and phone numbers before it is logged, and credential call sites log ids rather than secrets. The durable security trail — who changed which authority — is a separate store at `GET /api/v1/admin/audit`, not this page.
 
 ## Safety rails you will meet
 
 - **CSRF and same-origin.** Every state-changing browser call carries `X-TeleDrive-CSRF: 1`, and a cross-origin `Origin` is rejected. The cookie is httpOnly; the page never reads or stores the session token.
-- **Role gates.** Reads require any known role, writes require operator or admin, and the admin-only surfaces (users, API keys, S3 credentials, physical GC, bucket quota, website publishing, config writes, logs, audit, share administration, Telegram session mutations) require admin for every method. The per-route permission map narrows this further.
-- **Brute-force throttle.** Five failed logins for the same username and client within 300 seconds answer `429` until the window passes. With a trusted proxy configured, the throttle keys on the real client address rather than the proxy.
+- **Role gates.** Reads require any known role, writes require operator or admin, and the admin-only surfaces (users, API keys, S3 credentials, physical GC, bucket quota, website publishing, config writes, logs, audit, share administration, S3-governance writes, and Telegram login-code request/verify plus global session revocation) require admin for every method. Per-account session deletion, health checks and soft quotas are operator-allowed. The per-route permission map narrows this further.
+- **Brute-force throttle.** After five failed logins for the same username and client within 300 seconds, the next attempt answers `429` until the window passes. With a trusted proxy configured, the throttle keys on the real client address rather than the proxy.
 - **Secrets are one-shot.** S3 credential secrets and API keys are shown only at creation or rotation. Existing S3 secrets can be revealed only by an interactive admin session, and every reveal is audit-logged.
 - **Deletion is logical by default.** Buckets and objects disappear from the catalog, but Telegram media is not physically deleted until an owner enables physical GC and runs a collection. See [Garbage collection](../operate/garbage-collection.md).
 - **Transport.** Bind the service to loopback or a trusted network, or put it behind TLS. A session cookie set over plain HTTP is not `Secure`, so anyone who can observe the connection can replay it.

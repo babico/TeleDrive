@@ -33,7 +33,7 @@ timeline with the reporter. There is no bug bounty.
 | --- | --- | --- |
 | `v1.0.10` | Current release line | Yes |
 | `v1.0.9` (tag `69a503a`) | Previous release | Yes |
-| `v1.0.8` (tag `7d2aa77`) | Previous release | Yes |
+| `v1.0.8` (tag `53910de`) | Previous release | Yes |
 | `v1.0.7` | Previous release | Critical fixes only, when practical |
 | `main` after the current tag | Development | No support guarantee; it is not a release |
 
@@ -71,8 +71,9 @@ container wiring is responsible for its own review.
   enabled envelope encryption, or the browser encrypted before upload.
 - Object metadata privacy. Bucket names, keys, sizes and timestamps are
   readable by anyone with database access.
-- Physical deletion of Telegram media. It is owner-gated and disabled; a
-  report that it is disabled is not a vulnerability.
+- Physical deletion of Telegram media. It is off by default and owner-gated:
+  it can run only after the owner enables physical GC and confirms a
+  collection. A report that it is disabled by default is not a vulnerability.
 - Denial of service, volumetric attacks, and global rate limiting. Login
   throttling is per username+client by design.
 - Multi-tenant isolation between mutually hostile customers.
@@ -147,12 +148,7 @@ someone else's job.
 | [Audit 2026-10-29](../project/reviews/audit-2026-10-29.md) | TODO/docs/roadmap claims against the tree | Bucket-delete orphan tables, MySQL writes, duplicate permission catalogs, schema race and indexes closed; the audit keeps its own pre-fix state visible. |
 | [Codebase review](../project/reviews/codebase-review.md) | Whole-tree structural review at `054af3a` | Fifteen refactor findings; the closed ones carry commit evidence, the open ones are tracked in the [roadmap](../project/roadmap.md). |
 
-Automated evidence: the CI 1 `security` job runs Bandit, `pip-audit`, the
-authentication/RBAC tests, the SigV4 defence suite, the fail-closed S3 suite
-and the workflow-contract meta-tests; CI 3 builds and scans the image with
-Trivy. GitHub Actions are pinned to full commit SHAs and Dependabot monitors
-Python, Docker and Actions dependencies. Details are in
-[CI and tests](../reference/ci.md).
+Automated evidence: the CI 1 workflow runs Bandit, `pip-audit`, the API-key/REST, SigV4 defence, fail-closed S3, workflow-contract and authentication/RBAC (in its Web job) suites; CI 3 builds and scans the image with Trivy. GitHub Actions are pinned to full commit SHAs and Dependabot monitors Python, Docker and Actions dependencies. Details are in [CI and tests](../reference/ci.md).
 
 A green scanner or a finished review is **not** permission to expose the
 administration UI publicly, and it is not a substitute for owner-approved

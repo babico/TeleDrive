@@ -17,10 +17,13 @@ Open `http://127.0.0.1:8080` and sign in with:
     Every installation starts with `admin` / `admin`. The server enforces the
     rotation: until the password is changed, **every** authenticated
     operation — REST data, S3 (including credential issue and presigning),
-    API keys, user management, even the WebSocket log stream — answers
-    `403` with a `bootstrap_password_change_required` error. Only login,
-    current-user info, logout and the password change itself are allowed.
-    Nothing else can be done with the default credential, by anyone.
+    API keys, user management, even the WebSocket log stream — is refused.
+    REST callers get `403` with a `bootstrap_password_change_required` JSON
+    error, the log WebSocket closes with `4403`, and the S3 listener returns
+    an `AccessDenied` XML error. Only login, current-user info, logout, the
+    password change itself, and the public health/static/certificate
+    surfaces are allowed. Nothing else can be done with the default
+    credential, by anyone.
 
 After signing in, the login page itself shows the change-password form.
 Enter the current password (`admin`) and a strong new password:
@@ -212,9 +215,10 @@ key; see [Encryption](../guide/encryption.md).
   bytes in Telegram but unindexed.
 
 Deleting an object in the UI unlinks it from the catalog. Physical deletion of
-the Telegram messages is a separate, owner-gated operation and remains
-disabled (`deletion_permitted` is `False`); see
-[Garbage collection](../operate/garbage-collection.md).
+the Telegram messages is a separate, owner-gated operation that is off by
+default; it only runs after an owner enables the physical GC gate and executes
+a confirmed collection (`deletion_permitted` stays `False` because it reports
+the default). See [Garbage collection](../operate/garbage-collection.md).
 
 ## Next
 

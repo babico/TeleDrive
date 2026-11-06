@@ -40,7 +40,7 @@ docker compose down
 
 The healthcheck runs `python -m web.container_healthcheck`, which reads the same port and TLS environment as the service. `docker compose ps` showing `unhealthy` after the 20-second start period usually means the web listener failed to bind or TLS material is unreadable.
 
-`docker compose down -v` does not delete bind-mounted data, but it is still a stop, not a backup. Deleting `./data` removes the SQL catalog, auth sessions, logs and scratch; deleting `./config` removes the deployment settings and Telegram session files.
+`docker compose down -v` does not delete bind-mounted data, but it is still a stop, not a backup. Deleting `./data` removes the SQL catalog, auth sessions, UI-created session mirrors, logs and scratch; deleting `./config` removes the deployment settings and any file-based Telegram session files kept there.
 
 ## Start the service without Docker
 
@@ -51,7 +51,7 @@ TELEDRIVE_CONFIG=./config/config.yaml .venv/bin/python -m web.unified \
   --host 127.0.0.1 --web-port 8080 --s3-port 9000
 ```
 
-`--host`, `--web-port` and `--s3-port` override the config file for that run. TLS, proxy trust and port variables are read from the environment in this mode; see [Configuration](../reference/configuration.md).
+`--host`, `--web-port` and `--s3-port` override the environment-derived settings for that run. TLS, proxy trust and port variables are read from the environment in this mode; see [Configuration](../reference/configuration.md).
 
 ## Database initialisation and migration
 
@@ -134,7 +134,7 @@ mkdir -p data/tls
   --out ./data/tls --hostname localhost --days 365
 ```
 
-Because `./data` is mounted at `/data`, the printed paths are the in-container paths:
+Because `./data` is mounted at `/data`, the paths must be addressed as `/data/...` inside the container. The script prints the paths exactly as you passed them, so either generate into the in-container name (`--out /data/tls`) or rewrite the printed lines:
 
 ```text
 TELEDRIVE_SSL_CERTFILE=/data/tls/server.crt

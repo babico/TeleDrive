@@ -86,7 +86,7 @@ The durable trail is the `security_audit_events` table, exposed at `GET /api/v1/
 | Dangerous storage work | `gc.collect.start`, `gc.collect.done` |
 | Delegated authority | `object.presign`, `share.create` |
 
-Each row carries the actor, action, target, outcome, a scrubbed detail blob, the client IP and a nanosecond timestamp. The recorder rejects values shaped like TeleDrive credentials, sessions, Fernet tokens and password hashes. A failed audit write never fails the operation it describes.
+Each row carries the actor, action, target, outcome, a scrubbed detail blob, the client IP and a nanosecond timestamp. The recorder scrubs values shaped like TeleDrive credentials, sessions, Fernet tokens and password hashes before storing them. A failed audit write never fails the operation it describes.
 
 There is no automatic retention or pruning. `prune(older_than_ns=...)` exists in the audit module but is an operator action with direct database access; no HTTP route deletes audit rows. A compliance requirement therefore needs an external archive or a scheduled database job.
 

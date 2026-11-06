@@ -1,6 +1,6 @@
 # Handoff 08 — Actual archive bytes, RestoreObject and lifecycle
 
-**State:** Engineering design, not a claim that Glacier currently exists.
+**State:** Delivered in v1.0.10 — `ColdBlobStore`, the durable archive/restore state machine, real `RestoreObject` and the lifecycle extensions shipped. This page is kept as the design record.
 
 ## Current implementation to preserve
 

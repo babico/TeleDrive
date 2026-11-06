@@ -45,7 +45,7 @@ The destination bucket must already exist. The object key is validated with the 
 {"id": "0f0c...", "state": "queued"}
 ```
 
-An operator or admin may enqueue; a viewer cannot. Queueing does not require a live Telegram session, but a worker that cannot obtain one leaves the job queued and the health endpoint reports the reason.
+An operator or admin may enqueue; a viewer cannot. Queueing does not require a live Telegram session, but a worker that cannot obtain one leaves the job `queued` and logs the reason; it does not fail the job.
 
 ### REST, a legacy folder
 
@@ -72,7 +72,7 @@ The response reports `would_queue`, `queued` (zero in a preview), `already_queue
 
 The dashboard surfaces the queue rather than offering a single-file form:
 
-- **Queue** lists jobs with source path, state, attempts, account and last error.
+- **Queue** lists jobs with source path, state, attempts and last error. Its Account column has no backing job field, so it currently shows `-`.
 - **Dashboard → Run next job** calls `POST /api/v1/admin/storage/jobs/run-next` and processes one queued job immediately.
 - The opt-in `jobs.watch` setting on `config/config.yaml` enqueues new or changed files from `upload.source_dir` into `jobs.watch_bucket` every `watch_interval_seconds`. There is no UI toggle for it.
 
@@ -92,7 +92,7 @@ A job moves through a durable state machine:
 6. `failed` — the attempt ended with an error; the Telegram chunks are retained.
 7. `cancelled` — an inactive job was cancelled by an operator.
 
-Crash recovery follows from those states. If a worker dies while `running` or `staged`, its lease expires and another worker may claim it. A job that references a **pending** object resumes the existing chunk journal (`resume_file`) instead of re-sending bytes; a job that references a **ready** staged manifest publishes it without another Telegram upload. A failed or missing journal cannot be resumed, so an explicit retry starts a fresh object and leaves the old chunks for later GC evidence.
+Crash recovery follows from those states. If a worker dies while `running`, `staged` or `publishing`, its lease expires and another worker may claim it. A job that references a **pending** object resumes the existing chunk journal (`resume_file`) instead of re-sending bytes; a job that references a **ready** staged manifest publishes it without another Telegram upload. A failed or missing journal cannot be resumed, so an explicit retry starts a fresh object and leaves the old chunks for later GC evidence.
 
 !!! warning "Retries and cancellation never delete Telegram media"
     A failed or cancelled job can leave already-sent chunks behind. They are retained deliberately as a recovery journal until physical garbage collection removes them, and GC is owner-gated. Retrying does not overwrite or erase the old chunks, and cancelling cannot interrupt a live Telegram writer: only `queued` and `failed` jobs may be cancelled.
@@ -152,7 +152,7 @@ A completed job publishes through the same `catalog.publish` call as an S3 `PUT`
 - the object appears immediately in `aws s3 ls`, `GET /api/v1/buckets/{bucket}/objects` and the dashboard;
 - it gets a generation and a published version, visible in **History → Object versions**;
 - a versioning-enabled bucket and object lock apply exactly as they do to any other write;
-- bucket quotas, key validation and the 2 GiB body policy apply to the job path too.
+- bucket quotas and key validation apply to the job path too. The 2 GiB REST body cap does not: a job streams a local file, bounded only by the bucket quota and the Telegram account's own limits.
 
 Jobs only write. Reads never go through the queue, and there is no way to schedule a download or a re-upload of an existing object as a job.
 

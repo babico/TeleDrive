@@ -47,7 +47,7 @@ A separate independent payload backup, a successful isolated restore and a revie
 
 ## Preview and collect workflow
 
-All routes require authentication and the `admin` role; a human session is checked by the role policy, and an API key is accepted only because an admin deliberately minted it with that exact route permission. The toggle and collect routes also require the same-origin CSRF header (`X-TeleDrive-CSRF: 1`) for a browser session.
+All routes require authentication and the `admin` role; a human session is checked by the role policy, and an API key is accepted only because an admin deliberately minted it with that exact route permission. The toggle and collect routes also require the `X-TeleDrive-CSRF: 1` header; the check runs for API-key callers too.
 
 | Step | Endpoint | Purpose |
 | --- | --- | --- |

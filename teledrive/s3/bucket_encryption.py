@@ -91,7 +91,15 @@ def parse_encryption_xml(payload: bytes, *,
         raise BucketEncryptionError(
             "MalformedXML", "Unexpected server-side encryption document")
     rules: list[dict] = []
-    for child in root:
+    rule_elements = [child for child in root]
+    # AWS accepts exactly ONE default-encryption rule. Two identical
+    # AES256 rules are not "more encrypted"; accepting them made the stored
+    # document diverge from what any client could have meant.
+    if len(rule_elements) > 1:
+        raise BucketEncryptionError(
+            "MalformedXML",
+            "Exactly one server-side encryption rule is allowed")
+    for child in rule_elements:
         if not _valid_namespace(child) or _local(child) != "Rule":
             raise BucketEncryptionError(
                 "MalformedXML", "Only Rule elements are accepted")
@@ -188,16 +196,32 @@ class BucketEncryptionStore:
         # UPDATE takes the write lock first, so on every backend exactly
         # one writer inserts and the other converges onto the row.
         from sqlalchemy import update
-        changed = self.db.connection.execute(update(bucket_encryption).where(
-            bucket_encryption.c.bucket == bucket).values(
-                rules=payload, updated_at=now,
-                updated_by=(actor or "-")[:64]))
-        if not changed.rowcount:
-            self.db.connection.execute(insert(bucket_encryption).values(
-                bucket=bucket, rules=payload, updated_at=now,
-                updated_by=(actor or "-")[:64],
-            ))
-        self.db.commit()
+        from sqlalchemy.exc import IntegrityError
+
+        def _is_missing_bucket(exc: BaseException) -> bool:
+            text_value = str(getattr(exc, "orig", exc)).lower()
+            return ("foreign key" in text_value
+                    or "1452" in text_value or "23503" in text_value)
+
+        try:
+            changed = self.db.connection.execute(update(bucket_encryption).where(
+                bucket_encryption.c.bucket == bucket).values(
+                    rules=payload, updated_at=now,
+                    updated_by=(actor or "-")[:64]))
+            if not changed.rowcount:
+                self.db.connection.execute(insert(bucket_encryption).values(
+                    bucket=bucket, rules=payload, updated_at=now,
+                    updated_by=(actor or "-")[:64],
+                ))
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.connection.rollback()
+            # The cascading FK rejects a config row whose bucket was just
+            # deleted or never existed: that is a 404 NoSuchBucket, not a 500.
+            if _is_missing_bucket(exc):
+                raise BucketEncryptionError(
+                    "NoSuchBucket", "Bucket does not exist", 404) from exc
+            raise
 
     def delete(self, bucket: str) -> None:
         self.db.connection.execute(delete(bucket_encryption).where(

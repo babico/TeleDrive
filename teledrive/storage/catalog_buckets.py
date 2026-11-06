@@ -162,7 +162,20 @@ class BucketAdminMixin:
         return [(str(r[0]), int(r[1])) for r in rows[:limit]], len(rows) > limit
 
     def delete_bucket(self, name: str) -> None:
-        """Refuse buckets with any current or historical manifests."""
+        """Delete an empty bucket and every configuration row it owns.
+
+        Every bucket-name-keyed configuration table carries an
+        ``ON DELETE CASCADE`` foreign key to ``storage_buckets`` (schema
+        step ``bucket_fk_cascade``), so the single guarded DELETE below
+        removes tags, lifecycle, CORS, website, metadata journal/config,
+        bucket/object ACL grants, policy, ABAC, encryption, replication,
+        tiering, report, notification, logging, quota, account-pin and
+        share rows atomically.  That closes the old orphan window: a
+        configuration write that passed its existence check in an earlier
+        transaction can no longer commit a row after the sweep, because
+        its INSERT now fails on the same foreign key instead of creating
+        an orphan for a deleted bucket.
+        """
         existing = self.db.connection.execute(
             select(buckets.c.name, buckets.c.created_at).where(
                 buckets.c.name == name)
@@ -189,119 +202,28 @@ class BucketAdminMixin:
                 raise ValueError("Bucket has multipart history; safe GC required")
         if history is not None:
             raise ValueError("Bucket has object history; safe physical GC required")
-        # A physically empty bucket can be deleted even if its tag set is
-        # nonempty; do not leave dangling metadata across SQL backends.
-        if inspect(self.db.engine).has_table("storage_bucket_tags"):
-            self.db.connection.execute(
-                text("DELETE FROM storage_bucket_tags WHERE bucket = :bucket"),
-                {"bucket": name},
-            )
-        if inspect(self.db.engine).has_table("storage_bucket_lifecycle"):
-            self.db.connection.execute(
-                text("DELETE FROM storage_bucket_lifecycle WHERE bucket = :bucket"),
-                {"bucket": name},
-            )
-        if inspect(self.db.engine).has_table("storage_bucket_cors"):
-            self.db.connection.execute(
-                text("DELETE FROM storage_bucket_cors WHERE bucket = :bucket"),
-                {"bucket": name},
-            )
-        # Phase J: never leave a deferred tag journal behind. Rows owned by
-        # this bucket are removed explicitly; orphan rows (their manifest is
-        # already gone) are equally unreclaimable and removed as well.
+        # Object-keyed rows have no bucket column and therefore no bucket
+        # cascade; remove those of this bucket's objects (and any orphan
+        # left by an already-reclaimed manifest) explicitly.
         if inspect(self.db.engine).has_table("storage_pending_tags"):
             self.db.connection.execute(text(
                 "DELETE FROM storage_pending_tags WHERE object_id IN "
                 "(SELECT id FROM storage_objects WHERE bucket = :bucket) "
                 "OR object_id NOT IN (SELECT id FROM storage_objects)"
             ), {"bucket": name})
-        # Phase I: deleting a bucket must not leave website state or a
-        # public_read gate behind. The bucket row is removed below, but
-        # clear both explicitly so the intent is local and testable.
-        if inspect(self.db.engine).has_table("storage_website_configs"):
-            self.db.connection.execute(
-                text("DELETE FROM storage_website_configs WHERE bucket = :bucket"),
-                {"bucket": name},
-            )
-        # Phase O2: object annotations are per-object rows with no bucket
-        # column; remove rows for this bucket's objects and any orphan left
-        # by an already-reclaimed manifest.
         if inspect(self.db.engine).has_table("storage_object_annotations"):
             self.db.connection.execute(text(
                 "DELETE FROM storage_object_annotations WHERE object_id IN "
                 "(SELECT id FROM storage_objects WHERE bucket = :bucket) "
                 "OR object_id NOT IN (SELECT id FROM storage_objects)"
             ), {"bucket": name})
-        # Phase O3: a deleted bucket must not leave a metadata configuration
-        # or journal rows behind (the journal is the bucket's local table).
-        if inspect(self.db.engine).has_table("storage_metadata_journal"):
-            self.db.connection.execute(text(
-                "DELETE FROM storage_metadata_journal WHERE bucket = :bucket"
-            ), {"bucket": name})
-        if inspect(self.db.engine).has_table("storage_metadata_configs"):
-            self.db.connection.execute(text(
-                "DELETE FROM storage_metadata_configs WHERE bucket = :bucket"
-            ), {"bucket": name})
-        # Every remaining governance surface keyed by the bucket NAME must
-        # be cleared too, or re-creating a bucket with the same name silently
-        # revives the previous one's rights and settings: an old bucket
-        # policy (including a Deny), ABAC gates, an SSE default, replication
-        # rules, tiering rules (which make new objects answer 403 until
-        # restored), webhook/logging targets and report schedules. Quotas,
-        # account pins and public share links have the same problem -- a
-        # stale share URL would keep working against the new bucket's keys.
-        # Object-keyed rows (ACL grants) are cleared here as well.
-        for table, column in (
-            ("storage_bucket_acl_grants", "bucket"),
-            ("storage_bucket_policy", "bucket"),
-            ("storage_bucket_abac", "bucket"),
-            ("storage_bucket_encryption", "bucket"),
-            ("storage_replication_configs", "bucket"),
-            ("storage_tiering_configs", "bucket"),
-            ("storage_report_configs", "bucket"),
-            ("storage_notification_configs", "bucket"),
-            ("storage_logging_configs", "bucket"),
-            ("bucket_quotas", "bucket"),
-            ("bucket_account_pins", "bucket"),
-            ("share_links", "bucket"),
-        ):
-            if inspect(self.db.engine).has_table(table):
-                # table/column come from the hardcoded tuple above, never
-                # request input; the value stays a bound parameter.
-                self.db.connection.execute(text(
-                    f"DELETE FROM {table} WHERE {column} = :bucket"  # nosec B608
-                ), {"bucket": name})
-        # Object-keyed ACL grants have no bucket column of their own.
-        if inspect(self.db.engine).has_table("storage_object_acl_grants"):
-            self.db.connection.execute(text(
-                "DELETE FROM storage_object_acl_grants WHERE bucket = :bucket"
-            ), {"bucket": name})
-        # Remove the bucket row FIRST (guarded by created_at), then sweep
-        # the name-keyed configuration in the same transaction: with the
-        # row gone, a concurrent config write that already passed its own
-        # existence check can no longer observe a live bucket, and the
-        # sweep below runs after the deletion rather than before it. The
-        # guard means a bucket re-created between the checks above and
-        # this statement is left untouched instead of being deleted by a
-        # stale conclusion.
-        # Delete the bucket row LAST, guarded by created_at: the
-        # name-keyed configuration above must be swept while the row still
-        # satisfies its foreign keys, and a bucket re-created between the
-        # checks above and this statement must not be removed by a stale
-        # conclusion. Residual, documented window: a configuration write
-        # whose existence check ran in an earlier transaction can still
-        # commit a row after this sweep (a foreign key with ON DELETE
-        # CASCADE is the complete fix and needs a migration across
-        # fourteen tables); every other ordering converges.
+        # Delete the bucket row LAST, guarded by created_at: the cascade
+        # removes the name-keyed configuration atomically with it, and a
+        # bucket re-created between the checks above and this statement is
+        # left untouched instead of being deleted by a stale conclusion.
         removed = self.db.connection.execute(delete(buckets).where(
             buckets.c.name == name, buckets.c.created_at == created_at))
         if not removed.rowcount:
             self.db.connection.rollback()
             raise FileNotFoundError("Bucket does not exist")
         self.db.commit()
-        # The bulk pass above already clears shares atomically with the
-        # bucket.  Also run the canonical store helper so the purge contract
-        # lives in one place and is exercised by its own tests; it is
-        # idempotent and finds nothing left after the transaction above.
-        from teledrive.stores.shares import delete_for_bucket
-        delete_for_bucket(self.db, name)

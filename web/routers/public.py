@@ -534,11 +534,16 @@ async def _serve_site(bucket: str, path: str, request: Request) -> Response:
                              headers=headers)
 
 
+# HEAD is advertised by the handler (_serve_site returns the same headers
+# with no body) and by the website guide, so the routes must accept it:
+# FastAPI does not add HEAD for a GET route. Both verbs share one handler.
 @router.get("/site/{bucket}", include_in_schema=False)
+@router.head("/site/{bucket}", include_in_schema=False)
 async def public_website_root(bucket: str, request: Request):
     return await _serve_site(bucket, "", request)
 
 
 @router.get("/site/{bucket}/{path:path}", include_in_schema=False)
+@router.head("/site/{bucket}/{path:path}", include_in_schema=False)
 async def public_website_object(bucket: str, path: str, request: Request):
     return await _serve_site(bucket, path, request)

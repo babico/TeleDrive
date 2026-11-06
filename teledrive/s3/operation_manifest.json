@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source": "docs/S3_SPECS.md",
+  "source": "docs/reference/s3-specs.md",
   "reference": "https://docs.aws.amazon.com/AmazonS3/latest/API/API_Operations_Amazon_Simple_Storage_Service.html",
   "note": "This inventory describes only the documented TeleDrive subset; partial is never full AWS parity.",
   "operations": [

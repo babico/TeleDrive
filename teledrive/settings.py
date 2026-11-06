@@ -167,9 +167,13 @@ def load_settings(cfg: Any, config_path: str) -> ServiceSettings:
                      9000, "s3 port", minimum=1),
         bind_address=str(os.environ.get("TELEDRIVE_BIND_ADDRESS", "")
                          or DEFAULT_BIND_ADDRESS),
+        # 0 is meaningful, not invalid: the REST and S3 upload paths treat a
+        # limit below 1 as "uploads disabled by policy" (503 /
+        # EntityTooLarge). Rejecting 0 here would make that documented
+        # switch unreachable.
         rest_max_upload_bytes=_int(
             _cfg_or_env("rest_max_upload_bytes", "TELEDRIVE_REST_MAX_UPLOAD_BYTES", 2 * 1024**3),
-            2 * 1024**3, "rest_max_upload_bytes", minimum=1),
+            2 * 1024**3, "rest_max_upload_bytes", minimum=0),
         max_request_bytes=_int(
             _cfg_or_env("max_request_bytes", "TELEDRIVE_MAX_REQUEST_BYTES", 32 * 1024**2),
             32 * 1024**2, "max_request_bytes", minimum=1),

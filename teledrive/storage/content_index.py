@@ -81,6 +81,13 @@ def extract_text(path: Path, key: str) -> str | None:
             data = handle.read(MAX_INDEX_BYTES + 1)
         if not data:
             return ""
+        # Client-side encrypted payloads carry the browser crypto magic
+        # ("TDENC1" at offset 0) and MUST NOT be indexed: the "text" would
+        # be ciphertext decoded as replacement characters, which is both
+        # useless and a privacy leak into the search index. Reject on the
+        # magic before the binary probe.
+        if data.startswith(b"TDENC1"):
+            return None
         # A NUL byte in the head of the file means binary content.
         if b"\x00" in data[:4096]:
             return None

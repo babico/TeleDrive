@@ -262,11 +262,10 @@ def _db_credential_sets() -> list[tuple[str, int, str, str]] | None:
 def _credential_sets() -> list[tuple[str, int, str, str]]:
     """Parse one or more authorized Telegram API credential sets.
 
-    The deployment config (config.yaml) `storage.apis:` list is
-    authoritative. Without it, TELEDRIVE_STORAGE_MTPROTO_API_ID / _API_HASH
-    / _SESSION_FILE accept comma-separated lists of equal length (legacy
-    fallback). Each set owns its own session; account labels default to
-    mtproto-user, mtproto-user-2, ...
+    Resolution order: UI-managed sessions in SQL first, then the deployment
+    config (config.yaml) `storage.apis:` list. Each set owns its own session;
+    account labels default to mtproto-user, mtproto-user-2, ... There is no
+    environment-variable fallback here (an earlier docstring claimed one).
     """
     # DB-stored sessions take precedence (UI-managed).
     db_sets = _db_credential_sets()

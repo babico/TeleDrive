@@ -31,6 +31,15 @@ def bucket_quota(conn, bucket: str) -> tuple[int | None, int | None]:
     return (row[0], row[1]) if row else (None, None)
 
 
+def _is_missing_bucket_fk(exc: BaseException) -> bool:
+    """True when the write was rejected because its bucket row is gone."""
+    if not isinstance(exc, IntegrityError):
+        return False
+    text_value = str(getattr(exc, "orig", exc)).lower()
+    return ("foreign key" in text_value
+            or "1452" in text_value or "23503" in text_value)
+
+
 def set_bucket_quota(conn, bucket: str, max_size_bytes: int | None,
                      max_objects: int | None, now: int) -> None:
     """Set (or clear) a bucket's quota, creating the row when missing.
@@ -62,6 +71,12 @@ def set_bucket_quota(conn, bucket: str, max_size_bytes: int | None,
             ), values)
             if applied.rowcount != 1:
                 conn.connection.rollback()
+                # Distinguish "the bucket row is gone" (the cascading FK
+                # rejected the insert after a concurrent DeleteBucket) from
+                # a genuine surprise: the caller must answer 404, not 500.
+                if _is_missing_bucket_fk(exc):
+                    raise FileNotFoundError(
+                        "Bucket does not exist") from exc
                 raise RuntimeError("Bucket quota row disappeared during update")
     conn.commit()
 

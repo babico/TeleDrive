@@ -527,10 +527,29 @@ def verify_header_signature(request: Request, lookup_secret, permission: str, *,
         elif request.method in {"PUT", "POST"} and not (
             "content-md5" in signed or "x-amz-checksum-sha256" in signed
         ):
-            raise SigV4Error(
-                "XAmzContentSHA256Mismatch",
-                "Unsigned upload requires a signed Content-MD5 or SHA-256 checksum",
+            # A CreateMultipartUpload initiation carries NO body: the parts
+            # are uploaded (and checksummed) individually afterwards, so
+            # there is nothing for a payload digest to protect. Real clients
+            # (Cyberduck 9.6.0 among them) send ?uploads= with
+            # UNSIGNED-PAYLOAD and no checksum; refusing it broke every
+            # upload above their multipart threshold. Exempt only the
+            # zero-length initiation, matched by query selector AND an empty
+            # declared body — anything that can carry bytes still needs a
+            # digest.
+            initiation = (
+                "uploads" in request.query_params
+                # Exactly zero bytes must be DECLARED: a missing length can
+                # mean a chunked body, which would smuggle unverified bytes
+                # past the digest rule. Never admit that shape.
+                and request.headers.get("content-length", "").strip() == "0"
+                and "transfer-encoding" not in request.headers
             )
+            if not initiation:
+                raise SigV4Error(
+                    "XAmzContentSHA256Mismatch",
+                    "Unsigned upload requires a signed Content-MD5 or "
+                    "SHA-256 checksum",
+                )
     scope = f"{date}/{region}/{service}/aws4_request"
 
     def _to_sign(query: str) -> str:

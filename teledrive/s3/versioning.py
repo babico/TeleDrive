@@ -1,10 +1,13 @@
 """Safe, immutable S3 bucket-versioning compatibility.
 
 TeleDrive versions are always-on: every published object keeps its original
-VersionId and prior data. "Suspended" is supported as a real state: it turns
-deletes into unversioned-style removal of the current head (no delete marker)
-while the published history stays readable by VersionId; see
-``catalog_buckets.py`` and ``catalog_versions.py``.
+VersionId and prior data. "Suspended" is a real persisted state with the AWS
+null-version-slot contract: every suspended write occupies the single null
+slot and retires the previous null occupant (enabled-era versions stay as
+immutable noncurrent history), and a suspended DELETE inserts a delete marker
+carrying the null version ID — never an unversioned head removal. See
+``catalog_versions.py`` (``_publish_null_slot_uncommitted``,
+``_mark_null_slot_uncommitted``) and ``tests/s3/test_s3_versioning_submodes.py``.
 """
 from __future__ import annotations
 

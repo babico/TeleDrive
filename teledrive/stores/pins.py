@@ -33,11 +33,16 @@ def set(db: Database, bucket: str, account: str, now: int) -> None:
             # UPDATE would silently affect 0 rows and the caller would
             # believe a pin was set that never was.
             db.connection.rollback()
-            db.connection.execute(
+            applied = db.connection.execute(
                 update(bucket_account_pins)
                 .where(bucket_account_pins.c.bucket == bucket)
                 .values(**values)
             )
+            if applied.rowcount != 1:
+                # The bucket row is gone (cascading FK rejected the insert
+                # after a concurrent DeleteBucket): say so instead of
+                # returning as if a pin had been written.
+                raise FileNotFoundError("Bucket does not exist")
     db.commit()
 
 

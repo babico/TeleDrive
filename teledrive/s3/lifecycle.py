@@ -22,6 +22,8 @@ AbortIncompleteMultipartUpload/Expiration subset:
   version history (retaining media; GC-gated collection as above).
 * ``ExpiredObjectDeleteMarker`` - remove a delete marker that is the
   only remaining version of its key.
+* ``Filter`` - prefix, tag and object-size predicates (the two exclusive
+  bounds are byte counts in AWS's 0..5 TiB range), combined with ``And``.
 
 Object Lock rules are preserved: retained or legal-held versions are
 never expired, and alias sources (media another version still points at)
@@ -59,6 +61,9 @@ _MAX_NEWER_NONCURRENT = 1000
 _MAX_FILTER_TAGS = 10
 _MAX_TAG_KEY_BYTES = 128
 _MAX_TAG_VALUE_BYTES = 256
+# ObjectSizeGreaterThan/ObjectSizeLessThan are byte counts in AWS's
+# 0..5 TiB range; the filters themselves are exclusive bounds.
+_MAX_OBJECT_SIZE = 5 * 1024 ** 4
 # A Date-based rule fires when now >= date; bounds keep the stored epoch
 # seconds honest (no pre-1970 or far-future garbage).
 _MAX_DATE_EPOCH = 4102444800  # 2100-01-01T00:00:00Z
@@ -180,6 +185,38 @@ def _parse_tag(node) -> dict:
     return {"key": key, "value": value}
 
 
+def _size(value: str, label: str) -> int:
+    """An object-size bound in bytes: 0..5 TiB inclusive."""
+    if (not value.isascii() or not value.isdigit()
+            or len(value) > len(str(_MAX_OBJECT_SIZE))):
+        raise LifecycleError("InvalidArgument", f"Invalid {label}")
+    size = int(value)
+    if not 0 <= size <= _MAX_OBJECT_SIZE:
+        raise LifecycleError("InvalidArgument", f"{label} outside 0..5 TiB")
+    return size
+
+
+def _parse_sizes(group) -> tuple[int | None, int | None]:
+    """The optional size bounds of one Filter or And block.
+
+    A repeated element is a duplicate structural node (501), and the
+    pair must be an honest interval: ``GreaterThan < LessThan``.
+    """
+    bounds = {}
+    for label in ("ObjectSizeGreaterThan", "ObjectSizeLessThan"):
+        nodes = group[label]
+        if len(nodes) > 1:
+            raise LifecycleError("NotImplemented", f"Duplicate {label}", 501)
+        bounds[label] = _size(scalar(nodes[0]), label) if nodes else None
+    greater = bounds["ObjectSizeGreaterThan"]
+    less = bounds["ObjectSizeLessThan"]
+    if greater is not None and less is not None and greater >= less:
+        raise LifecycleError(
+            "InvalidArgument",
+            "ObjectSizeGreaterThan must be less than ObjectSizeLessThan")
+    return greater, less
+
+
 def _check_tag_conjunction(tags) -> None:
     """Parser-side bounds for a filter's tag conjunction: at most 10
     tags and no repeated key (a repeated key is an ambiguous
@@ -191,42 +228,55 @@ def _check_tag_conjunction(tags) -> None:
         raise LifecycleError("InvalidArgument", "Duplicate tag key")
 
 
-def _parse_filter(node) -> tuple[str, list[dict]]:
-    """A ``<Filter>`` block: one of Prefix, a single Tag, or an And
-    conjunction of an optional Prefix and 1..10 Tags.
+def _parse_filter(node) -> tuple[str, list[dict], int | None, int | None]:
+    """A ``<Filter>`` block: one of Prefix, a single Tag, one object-size
+    bound, or an And conjunction of an optional Prefix, 1..10 Tags and
+    the two object-size bounds.
 
-    Unknown filter contents (ObjectSize*, a second condition kind
-    directly under Filter, foreign namespaces) fail closed with 501
-    exactly like the rest of the rule grammar; known-but-invalid
-    combinations are InvalidArgument.
+    AWS accepts one condition directly under Filter; two conditions
+    (including both size bounds, or a Tag next to a Prefix) require an
+    ``And``. Unknown filter contents (foreign namespaces, unknown
+    elements) fail closed with 501 exactly like the rest of the rule
+    grammar; known-but-invalid combinations are InvalidArgument.
     """
-    group = children(node, {"Prefix", "Tag", "And"})
+    names = {"Prefix", "Tag", "And", "ObjectSizeGreaterThan",
+             "ObjectSizeLessThan"}
+    group = children(node, names)
     kinds = [name for name, nodes in group.items() if nodes]
     if len(kinds) != 1:
         raise LifecycleError(
-            "InvalidArgument", "Filter accepts one of Prefix, Tag or And")
+            "InvalidArgument",
+            "Filter accepts one of Prefix, Tag, And, ObjectSizeGreaterThan "
+            "or ObjectSizeLessThan")
     if group["Prefix"]:
         if group["Prefix"][0].attrib or len(group["Prefix"]) > 1:
             raise LifecycleError("NotImplemented", "Unsupported lifecycle rule", 501)
-        return scalar(group["Prefix"][0]), []
+        return scalar(group["Prefix"][0]), [], None, None
     if group["Tag"]:
         if len(group["Tag"]) > 1:
             raise LifecycleError(
                 "InvalidArgument",
                 "Multiple Tags require the And filter")
-        return "", [_parse_tag(group["Tag"][0])]
-    inner = children(group["And"][0], {"Prefix", "Tag"})
+        return "", [_parse_tag(group["Tag"][0])], None, None
+    if group["ObjectSizeGreaterThan"] or group["ObjectSizeLessThan"]:
+        # A single size bound may sit directly under Filter; the two
+        # bounds together require And (checked above by ``kinds``).
+        greater, less = _parse_sizes(group)
+        return "", [], greater, less
+    inner = children(group["And"][0], names - {"And"})
     prefix = ""
     if len(inner["Prefix"]) > 1:
         raise LifecycleError("NotImplemented", "Duplicate filter prefix", 501)
     if inner["Prefix"]:
         prefix = scalar(inner["Prefix"][0])
-    tags = [_parse_tag(node) for node in inner["Tag"]]
-    if not tags:
+    tags = [_parse_tag(tag) for tag in inner["Tag"]]
+    greater, less = _parse_sizes(inner)
+    if not tags and greater is None and less is None:
         raise LifecycleError(
-            "InvalidArgument", "And filter needs at least one Tag")
+            "InvalidArgument",
+            "And filter needs at least one Tag or object-size condition")
     _check_tag_conjunction(tags)
-    return prefix, tags
+    return prefix, tags, greater, less
 
 
 def _validate_tag_set(tags) -> list[dict]:
@@ -285,10 +335,11 @@ def parse_lifecycle_xml(body: bytes):
             raise LifecycleError("InvalidArgument", "Invalid or duplicate rule ID")
         ids.add(ident)
         prefix, tags = "", []
+        greater = less = None
         if group["Filter"]:
             if len(group["Filter"]) > 1:
                 raise LifecycleError("NotImplemented", "Duplicate Filter", 501)
-            prefix, tags = _parse_filter(group["Filter"][0])
+            prefix, tags, greater, less = _parse_filter(group["Filter"][0])
         if len(prefix.encode("utf-8")) > 1024:
             raise LifecycleError("InvalidArgument", "Lifecycle prefix too long")
         rule = {
@@ -296,6 +347,12 @@ def parse_lifecycle_xml(body: bytes):
             "abort_days": None, "expiration": None, "transitions": [],
             "noncurrent_transitions": [], "noncurrent_expiration": None,
         }
+        # Only present bounds are stored, so a rule without a size filter
+        # keeps the exact canonical shape written by earlier releases.
+        if greater is not None:
+            rule["size_greater_than"] = greater
+        if less is not None:
+            rule["size_less_than"] = less
         if group["AbortIncompleteMultipartUpload"]:
             if len(group["AbortIncompleteMultipartUpload"]) > 1:
                 raise LifecycleError("NotImplemented", "Duplicate abort action", 501)
@@ -322,15 +379,16 @@ def parse_lifecycle_xml(body: bytes):
                     raise LifecycleError("InvalidArgument",
                                          "ExpiredObjectDeleteMarker must be boolean")
                 marker = marker_text == "true"
-                if marker and tags:
-                    # A delete marker carries no tags, so a tag filter can
-                    # never match one: the combination is rejected up front
-                    # (AWS answers InvalidRequest for it) rather than
+                if marker and (tags or greater is not None
+                               or less is not None):
+                    # A delete marker carries neither tags nor a content
+                    # size, so a tag or size filter can never match one:
+                    # the combination is rejected up front rather than
                     # silently never firing.
                     raise LifecycleError(
                         "InvalidArgument",
                         "ExpiredObjectDeleteMarker cannot be combined with "
-                        "a tag filter")
+                        "a tag or object-size filter")
             rule["expiration"] = {
                 "days": (_age(scalar(expiration["Days"]), "expiration")
                          if "Days" in expiration else None),
@@ -411,7 +469,8 @@ def _normalize_rule(rule):
                    "expired_marker"}
     canonical_keys = {"id", "status", "prefix", "tags", "abort_days",
                       "expiration", "transitions", "noncurrent_transitions",
-                      "noncurrent_expiration"}
+                      "noncurrent_expiration", "size_greater_than",
+                      "size_less_than"}
     if not {"id", "status", "prefix"} <= set(rule):
         raise ValueError()
     if not isinstance(rule["id"], str) or not 1 <= len(
@@ -442,6 +501,17 @@ def _normalize_rule(rule):
         }
     if not set(rule) <= canonical_keys:
         raise ValueError()
+    sizes = {}
+    for key in ("size_greater_than", "size_less_than"):
+        value = rule.get(key)
+        if value is not None and (type(value) is not int
+                                  or not 0 <= value <= _MAX_OBJECT_SIZE):
+            raise ValueError()
+        sizes[key] = value
+    if (sizes["size_greater_than"] is not None
+            and sizes["size_less_than"] is not None
+            and sizes["size_greater_than"] >= sizes["size_less_than"]):
+        raise ValueError()
     normalized = {
         "id": rule["id"], "status": rule["status"], "prefix": rule["prefix"],
         "tags": tags,
@@ -451,6 +521,8 @@ def _normalize_rule(rule):
         "noncurrent_transitions": list(
             rule.get("noncurrent_transitions") or []),
         "noncurrent_expiration": rule.get("noncurrent_expiration"),
+        "size_greater_than": sizes["size_greater_than"],
+        "size_less_than": sizes["size_less_than"],
     }
     if normalized["abort_days"] is not None:
         if (type(normalized["abort_days"]) is not int
@@ -470,7 +542,9 @@ def _normalize_rule(rule):
         if date is not None and (type(date) is not int
                                  or not 0 < date < _MAX_DATE_EPOCH):
             raise ValueError()
-        if expiration.get("expired_marker") and tags:
+        if expiration.get("expired_marker") and (
+                tags or sizes["size_greater_than"] is not None
+                or sizes["size_less_than"] is not None):
             raise ValueError()
     for transition in normalized["transitions"]:
         if (not isinstance(transition, dict)
@@ -521,22 +595,40 @@ def lifecycle_xml(rules):
         ET.SubElement(el, "ID").text = rule["id"]
         ET.SubElement(el, "Status").text = rule["status"]
         fil = ET.SubElement(el, "Filter")
-        if rule["tags"]:
-            # Filter accepts ONE of Prefix, Tag or And, so: a lone Tag
-            # sits directly under Filter; a prefix, or more than one
-            # tag, requires the And conjunction.
-            if len(rule["tags"]) == 1 and not rule["prefix"]:
-                parent = fil
-            else:
-                parent = ET.SubElement(fil, "And")
-                if rule["prefix"]:
-                    ET.SubElement(parent, "Prefix").text = rule["prefix"]
-            for tag in rule["tags"]:
+        prefix, tags = rule["prefix"], rule["tags"]
+        greater = rule.get("size_greater_than")
+        less = rule.get("size_less_than")
+        sized = greater is not None or less is not None
+        if not tags and not sized:
+            ET.SubElement(fil, "Prefix").text = prefix
+        elif not prefix and not sized and len(tags) == 1:
+            # A lone Tag sits directly under Filter.
+            node = ET.SubElement(fil, "Tag")
+            ET.SubElement(node, "Key").text = tags[0]["key"]
+            ET.SubElement(node, "Value").text = tags[0]["value"]
+        elif not tags and not prefix and sized and (greater is None
+                                                    or less is None):
+            # A lone size bound also sits directly under Filter.
+            label, value = (("ObjectSizeGreaterThan", greater)
+                            if greater is not None
+                            else ("ObjectSizeLessThan", less))
+            ET.SubElement(fil, label).text = str(value)
+        else:
+            # The remaining combinations are conjunctions: prefix and/or
+            # several tags and/or the size interval. AWS element order is
+            # Prefix, Tag, ObjectSizeGreaterThan, ObjectSizeLessThan.
+            parent = ET.SubElement(fil, "And")
+            if prefix:
+                ET.SubElement(parent, "Prefix").text = prefix
+            for tag in tags:
                 node = ET.SubElement(parent, "Tag")
                 ET.SubElement(node, "Key").text = tag["key"]
                 ET.SubElement(node, "Value").text = tag["value"]
-        else:
-            ET.SubElement(fil, "Prefix").text = rule["prefix"]
+            if greater is not None:
+                ET.SubElement(parent, "ObjectSizeGreaterThan").text = \
+                    str(greater)
+            if less is not None:
+                ET.SubElement(parent, "ObjectSizeLessThan").text = str(less)
         if rule["abort_days"] is not None:
             abort = ET.SubElement(el, "AbortIncompleteMultipartUpload")
             ET.SubElement(abort, "DaysAfterInitiation").text = \
@@ -636,6 +728,23 @@ class BucketLifecycleStore:
             object_tags.c.object_id == object_id)).all())
         return all(present.get(tag["key"]) == tag["value"] for tag in tags)
 
+    @staticmethod
+    def _matches_size(size, greater, less) -> bool:
+        """True when the object's size satisfies the rule's exclusive
+        bounds.
+
+        A missing or non-integer size fails closed: it never matches a
+        size-bounded rule (a filter must never be guessed past)."""
+        if greater is None and less is None:
+            return True
+        if size is None or type(size) is not int:
+            return False
+        if greater is not None and size <= greater:
+            return False
+        if less is not None and size >= less:
+            return False
+        return True
+
     def _archive_queue(self):
         """The physical archive queue, or None when unavailable.
 
@@ -672,7 +781,7 @@ class BucketLifecycleStore:
         """Published, unrevoked, ready NONCURRENT versions of the bucket.
 
         Returns rows of (object_id, object_key, key_hash, updated_at,
-        committed_ns) ordered by age; the caller applies per-key
+        committed_ns, size) ordered by age; the caller applies per-key
         NewerNoncurrentVersions ranking and age cutoffs.
         """
         from teledrive.storage.catalog import published_versions, removed_versions
@@ -692,7 +801,7 @@ class BucketLifecycleStore:
         return self.db.connection.execute(
             select(objects.c.id, objects.c.object_key,
                    published_versions.c.key_hash, objects.c.updated_at,
-                   published_versions.c.committed_ns)
+                   published_versions.c.committed_ns, objects.c.size)
             .where(*conditions)
             .order_by(objects.c.updated_at, objects.c.id)
         ).all()
@@ -720,7 +829,7 @@ class BucketLifecycleStore:
     # -- actions ------------------------------------------------------------
 
     def _transition_due_objects(self, bucket, transition, *, prefix, tags,
-                                now, limit):
+                                greater, less, now, limit):
         """Current heads past the transition age move to the archive class
         and are queued for a verified cold copy (an additional copy;
         nothing is moved or deleted)."""
@@ -739,11 +848,13 @@ class BucketLifecycleStore:
             conditions.append(objects.c.object_key.startswith(
                 prefix, autoescape=True))
         rows = self.db.connection.execute(
-            select(objects.c.id, objects.c.object_key)
+            select(objects.c.id, objects.c.object_key, objects.c.size)
             .where(*conditions)
             .order_by(objects.c.updated_at).limit(limit)).all()
         changed = []
-        for object_id, key in rows:
+        for object_id, key, size in rows:
+            if not self._matches_size(size, greater, less):
+                continue
             if tags and not self._matches_tags(self.db, object_id, tags):
                 continue
             # Head race: a newer version may have been published since the
@@ -764,8 +875,8 @@ class BucketLifecycleStore:
         self._enqueue_archive(changed)
         return len(changed)
 
-    def _transition_noncurrent(self, bucket, spec, *, prefix, tags, now,
-                               limit):
+    def _transition_noncurrent(self, bucket, spec, *, prefix, tags,
+                               greater, less, now, limit):
         """Noncurrent versions past NoncurrentDays (minus the newest
         NewerNoncurrentVersions per key) move to the archive class."""
         if limit <= 0:
@@ -775,8 +886,10 @@ class BucketLifecycleStore:
         target = spec["storage_class"]
         cutoff = now - spec["days"] * 86400
         changed = []
-        for object_id, key, _key_hash, updated_at, _committed in rows:
+        for object_id, key, _key_hash, updated_at, _committed, size in rows:
             if object_id in exempt or int(updated_at) > cutoff:
+                continue
+            if not self._matches_size(size, greater, less):
                 continue
             if tags and not self._matches_tags(self.db, object_id, tags):
                 continue
@@ -806,7 +919,7 @@ class BucketLifecycleStore:
         return len(changed)
 
     def _expire_noncurrent_versions(self, bucket, spec, *, prefix, tags,
-                                    now, limit):
+                                    greater, less, now, limit):
         """Revoke due noncurrent versions from version history.
 
         Logical only while GC is off: the media stays retained. Locked or
@@ -826,10 +939,12 @@ class BucketLifecycleStore:
         rows = self._noncurrent_versions(bucket, prefix=prefix)
         exempt = self._newer_exempt(rows, spec.get("newer"))
         revoked = []
-        for object_id, key, _key_hash, updated_at, _committed in rows:
+        for object_id, key, _key_hash, updated_at, _committed, size in rows:
             if object_id in exempt:
                 continue
             if cutoff is not None and int(updated_at) > cutoff:
+                continue
+            if not self._matches_size(size, greater, less):
                 continue
             if tags and not self._matches_tags(self.db, object_id, tags):
                 continue
@@ -951,14 +1066,16 @@ class BucketLifecycleStore:
                         return count
                     prefix = rule["prefix"]
                     tags = rule.get("tags") or []
+                    greater = rule.get("size_greater_than")
+                    less = rule.get("size_less_than")
                     if rule["expiration"] is not None:
                         # Expire due CURRENT objects: a logical delete
                         # marker now, physical media via the GC queue
                         # (grace-fenced) when GC is enabled.
                         expired = self._expire_due_objects(
                             bucket, expiration=rule["expiration"],
-                            prefix=prefix, tags=tags, now=now,
-                            limit=remaining)
+                            prefix=prefix, tags=tags, greater=greater,
+                            less=less, now=now, limit=remaining)
                         for object_id in expired:
                             if gc_enabled and gcx is not None:
                                 gcx.enqueue([object_id],
@@ -971,15 +1088,18 @@ class BucketLifecycleStore:
                     for transition in rule["transitions"]:
                         count += self._transition_due_objects(
                             bucket, transition, prefix=prefix, tags=tags,
+                            greater=greater, less=less,
                             now=now, limit=max(0, limit - count))
                     for spec in rule["noncurrent_transitions"]:
                         count += self._transition_noncurrent(
-                            bucket, spec, prefix=prefix, tags=tags, now=now,
+                            bucket, spec, prefix=prefix, tags=tags,
+                            greater=greater, less=less, now=now,
                             limit=max(0, limit - count))
                     if rule["noncurrent_expiration"] is not None:
                         revoked = self._expire_noncurrent_versions(
                             bucket, rule["noncurrent_expiration"],
-                            prefix=prefix, tags=tags, now=now,
+                            prefix=prefix, tags=tags, greater=greater,
+                            less=less, now=now,
                             limit=max(0, limit - count))
                         for object_id in revoked:
                             if gc_enabled and gcx is not None:
@@ -1014,7 +1134,7 @@ class BucketLifecycleStore:
             raise
 
     def _expire_due_objects(self, bucket, *, expiration, prefix: str,
-                            tags, now: int, limit: int):
+                            tags, greater, less, now: int, limit: int):
         """Create delete markers for due current objects; returns the
         previously-current object ids whose media is now reclaimable.
 
@@ -1038,7 +1158,8 @@ class BucketLifecycleStore:
         if days is not None:
             conditions.append(objects.c.updated_at <= now - days * 86400)
         rows = self.db.connection.execute(
-            select(objects.c.id, objects.c.object_key, objects.c.updated_at)
+            select(objects.c.id, objects.c.object_key, objects.c.updated_at,
+                   objects.c.size)
             .where(*conditions)
             .order_by(objects.c.updated_at).limit(limit)
         ).all()
@@ -1046,7 +1167,9 @@ class BucketLifecycleStore:
             rows = [row for row in rows
                     if row[1].startswith(prefix)]
         expired = []
-        for object_id, key, _updated in rows:
+        for object_id, key, _updated, size in rows:
+            if not self._matches_size(size, greater, less):
+                continue
             if tags and not self._matches_tags(self.db, object_id, tags):
                 continue
             try:

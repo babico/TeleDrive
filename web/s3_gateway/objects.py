@@ -412,6 +412,13 @@ async def _handle_copy_object(ctx: _S3RequestContext) -> Response:
                         source_item.id, start=range_start,
                         end=range_end + 1):
                     out.write(piece)
+            # A ranged copy stages REAL bytes, so the destination must obey
+            # the same per-bucket quota as a PUT. Without this guard the
+            # copy path was the one way to write past a quota.
+            quota_error = _quota_guard(ctx.db, bucket, key,
+                                       range_end - range_start + 1)
+            if quota_error is not None:
+                return quota_error
             item = await engine.put_file(bucket, key, stage, dedup=False)
             if metadata_directive == "REPLACE" and copy_properties:
                 ObjectMetadataStore(catalog).attach_uncommitted(

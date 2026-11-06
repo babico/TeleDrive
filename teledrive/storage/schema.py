@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -68,6 +68,9 @@ LOCK_TIMEOUT_SECONDS = 30.0
 # brand-new engine must never inherit a stale "already migrated" verdict.
 _verified_engines: "weakref.WeakSet[Engine]" = weakref.WeakSet()
 _verify_lock = threading.RLock()
+
+# SQLite engines whose connections already enable foreign-key enforcement.
+_fk_enabled_engines: "weakref.WeakSet[Engine]" = weakref.WeakSet()
 
 
 @dataclass(frozen=True)
@@ -551,6 +554,319 @@ def _step_archive_manifests(ctx: SchemaContext) -> None:
         index.create(ctx.engine, checkfirst=True)
 
 
+# ---------------------------------------------------------------------------
+# Step 31: bucket-name-keyed configuration cascades from storage_buckets
+# ---------------------------------------------------------------------------
+#
+# ``BucketAdminMixin.delete_bucket`` used to sweep these tables explicitly
+# before deleting the bucket row.  A configuration write whose existence
+# check ran in an earlier transaction could still commit after the sweep,
+# leaving a row for a bucket that no longer existed (and silently reviving
+# on a same-name re-create).  An ON DELETE CASCADE foreign key makes the
+# bucket DELETE itself remove every configuration row atomically, and makes
+# a later insert fail instead of orphaning.
+#
+# Each entry is ``(table, column)``.  The list is deliberately explicit:
+# a future bucket-scoped table must be added here (and gets a new step,
+# because this one has already shipped on migrated databases).
+
+_BUCKET_FK_TABLES: tuple[tuple[str, str], ...] = (
+    # Swallowed by the old sweep loop in catalog_buckets.delete_bucket.
+    ("storage_bucket_tags", "bucket"),
+    ("storage_bucket_lifecycle", "bucket"),
+    ("storage_bucket_cors", "bucket"),
+    ("storage_website_configs", "bucket"),
+    ("storage_metadata_journal", "bucket"),
+    ("storage_metadata_configs", "bucket"),
+    ("storage_bucket_acl_grants", "bucket"),
+    ("storage_bucket_policy", "bucket"),
+    ("storage_bucket_abac", "bucket"),
+    ("storage_bucket_encryption", "bucket"),
+    ("storage_replication_configs", "bucket"),
+    ("storage_tiering_configs", "bucket"),
+    ("storage_report_configs", "bucket"),
+    ("storage_notification_configs", "bucket"),
+    ("storage_logging_configs", "bucket"),
+    ("bucket_quotas", "bucket"),
+    ("bucket_account_pins", "bucket"),
+    ("share_links", "bucket"),
+    ("storage_object_acl_grants", "bucket"),
+    # Not swept by the old code (bucket deletion refuses object history),
+    # but bucket-name-keyed all the same: the cascade keeps a stray head
+    # from outliving its bucket.
+    ("storage_object_heads", "bucket"),
+)
+
+_BUCKET_TABLE = "storage_buckets"
+_BUCKET_KEY = "name"
+
+
+def _bucket_fk_is_cascade(engine: Engine, table: str, column: str) -> bool:
+    """True when ``table.column`` already references the bucket with CASCADE."""
+    dialect = engine.dialect.name
+    inspector = inspect(engine)
+    for fk in inspector.get_foreign_keys(table):
+        if fk.get("referred_table") != _BUCKET_TABLE:
+            continue
+        if column not in (fk.get("constrained_columns") or []):
+            continue
+        if (fk.get("options") or {}).get("ondelete", "").upper() == "CASCADE":
+            return True
+    if dialect == "sqlite":
+        # Some SQLite drivers omit FK options from the inspector; the
+        # PRAGMA is authoritative for the on_delete rule.
+        preparer = engine.dialect.identifier_preparer
+        with engine.connect() as connection:
+            rows = connection.exec_driver_sql(
+                f"PRAGMA foreign_key_list({preparer.quote(table)})"  # nosec B608
+            ).fetchall()
+        return any(
+            row[2] == _BUCKET_TABLE and row[3] == column
+            and (row[6] or "").upper() == "CASCADE"
+            for row in rows)
+    if dialect in ("postgresql", "mysql"):
+        # The inspector normally reports options, but not every reflected
+        # constraint shape carries them; the catalog is authoritative and
+        # keeps a re-run a true no-op.
+        schema = "DATABASE()" if dialect == "mysql" else "current_schema()"
+        with engine.connect() as connection:
+            rows = connection.execute(text(
+                "SELECT rc.delete_rule "
+                "FROM information_schema.key_column_usage AS kcu "
+                "JOIN information_schema.referential_constraints AS rc "
+                "  ON rc.constraint_schema = kcu.constraint_schema "
+                " AND rc.constraint_name = kcu.constraint_name "
+                f"WHERE kcu.table_schema = {schema} "  # nosec B608 - fixed literal
+                "  AND kcu.table_name = :table "
+                "  AND kcu.column_name = :column "
+                "  AND kcu.referenced_table_name = 'storage_buckets'"
+            ), {"table": table, "column": column}).fetchall()
+        return any((row[0] or "").upper() == "CASCADE" for row in rows)
+    return False
+
+
+def _delete_orphan_config_rows(engine: Engine, table: str, column: str) -> None:
+    """Drop rows whose bucket is already gone (a pre-migration orphan).
+
+    These are exactly the rows the old sweep raced with; they cannot be
+    referenced by any live bucket, and an FK add would fail on them.  The
+    delete is bounded to one table and runs in its own transaction.
+    """
+    preparer = engine.dialect.identifier_preparer
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"DELETE FROM {preparer.quote(table)} "  # nosec B608
+            f"WHERE {preparer.quote(column)} NOT IN "
+            f"(SELECT {preparer.quote(_BUCKET_KEY)} FROM "
+            f"{preparer.quote(_BUCKET_TABLE)})"
+        )
+
+
+def _sqlite_rebuild_bucket_fk(engine: Engine, table: str, column: str) -> None:
+    """SQLite cannot ALTER a foreign key: rebuild the table in one transaction.
+
+    Standard SQLite table rebuild, wrapped in an explicit transaction so an
+    interrupted migration rolls back to the old table (SQLite DDL is
+    transactional).  ``PRAGMA foreign_keys=OFF`` is required for the
+    create/copy/drop/rename sequence and is restored afterwards.  Columns,
+    primary key, server defaults, non-bucket foreign keys, unique
+    constraints and indexes are reproduced from live reflection, so no row
+    or index is lost.  The step is idempotent: it only runs when the live
+    FK is not already CASCADE.
+    """
+    from sqlalchemy import (Column, ForeignKeyConstraint, MetaData, String,
+                            Table, UniqueConstraint)
+    from sqlalchemy.schema import CreateTable
+
+    inspector = inspect(engine)
+    columns = inspector.get_columns(table)
+    primary_key = set(
+        inspector.get_pk_constraint(table).get("constrained_columns") or [])
+    foreign_keys = inspector.get_foreign_keys(table)
+    indexes = inspector.get_indexes(table)
+    uniques = inspector.get_unique_constraints(table)
+
+    temp_table = f"_teledrive_fk_{table}"
+    metadata = MetaData()
+    # Referenced table declared in the same MetaData so the FK can be
+    # compiled; it is not part of the CREATE TABLE issued below.
+    Table(_BUCKET_TABLE, metadata,
+          Column(_BUCKET_KEY, String(63), primary_key=True))
+    rebuilt_columns = []
+    for reflected in columns:
+        default = reflected.get("default")
+        rebuilt_columns.append(Column(
+            reflected["name"],
+            reflected["type"],
+            primary_key=reflected["name"] in primary_key,
+            nullable=reflected.get("nullable", True),
+            server_default=default if default is not None else None,
+        ))
+    rebuilt = Table(temp_table, metadata, *rebuilt_columns)
+    for fk in foreign_keys:
+        constrained = fk.get("constrained_columns") or []
+        referred = fk.get("referred_table")
+        if referred == _BUCKET_TABLE and constrained == [column]:
+            continue  # replaced by the cascade constraint below
+        rebuilt.append_constraint(ForeignKeyConstraint(
+            constrained,
+            [f"{referred}.{name}"
+             for name in (fk.get("referred_columns") or [])],
+            name=fk.get("name"),
+        ))
+    rebuilt.append_constraint(ForeignKeyConstraint(
+        [column], [f"{_BUCKET_TABLE}.{_BUCKET_KEY}"],
+        name=f"fk_{table}_{column}_cascade", ondelete="CASCADE"))
+    for unique in uniques:
+        constrained = unique.get("column_names") or []
+        if unique.get("name") and constrained:
+            rebuilt.append_constraint(UniqueConstraint(
+                *constrained, name=unique["name"]))
+
+    preparer = engine.dialect.identifier_preparer
+    quote = preparer.quote
+    quoted_table = quote(table)
+    quoted_temp = quote(temp_table)
+    column_list = ", ".join(quote(c["name"]) for c in columns)
+
+    raw = engine.raw_connection()
+    dbapi = getattr(raw, "driver_connection", raw)
+    previous_isolation = dbapi.isolation_level
+    try:
+        dbapi.isolation_level = None  # explicit BEGIN below
+        cursor = dbapi.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.execute(f"DROP TABLE IF EXISTS {quoted_temp}")
+            cursor.execute(str(CreateTable(rebuilt).compile(dialect=engine.dialect)))
+            # Remove pre-migration orphans before the rows change table.
+            cursor.execute(
+                f"DELETE FROM {quoted_table} "  # nosec B608
+                f"WHERE {quote(column)} NOT IN "
+                f"(SELECT {quote(_BUCKET_KEY)} FROM {quote(_BUCKET_TABLE)})")
+            cursor.execute(
+                f"INSERT INTO {quoted_temp} ({column_list}) "  # nosec B608
+                f"SELECT {column_list} FROM {quoted_table}")
+            cursor.execute(f"DROP TABLE {quoted_table}")
+            cursor.execute(
+                f"ALTER TABLE {quoted_temp} RENAME TO {quoted_table}")
+            for index in indexes:
+                names = index.get("column_names") or []
+                if not names or any(name is None for name in names):
+                    # Expression indexes are not used by these tables; a
+                    # silent skip would lose an index, so make it loud.
+                    _LOGGER.warning(
+                        "schema: not rebuilding unused SQLite expression "
+                        "index %s on %s", index.get("name"), table)
+                    continue
+                unique_sql = "UNIQUE " if index.get("unique") else ""
+                cursor.execute(
+                    f"CREATE {unique_sql}INDEX {quote(index['name'])} "  # nosec B608
+                    f"ON {quoted_table} "
+                    f"({', '.join(quote(name) for name in names)})")
+            cursor.execute("COMMIT")
+        except BaseException:
+            cursor.execute("ROLLBACK")
+            raise
+        finally:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    finally:
+        dbapi.isolation_level = previous_isolation
+        raw.close()
+
+
+def _add_bucket_fk_constraint(engine: Engine, table: str, column: str) -> None:
+    """PostgreSQL/MySQL: replace the bucket FK with one that cascades.
+
+    Adding a constraint is idempotent (a live CASCADE FK short-circuits in
+    the caller) and atomic per statement; a crash between DROP and ADD
+    leaves the table without a bucket FK, which the next start repairs.
+    MySQL requires the child column to have an index and matching string
+    length, so both are repaired first.
+    """
+    preparer = engine.dialect.identifier_preparer
+    quote = preparer.quote
+    inspector = inspect(engine)
+    columns = {c["name"]: c for c in inspector.get_columns(table)}
+    dialect = engine.dialect.name
+
+    if dialect == "mysql":
+        reflected = columns.get(column)
+        length = getattr(reflected["type"], "length", None) if reflected else None
+        if length is not None and length != 63:
+            # bucket names are validated to 63 characters; MySQL needs the
+            # child and parent string types to match exactly for an FK.
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {quote(table)} MODIFY "  # nosec B608
+                    f"{quote(column)} VARCHAR(63) NOT NULL")
+        inspector = inspect(engine)
+        indexed = (
+            (inspector.get_pk_constraint(table).get("constrained_columns") or [None])[0]
+            == column
+            or any(
+                (index.get("column_names") or [None])[0] == column
+                for index in inspector.get_indexes(table)))
+        if not indexed:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"CREATE INDEX {quote(f'ix_{table}_{column}')} "  # nosec B608
+                    f"ON {quote(table)} ({quote(column)})")
+
+    _delete_orphan_config_rows(engine, table, column)
+
+    inspector = inspect(engine)
+    for fk in inspector.get_foreign_keys(table):
+        if fk.get("referred_table") != _BUCKET_TABLE:
+            continue
+        if column not in (fk.get("constrained_columns") or []):
+            continue
+        name = fk.get("name")
+        if not name:  # pragma: no cover - every real backend names its FKs
+            continue
+        with engine.begin() as connection:
+            if dialect == "mysql":
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {quote(table)} DROP FOREIGN KEY {quote(name)}")
+            else:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {quote(table)} DROP CONSTRAINT {quote(name)}")
+
+    constraint = f"fk_{table}_{column}_cascade"
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {quote(table)} ADD CONSTRAINT {quote(constraint)} "  # nosec B608
+            f"FOREIGN KEY ({quote(column)}) REFERENCES "
+            f"{quote(_BUCKET_TABLE)} ({quote(_BUCKET_KEY)}) ON DELETE CASCADE")
+
+
+def _step_bucket_fk_cascade(ctx: SchemaContext) -> None:
+    """Give every bucket-name-keyed configuration table a cascading FK.
+
+    The step is idempotent and skips tables that do not exist on older
+    deployments.  SQLite rebuilds each table (it cannot alter a foreign
+    key); PostgreSQL and MySQL drop any existing non-cascading bucket FK
+    and add a named ``ON DELETE CASCADE`` one.  Existing rows and indexes
+    are preserved; orphan rows (for already-deleted buckets) are removed
+    first because a live FK cannot be validated over them.
+    """
+    engine = ctx.engine
+    for table, column in _BUCKET_FK_TABLES:
+        if not inspect(engine).has_table(table):
+            _LOGGER.info("schema: %s absent, skipping bucket FK cascade", table)
+            continue
+        if _bucket_fk_is_cascade(engine, table, column):
+            continue
+        if engine.dialect.name == "sqlite":
+            _sqlite_rebuild_bucket_fk(engine, table, column)
+        else:
+            _add_bucket_fk_constraint(engine, table, column)
+        _LOGGER.info("schema: %s.%s now cascades from %s",
+                     table, column, _BUCKET_TABLE)
+
+
 _STEPS: list[tuple[str, Step]] = [
     ("core", _step_core),
     ("verification_attempts", _step_verification_attempts),
@@ -582,6 +898,7 @@ _STEPS: list[tuple[str, Step]] = [
     ("directory_bucket_type", _step_directory_bucket_type),
     ("s3_express_sessions", _step_s3_express_sessions),
     ("archive_manifests", _step_archive_manifests),
+    ("bucket_fk_cascade", _step_bucket_fk_cascade),
 ]
 
 # Bump by appending a step; never reorder or remove one.
@@ -733,12 +1050,39 @@ def _null_lock() -> Iterator[None]:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _enable_sqlite_foreign_keys(engine: Engine) -> None:
+    """Enable SQLite foreign-key enforcement on every connection.
+
+    SQLite defaults to ``PRAGMA foreign_keys=OFF``, which makes a declared
+    ``ON DELETE CASCADE`` inert.  The listener is installed before the
+    engine hands out its first connection (``_build_engine`` calls
+    ``ensure_schema`` immediately after ``create_engine``) and only once
+    per engine.  Other dialects enforce foreign keys natively.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    with _verify_lock:
+        if engine in _fk_enabled_engines:
+            return
+
+        def _turn_on(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
+
+        event.listen(engine, "connect", _turn_on)
+        _fk_enabled_engines.add(engine)
+
+
 def ensure_schema(engine: Engine) -> bool:
     """Apply every pending idempotent migration, at most once per engine.
 
     Returns True when this call actually ran the DDL steps.  Costs one
     in-memory lookup on every call after the first for an engine.
     """
+    _enable_sqlite_foreign_keys(engine)
     with _verify_lock:
         if engine in _verified_engines:
             return False

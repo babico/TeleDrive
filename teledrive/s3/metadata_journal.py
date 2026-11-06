@@ -685,6 +685,16 @@ class MetadataConfigurationStore:
             self.db.commit()
         except IntegrityError as exc:
             self.db.connection.rollback()
+            # Two different constraint failures land here: the primary key
+            # (a configuration already exists) and the cascading bucket
+            # foreign key (the bucket was deleted between the existence
+            # check and this insert). Reporting the second as "already
+            # exists" would send the caller chasing a row that is not there.
+            text_value = str(getattr(exc, "orig", exc)).lower()
+            if ("foreign key" in text_value
+                    or "1452" in text_value or "23503" in text_value):
+                raise MetadataConfigurationError(
+                    "NoSuchBucket", "Bucket does not exist", 404) from exc
             raise MetadataConfigurationError(
                 CONFIG_ALREADY_EXISTS,
                 "A metadata configuration already exists for this bucket",

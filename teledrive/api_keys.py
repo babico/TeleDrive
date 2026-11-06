@@ -129,8 +129,13 @@ def expand_scopes(scopes) -> frozenset[str]:
     granted: set[str] = set()
     for scope in scopes or ():
         if scope == "admin:*":
-            # The wildcard covers the live route table, resolved now so a
-            # later-added route cannot retroactively widen an existing key.
+            # The wildcard covers the LIVE route table and is re-resolved on
+            # every check, so a route added later DOES extend an existing
+            # admin:* key. That is deliberate: the stored scope is the
+            # wildcard, not a snapshot, and a full-access key that silently
+            # lost access to a new admin page would be the greater surprise.
+            # A key that must not grow with the route table is granted
+            # explicit per-route permissions instead of the wildcard.
             granted.update(route_permissions())
             granted.update(ENDPOINT_PERMISSIONS)
         elif scope in ENDPOINT_PERMISSIONS or is_route_permission(scope):

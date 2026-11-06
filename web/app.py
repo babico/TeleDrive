@@ -19,6 +19,7 @@ until the bootstrap rotation completes). See ``docs/operate/upgrade.md``.
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import urlsplit
 import os
 import gzip
 import shutil
@@ -669,7 +670,21 @@ async def security_middleware(request: Request, call_next):
 async def _trusted_host_middleware(request: Request, call_next):
     # ALLOWED_HOSTS reloads from config.yaml at runtime; resolve it per
     # request instead of capturing the import-time default.
-    host = (request.headers.get("host") or "").split(":")[0]
+    #
+    # The host must be parsed properly: a bracketed IPv6 literal
+    # (``Host: [::1]:8080``) has colons inside the brackets, so splitting on
+    # the first colon produced "[" and the documented default allowlist
+    # entry ``[::1]`` could never match. ``urlsplit`` handles both shapes.
+    raw_host = request.headers.get("host") or ""
+    try:
+        host = urlsplit(f"//{raw_host}").hostname or ""
+    except ValueError:
+        return JSONResponse(status_code=400,
+                            content={"detail": "Invalid host header"})
+    # Keep the bracketed form for IPv6 so it compares with the allowlist
+    # entries as an operator writes them.
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     if host and host not in ALLOWED_HOSTS:
         return JSONResponse(status_code=400, content={"detail": "Invalid host header"})
     return await call_next(request)

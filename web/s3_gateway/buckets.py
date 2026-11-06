@@ -88,6 +88,7 @@ from teledrive.s3.report_configs import (
     ReportConfigStore, config_xml as report_config_xml,
     list_xml as report_list_xml, parse_document as parse_report_document,
 )
+from teledrive.s3.object_metadata import signed_header_names
 from teledrive.s3.sigv4 import SigV4Error
 from teledrive.s3.tagging import BucketTagStore, ObjectTagStore, TaggingError
 from teledrive.s3.tiering import (
@@ -518,13 +519,15 @@ async def _handle_bucket_metadata_configuration(
 
 
 async def _handle_bucket_encryption(ctx: _S3RequestContext) -> Response:
-    """Bucket encryption configuration (SSE-C only).
+    """Bucket default-encryption configuration.
 
-    There is no bucket-level default key: SSE-C keys are supplied per
-    request and never retained.  GET returns the honest stored (empty) rule
-    set or a 404; PUT accepts only an empty ServerSideEncryptionConfiguration;
-    any AES256 (SSE-S3) or aws:kms default is rejected 501 because no
-    server-side key exists for data the client did not encrypt.
+    SSE-C keys are supplied per request and never retained, so they never
+    appear here. An empty ``ServerSideEncryptionConfiguration`` disables the
+    default. An ``AES256`` rule is accepted only when
+    ``storage.encryption: envelope`` is enabled (the deployment then holds a
+    server-side KEK derived from the master key); without it the honest
+    answer is 501 because no server-side key exists. ``aws:kms`` is always
+    501: there is no KMS here. Exactly one rule is accepted.
     """
     request, bucket, catalog = ctx.request, ctx.bucket, ctx.catalog
     if bucket not in catalog.list_buckets():
@@ -1209,14 +1212,26 @@ async def _handle_bucket_route(ctx: _S3RequestContext) -> Response:
         # taxonomy stays truthful for the other cases: malformed name,
         # an existing general-purpose bucket, or no bucket at all.
         bucket_class = bucket_type_of(ctx.db, bucket)
+        # The mode selects ReadOnly or ReadWrite credentials, so it must be
+        # covered by the signature: an unsigned header is a mutation the
+        # client never authenticated. AWS treats the whole header set as
+        # signed material; TeleDrive enforced that for the session token but
+        # not for this one.
+        requested_mode = request.headers.get("x-amz-create-session-mode")
+        if (requested_mode is not None
+                and "x-amz-create-session-mode"
+                not in signed_header_names(request)):
+            return _error(
+                "AccessDenied",
+                "x-amz-create-session-mode must be signed", 403)
         error = create_session_error(
             bucket,
             bucket_class=bucket_class,
-            session_mode=request.headers.get("x-amz-create-session-mode"),
+            session_mode=requested_mode,
         )
         if error is not None:
             return _error(error.code, str(error), error.status)
-        mode = request.headers.get("x-amz-create-session-mode") or "ReadWrite"
+        mode = requested_mode or "ReadWrite"
         session = S3ExpressSessionStore(ctx.db, ctx.master).issue(
             bucket, mode, ctx.owner)
         return Response(create_session_xml(session),

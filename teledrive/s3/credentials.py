@@ -155,14 +155,32 @@ def ensure_credential_tags_column(db) -> None:
 
 
 def load_master_key() -> bytes:
+    """The master key: the file when it exists, else the environment value.
+
+    The web service always exports TELEDRIVE_S3_MASTER_KEY_FILE (with the
+    /config default), so treating a non-empty variable as unconditional
+    file mode made the documented TELEDRIVE_S3_MASTER_KEY fallback
+    unreachable in exactly the deployment shape the docs describe. An
+    existing file still wins; a missing one falls through to the value.
+    """
     secret_file = os.environ.get("TELEDRIVE_S3_MASTER_KEY_FILE", "").strip()
-    if secret_file:
+    env_key = os.environ.get("TELEDRIVE_S3_MASTER_KEY", "")
+    if secret_file and os.path.exists(secret_file):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(secret_file, flags)
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(256).strip()
+    elif env_key.strip():
+        data = env_key.encode("ascii").strip()
+    elif secret_file:
+        # No file and no value: keep the file error, which names the path
+        # the operator expected.
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(secret_file, flags)
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(256).strip()
     else:
-        data = os.environ.get("TELEDRIVE_S3_MASTER_KEY", "").encode("ascii").strip()
+        data = b""
     try:
         Fernet(data)
     except (ValueError, TypeError) as exc:

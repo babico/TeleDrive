@@ -175,7 +175,7 @@ tailwind.config = {
     </div>
     <div class="card bg-gray-900 mt-3" x-show="quotaEditAccount" x-cloak>
     <h4 x-text="'Soft quota — ' + quotaEditAccount"></h4>
-    <p class="muted text-xs">Preferred routing keeps this account under its soft quota. Empty = unlimited. Enforcement (routing) is the next increment; today it is monitored here, in metrics and in health checks.</p>
+    <p class="muted text-xs">Preferred routing keeps this account under its soft quota. Empty = unlimited. The gateway already prefers an under-quota account when it picks a destination; the allowance is advisory, so an over-quota account is still used when no under-quota one is available.</p>
     <div class="row" style="align-items:flex-end">
       <div class="field" style="flex:0 0 240px"><label>Soft quota (bytes)</label><input x-model="quotaEditBytes" class="input" type="number" placeholder="unlimited"></div>
       <button class="btn btn-primary btn-sm" @click="saveAccountQuota()">Save</button>

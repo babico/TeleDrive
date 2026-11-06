@@ -104,6 +104,21 @@ _ENSURED_ENGINES: "weakref.WeakSet" = weakref.WeakSet()
 _ENSURED_LOCK = threading.Lock()
 
 
+def _is_missing_bucket_fk(exc: BaseException) -> bool:
+    """True when a write was rejected because its bucket row is gone.
+
+    The bucket-name foreign keys cascade (schema step 31), so a config
+    write that raced a DeleteBucket fails with an FK violation. Callers
+    must see "no such bucket", not an internal error.
+    """
+    from sqlalchemy.exc import IntegrityError
+    if not isinstance(exc, IntegrityError):
+        return False
+    text_value = str(getattr(exc, "orig", exc)).lower()
+    return ("foreign key" in text_value
+            or "1452" in text_value or "23503" in text_value)
+
+
 class TieringError(ValueError):
     def __init__(self, code: str, message: str, status: int = 400):
         super().__init__(message)
@@ -400,8 +415,15 @@ class TieringStore:
                     created_ns=now_ns, updated_ns=now_ns,
                 ))
             self.db.commit()
-        except BaseException:
+        except BaseException as exc:
             self.db.connection.rollback()
+            # The bucket can be deleted between _bucket_exists and this
+            # commit; the cascading foreign key then rejects the insert.
+            # That is the same outcome as "no such bucket", never a 500.
+            if _is_missing_bucket_fk(exc):
+                raise TieringError(
+                    "NoSuchBucket", "Bucket was deleted before the write "
+                    "committed", 404) from exc
             raise
         return config
 

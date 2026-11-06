@@ -8,6 +8,52 @@ Entries describe the behaviour change and why it mattered. A version is
 listed only after its commits exist; a release tag is cut separately after
 the mandatory checks pass on the exact SHA.
 
+## [1.0.11] - 2026-11-06
+
+The audit release. Four auditors read all 54 documentation pages and checked
+roughly 3,600 claims against the code. Nine real defects surfaced — IPv6
+`Host` headers rejected, `rest_max_upload_bytes: 0` unconfigurable, the
+master-key environment fallback dead in the web service, `HEAD` on a public
+website 405, an unsigned `CreateSession` mode header, a ranged
+`CopyObject` that bypassed the bucket quota, two AES256 rules accepted,
+client ciphertext entering the content index, and six configuration stores
+turning a bucket-delete race into a 500 — and every one is fixed. Schema
+31 makes bucket deletion atomic with a real cascading foreign key.
+
+### Added
+
+- **Full lifecycle filtering:** `ObjectSizeGreaterThan`/`ObjectSizeLessThan`
+  with AWS's exclusive bounds and 0–5 TiB range, inside `And` alongside
+  prefix and tags, applied by the evaluator (missing size fails closed).
+- **Cyberduck as a tested client:** the real `duck` 9.6.0 CLI runs a live
+  round trip in CI, and multipart uploads complete — the zero-length
+  `?uploads=` initiation is exempt from the unsigned-upload rule when it
+  declares `Content-Length: 0` (never a chunked body), which unblocked
+  every upload above Cyberduck's multipart threshold.
+- **`s3:BypassGovernanceRetention`** as a real scope wired to the retention
+  route, and **`bucket-owner-read`** honoured.
+- **Admin re-archive route** for a suspect cold archive, and the
+  **S3 Express zonal verification** page that hands the SDK-endpoint
+  question to the owner as a recorded check.
+
+### Changed
+
+- **Bucket deletion is one statement (schema 31).** Every bucket-name-keyed
+  configuration table gets an `ON DELETE CASCADE` foreign key, so a
+  configuration write racing a delete can no longer orphan a row; the six
+  stores that would have surfaced it as a 500 now answer `NoSuchBucket`.
+  SQLite rebuilds the tables and enforces foreign keys from now on.
+- **SigV4 canonical query** accepts both the wire-bytes form botocore signs
+  and the spec-literal re-encoded form.
+- **`/site/...` accepts HEAD** as the handler and the guide always claimed.
+- **Range copies obey the bucket quota.**
+- **The master key falls back to `TELEDRIVE_S3_MASTER_KEY`** when the
+  configured file does not exist.
+- **`rest_max_upload_bytes: 0`** is accepted and disables uploads, as the
+  guides state.
+- **`CreateSession` requires the mode header to be signed.**
+- **Content indexing skips `TDENC1`** client-encrypted payloads.
+
 ## [1.0.10] - 2026-11-05
 
 The fidelity release. The S3 fidelity program landed in full: real

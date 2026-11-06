@@ -11,6 +11,7 @@ points at them and summarises the theme of each release.
 
 | Version | Date | Theme |
 | --- | --- | --- |
+| [1.0.11](https://github.com/babico/TeleDrive/releases/tag/v1.0.11) | 2026-11-06 | The audit release: ~3,600 documented claims verified against the code, nine defects fixed, atomic bucket deletion with a cascading FK (schema 31), full lifecycle filtering, Cyberduck proven as a client. |
 | [1.0.10](https://github.com/babico/TeleDrive/releases/tag/v1.0.10) | 2026-11-05 | The fidelity release: directory buckets with session credentials, a physical cold archive with real RestoreObject, AWS-exact null-version/ACL/policy/lock semantics, part reads, the enforced bootstrap rotation, and the complete per-operation evidence program. Schema 30. |
 | [1.0.9](https://github.com/babico/TeleDrive/releases/tag/v1.0.9) | 2026-11-02 | The review release: 55 verified defects closed with regression tests, InnoDB deadlock recovery, schema 27 identity constraints, the documentation site, WTFPL. |
 | [1.0.8](https://github.com/babico/TeleDrive/releases/tag/v1.0.8) | 2026-10-28 | S3 metadata parity (policies, ACLs, object lock, notifications, replication, website, reports, SSE-C), HTTP Basic removed, API-key delegation ceilings, opt-in envelope encryption, serialized schema coordinator. |

@@ -8,21 +8,22 @@ approval to operate on production data or to delete Telegram messages.
 
 | Item | Value |
 | --- | --- |
-| Current release line | **v1.0.10** |
+| Current release line | **v1.0.11** |
 | Tag / commit | `v1.0.10` resolves to `fa61ca29e8bfd679ab049013ae7c8878c417f6a7`; `v1.0.9` resolves to `69a503ab07b4d372d3dcdba887204228c3e52c4f` |
+| Previous release | `v1.0.10` at `fa61ca29e8bfd679ab049013ae7c8878c417f6a7` |
 | Previous release | `v1.0.9` at `69a503ab07b4d372d3dcdba887204228c3e52c4f` |
 | Previous release | `v1.0.8` at `7d2aa773d3839a65899815dd9f3fa2ed2e534324` |
 | Previous release | `v1.0.7` at `747747652cd1ca36878453d49daf627d8c0a60ad` |
-| Package version | `1.0.10` in `pyproject.toml` |
+| Package version | `1.0.11` in `pyproject.toml` |
 | Schema version | 31 recorded, append-only steps in the current tree; **v1.0.10 shipped schema 30** |
 | S3 inventory | **114 supported / 0 partial / 2 unsupported** of 116 operations |
 
-The tag message and [release notes](releases/v1.0.10.md) state that all seven
+The tag message and [release notes](releases/v1.0.11.md) state that all seven
 mandatory workflows (the six service workflows plus the Docs build) were green
 on the tagged SHA. This page does not copy
 run logs: confirm the exact SHA in
 [Actions](https://github.com/babico/TeleDrive/actions) before treating it as
-evidence. Commits after the v1.0.10 tag are post-release and are not in the image or
+evidence. Commits after the v1.0.11 tag are post-release and are not in the image or
 the release notes.
 
 Do not claim a newer SHA than the one a check actually ran on. A green commit

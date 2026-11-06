@@ -59,7 +59,7 @@ S3-compatible gateway. This site is the operator manual and the reference.
   opt-in envelope encryption described in [Encryption](guide/encryption.md).
 
 !!! warning "Release boundary"
-    [v1.0.10](https://github.com/babico/TeleDrive/releases/tag/v1.0.10) is the
+    [v1.0.11](https://github.com/babico/TeleDrive/releases/tag/v1.0.11) is the
     last tagged release. `main` may be ahead of those binaries. Read
     [Project status](project/status.md) before treating any of this as
     production-ready for data you cannot lose.

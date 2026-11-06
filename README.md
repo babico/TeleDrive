@@ -70,7 +70,7 @@ the same process, not a separate service. There is no `--profile s3`.
 > Encrypt content before upload if Telegram itself must not be able to read
 > it, or enable envelope encryption.
 >
-> **Release boundary:** [v1.0.10](https://github.com/babico/TeleDrive/releases/tag/v1.0.10)
+> **Release boundary:** [v1.0.11](https://github.com/babico/TeleDrive/releases/tag/v1.0.11)
 > is the last tagged release; `main` may be ahead of those binaries.
 
 ## Documentation
